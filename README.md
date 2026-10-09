@@ -54,7 +54,7 @@ The apply mode uses one atomic batch per room, skips schema-v2 rooms and rooms w
 
 Legacy `is_pro` and `plan` profile values are not trusted because older clients could write them. Treat existing accounts as Standard until a trusted billing backend verifies their subscription; remove or quarantine unverified legacy values before restoring Pro access.
 
-Room documents and listing documents expire after 24 hours. Firestore TTL can remove expired documents asynchronously, but deleting a parent document does not recursively delete its subcollections. Configure TTL on both `chat_rooms` and `chat_room_listings`, and add a scheduled cleanup for each expired room's `messages`, `members`, and `private` subcollections.
+Room documents and listing documents expire after 24 hours. The scheduled `cleanupExpiredChatData` function runs hourly, recursively deleting expired rooms and their `messages`, `members`, and `private` subcollections, plus expired discovery listings. It also deletes general chat messages older than 30 days. Deploy the function before relying on these retention periods.
 
 ## Account Deletion
 

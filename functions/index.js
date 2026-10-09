@@ -7,7 +7,9 @@ const {
 } = require('firebase-admin/firestore');
 const { getStorage } = require('firebase-admin/storage');
 const { HttpsError, onCall } = require('firebase-functions/v2/https');
+const { onSchedule } = require('firebase-functions/v2/scheduler');
 const { hasRecentAuthentication } = require('./account_deletion_policy');
+const { getRetentionCutoffs } = require('./retention_policy');
 
 const storageBucket = process.env.FIREBASE_STORAGE_BUCKET
   || 'navoramapa.firebasestorage.app';
@@ -211,4 +213,79 @@ exports.deleteAccount = onCall(
     },
 );
 
+async function deleteExpiredRooms(db, cutoff) {
+  let deleted = 0;
+  while (true) {
+    const snapshot = await db
+        .collection('chat_rooms')
+        .where('expires_at', '<=', cutoff)
+        .orderBy('expires_at')
+        .limit(PAGE_SIZE)
+        .get();
+    if (snapshot.empty) return deleted;
+
+    for (const room of snapshot.docs) {
+      await db.recursiveDelete(room.ref);
+      await db.collection('chat_room_listings').doc(room.id).delete();
+      deleted++;
+    }
+  }
+}
+
+async function deleteExpiredDocuments(db, collectionName, fieldName, cutoff) {
+  let deleted = 0;
+  while (true) {
+    const snapshot = await db
+        .collection(collectionName)
+        .where(fieldName, '<=', cutoff)
+        .orderBy(fieldName)
+        .limit(PAGE_SIZE)
+        .get();
+    if (snapshot.empty) return deleted;
+
+    const batch = db.batch();
+    for (const document of snapshot.docs) batch.delete(document.ref);
+    await batch.commit();
+    deleted += snapshot.size;
+  }
+}
+
+async function cleanupExpiredChatData(db = getFirestore(), now = new Date()) {
+  const cutoffs = getRetentionCutoffs(now);
+  const expiredRooms = await deleteExpiredRooms(
+      db,
+      cutoffs.roomsExpiresAtOrBefore,
+  );
+  const expiredListings = await deleteExpiredDocuments(
+      db,
+      'chat_room_listings',
+      'expires_at',
+      cutoffs.roomsExpiresAtOrBefore,
+  );
+  const oldPublicMessages = await deleteExpiredDocuments(
+      db,
+      'public_chat_messages',
+      'createdAt',
+      cutoffs.publicMessagesCreatedAtOrBefore,
+  );
+
+  return { expiredRooms, expiredListings, oldPublicMessages };
+}
+
+exports.cleanupExpiredChatData = onSchedule(
+    {
+      schedule: 'every 60 minutes',
+      timeZone: 'Etc/UTC',
+      timeoutSeconds: 540,
+      memory: '1GiB',
+      maxInstances: 1,
+    },
+    async () => {
+      const result = await cleanupExpiredChatData();
+      console.log('Expired chat data cleanup complete.', result);
+      return result;
+    },
+);
+
 exports.deleteUserData = deleteUserData;
+exports.cleanupExpiredChatDataHandler = cleanupExpiredChatData;
