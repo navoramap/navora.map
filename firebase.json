@@ -23,6 +23,7 @@
         "lib/firebase_options.dart": {
           "projectId": "navoramapa",
           "configurations": {
+            "android": "1:348191564859:android:e968d86eb14ed94102281e",
             "ios": "1:348191564859:ios:93702b7970299e9a02281e"
           }
         }
