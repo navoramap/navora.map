@@ -73,14 +73,6 @@ void main() {
     expect(find.text('Standart plan'), findsOneWidget);
     expect(find.text('Pro plan'), findsNothing);
 
-    await tester.scrollUntilVisible(find.text('Hesabımı sil'), 300);
-    expect(find.text('Hesabımı sil'), findsOneWidget);
-    await tester.tap(find.text('Hesabımı sil'));
-    await tester.pumpAndSettle();
-    expect(find.text('Hesap kalıcı olarak silinsin mi?'), findsOneWidget);
-    await tester.tap(find.text('Vazgeç'));
-    await tester.pumpAndSettle();
-    expect(find.text('Hesap kalıcı olarak silinsin mi?'), findsNothing);
   });
 
   test(

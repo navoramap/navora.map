@@ -11,6 +11,7 @@ import 'package:speech_to_text/speech_to_text.dart';
 import 'package:flutter/foundation.dart' show kIsWeb;
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
+import 'package:cloud_functions/cloud_functions.dart';
 import 'package:firebase_auth/firebase_auth.dart';
 import 'package:firebase_ai/firebase_ai.dart';
 import 'package:cloud_firestore/cloud_firestore.dart';
@@ -515,6 +516,7 @@ class _HomePageState extends State<HomePage> {
 
   // Pro & Oda Sınırı Değişkenleri
   bool _isProUser = false;
+  bool _isDeletingAccount = false;
   bool _canManageExploreHighlights = false;
   BitmapDescriptor? _chatRoomMarkerIcon;
   bool _locationPermissionGranted = false;
@@ -8577,6 +8579,15 @@ out center tags;
 
           const SizedBox(height: 18),
 
+          if (!isGuest)
+            _buildProfileMenuItem(
+              icon: Icons.delete_forever_rounded,
+              title: _isDeletingAccount ? 'Hesap siliniyor...' : 'Hesabımı sil',
+              subtitle: 'Hesabını ve ilişkili verileri kalıcı olarak sil',
+              isDangerous: true,
+              onTap: _isDeletingAccount ? () {} : _deleteAccount,
+            ),
+
           _buildProfileMenuItem(
             icon: isGuest ? Icons.login_rounded : Icons.logout_rounded,
             title: isGuest ? 'Giriş Yap' : 'Çıkış Yap',
@@ -8589,6 +8600,51 @@ out center tags;
         ],
       ),
     );
+  }
+
+  Future<void> _deleteAccount() async {
+    final confirmed = await showDialog<bool>(
+      context: context,
+      builder: (dialogContext) => AlertDialog(
+        title: const Text('Hesap kalıcı olarak silinsin mi?'),
+        content: const Text(
+          'Profilin, kayıtların, ilanların, mesajların ve hesabına bağlı dosyalar silinecek. Bu işlem geri alınamaz.',
+        ),
+        actions: [
+          TextButton(
+            onPressed: () => Navigator.pop(dialogContext, false),
+            child: const Text('Vazgeç'),
+          ),
+          FilledButton(
+            style: FilledButton.styleFrom(
+              backgroundColor: Theme.of(context).colorScheme.error,
+            ),
+            onPressed: () => Navigator.pop(dialogContext, true),
+            child: const Text('Hesabımı sil'),
+          ),
+        ],
+      ),
+    );
+    if (!mounted || confirmed != true) return;
+
+    setState(() => _isDeletingAccount = true);
+    try {
+      await FirebaseFunctions.instance
+          .httpsCallable('deleteAccount')
+          .call<Map<String, dynamic>>();
+      if (mounted) widget.onLogout();
+    } on FirebaseFunctionsException catch (error) {
+      if (!mounted) return;
+      final message = error.code == 'failed-precondition'
+          ? 'Güvenlik için çıkış yapıp tekrar giriş yaptıktan sonra hesabını silebilirsin.'
+          : 'Hesap silinemedi. Lütfen tekrar deneyin.';
+      _showTrackingMessage(message);
+    } catch (_) {
+      if (!mounted) return;
+      _showTrackingMessage('Hesap silinemedi. Lütfen tekrar deneyin.');
+    } finally {
+      if (mounted) setState(() => _isDeletingAccount = false);
+    }
   }
 
   // --- MODAL PENCERELERİ ---

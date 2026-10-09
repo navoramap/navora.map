@@ -1,5 +1,4 @@
 import 'package:cloud_firestore/cloud_firestore.dart';
-import 'package:cloud_functions/cloud_functions.dart';
 import 'package:firebase_auth/firebase_auth.dart';
 import 'package:flutter/material.dart';
 
@@ -16,8 +15,6 @@ class _ProfilePageState extends State<ProfilePage> {
   final List<Map<String, String>> _savedRoutes = [];
   final List<Map<String, String>> _savedLocations = [];
   final List<Map<String, String>> _drivingHistory = [];
-  bool _isDeletingAccount = false;
-
   @override
   void initState() {
     super.initState();
@@ -95,61 +92,6 @@ class _ProfilePageState extends State<ProfilePage> {
         _savedLocations.clear();
         _drivingHistory.clear();
       });
-    }
-  }
-
-  Future<void> _deleteAccount() async {
-    final confirmed = await showDialog<bool>(
-      context: context,
-      builder: (dialogContext) => AlertDialog(
-        title: const Text('Hesap kalıcı olarak silinsin mi?'),
-        content: const Text(
-          'Profilin, kayıtların, ilanların, mesajların ve hesabına bağlı dosyalar silinecek. Bu işlem geri alınamaz.',
-        ),
-        actions: [
-          TextButton(
-            onPressed: () => Navigator.pop(dialogContext, false),
-            child: const Text('Vazgeç'),
-          ),
-          FilledButton(
-            style: FilledButton.styleFrom(
-              backgroundColor: Theme.of(context).colorScheme.error,
-            ),
-            onPressed: () => Navigator.pop(dialogContext, true),
-            child: const Text('Hesabımı sil'),
-          ),
-        ],
-      ),
-    );
-    if (!mounted || confirmed != true) return;
-
-    setState(() => _isDeletingAccount = true);
-    try {
-      await FirebaseFunctions.instance
-          .httpsCallable('deleteAccount')
-          .call<Map<String, dynamic>>();
-      await FirebaseAuth.instance.signOut();
-      if (!mounted) return;
-      Navigator.of(context).pushAndRemoveUntil(
-        MaterialPageRoute(builder: (_) => const MainWrapper()),
-        (route) => false,
-      );
-    } on FirebaseFunctionsException catch (error) {
-      if (!mounted) return;
-      final message = error.code == 'failed-precondition'
-          ? 'Güvenlik için çıkış yapıp tekrar giriş yaptıktan sonra hesabını silebilirsin.'
-          : 'Hesap silinemedi. Lütfen tekrar deneyin.';
-      ScaffoldMessenger.of(context)
-          .showSnackBar(SnackBar(content: Text(message)));
-    } catch (_) {
-      if (!mounted) return;
-      ScaffoldMessenger.of(context).showSnackBar(
-        const SnackBar(
-          content: Text('Hesap silinemedi. Lütfen tekrar deneyin.'),
-        ),
-      );
-    } finally {
-      if (mounted) setState(() => _isDeletingAccount = false);
     }
   }
 
@@ -269,23 +211,6 @@ class _ProfilePageState extends State<ProfilePage> {
               ),
               const SizedBox(height: 16),
               _buildMembershipCard(context),
-              const SizedBox(height: 24),
-              OutlinedButton.icon(
-                onPressed: _isDeletingAccount ? null : _deleteAccount,
-                icon: _isDeletingAccount
-                    ? const SizedBox.square(
-                        dimension: 18,
-                        child: CircularProgressIndicator(strokeWidth: 2),
-                      )
-                    : const Icon(Icons.delete_outline),
-                label: Text(
-                  _isDeletingAccount ? 'Hesap siliniyor...' : 'Hesabımı sil',
-                ),
-                style: OutlinedButton.styleFrom(
-                  foregroundColor: colors.error,
-                  side: BorderSide(color: colors.error),
-                ),
-              ),
             ],
           );
         },
