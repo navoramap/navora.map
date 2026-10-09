@@ -1,0 +1,118 @@
+rules_version = '2';
+
+service firebase.storage {
+  match /b/{bucket}/o {
+    match /property_listings/{uid}/{listingId}/{photoIndex} {
+      function listingPath() {
+        return /databases/(default)/documents/property_listings/$(listingId);
+      }
+
+      function ownsPendingListing() {
+        return request.auth != null
+            && request.auth.uid == uid
+            && firestore.exists(listingPath())
+            && firestore.get(listingPath()).data.owner_uid == uid
+            && firestore.get(listingPath()).data.status == 'pending_review';
+      }
+
+      function activeListingExists() {
+        return firestore.exists(listingPath())
+            && firestore.get(listingPath()).data.status == 'active';
+      }
+
+      allow read: if request.auth != null
+          && photoIndex.matches('^[0-4]$')
+          && ((request.auth.uid == uid && ownsPendingListing())
+              || activeListingExists());
+      allow create: if ownsPendingListing()
+          && photoIndex.matches('^[0-4]$')
+          && request.resource.size > 0
+          && request.resource.size <= 5 * 1024 * 1024
+          && request.resource.contentType.matches('image/(jpeg|png|webp)');
+      allow update: if false;
+      allow delete: if ownsPendingListing()
+          && photoIndex.matches('^[0-4]$');
+    }
+
+    match /lost_pet_reports/{uid}/{reportId}/{photoIndex} {
+      function reportPath() {
+        return /databases/(default)/documents/lost_pet_reports/$(reportId);
+      }
+
+      function ownsActiveReport() {
+        return request.auth != null
+            && request.auth.uid == uid
+            && firestore.exists(reportPath())
+            && firestore.get(reportPath()).data.owner_uid == uid
+            && firestore.get(reportPath()).data.status == 'active';
+      }
+
+      function activeReportExists() {
+        return firestore.exists(reportPath())
+            && firestore.get(reportPath()).data.status == 'active';
+      }
+
+      allow read: if request.auth != null
+          && photoIndex.matches('^[0-2]$')
+          && activeReportExists();
+      allow create: if ownsActiveReport()
+          && photoIndex.matches('^[0-2]$')
+          && request.resource.size > 0
+          && request.resource.size <= 5 * 1024 * 1024
+          && request.resource.contentType.matches('image/(jpeg|png|webp)');
+      allow update: if false;
+      allow delete: if ownsActiveReport() && photoIndex.matches('^[0-2]$');
+    }
+
+    match /pet_adoption_listings/{uid}/{listingId}/{photoIndex} {
+      function listingPath() {
+        return /databases/(default)/documents/pet_adoption_listings/$(listingId);
+      }
+
+      function ownsActiveListing() {
+        return request.auth != null
+            && request.auth.uid == uid
+            && firestore.exists(listingPath())
+            && firestore.get(listingPath()).data.owner_uid == uid
+            && firestore.get(listingPath()).data.status == 'active';
+      }
+
+      function activeListingExists() {
+        return firestore.exists(listingPath())
+            && firestore.get(listingPath()).data.status == 'active';
+      }
+
+      allow read: if request.auth != null
+          && photoIndex.matches('^[0-2]$')
+          && activeListingExists();
+      allow create: if ownsActiveListing()
+          && photoIndex.matches('^[0-2]$')
+          && request.resource.size > 0
+          && request.resource.size <= 5 * 1024 * 1024
+          && request.resource.contentType.matches('image/(jpeg|png|webp)');
+      allow update: if false;
+      allow delete: if ownsActiveListing() && photoIndex.matches('^[0-2]$');
+    }
+
+    match /community_places/{uid}/{placeId}/cover {
+      function placePath() {
+        return /databases/(default)/documents/community_places/$(placeId);
+      }
+
+      function ownsPlace() {
+        return request.auth != null
+            && request.auth.uid == uid
+            && firestore.exists(placePath())
+            && firestore.get(placePath()).data.owner_uid == uid;
+      }
+
+      allow read: if request.auth != null;
+      allow create: if ownsPlace()
+          && request.resource.size > 0
+          && request.resource.size <= 5 * 1024 * 1024
+          && request.resource.contentType.matches('image/(jpeg|png|webp)');
+      allow update: if false;
+      allow delete: if ownsPlace();
+    }
+  }
+}

@@ -1,0 +1,45 @@
+<svg width="1024" height="1024" viewBox="0 0 1024 1024" fill="none" xmlns="http://www.w3.org/2000/svg">
+  <defs>
+    <linearGradient id="bg" x1="156" y1="146" x2="870" y2="880" gradientUnits="userSpaceOnUse">
+      <stop stop-color="#091F2F"/>
+      <stop offset="1" stop-color="#0C2136"/>
+    </linearGradient>
+    <linearGradient id="leftGrad" x1="250" y1="230" x2="735" y2="710" gradientUnits="userSpaceOnUse">
+      <stop stop-color="#0E9BEA"/>
+      <stop offset="1" stop-color="#2C7BFF"/>
+    </linearGradient>
+    <linearGradient id="rightGrad" x1="416" y1="330" x2="808" y2="724" gradientUnits="userSpaceOnUse">
+      <stop stop-color="#31D0FF"/>
+      <stop offset="1" stop-color="#16A9FF"/>
+    </linearGradient>
+    <linearGradient id="roadGrad" x1="260" y1="520" x2="770" y2="820" gradientUnits="userSpaceOnUse">
+      <stop stop-color="#1EBBFF"/>
+      <stop offset="1" stop-color="#1C7BFF"/>
+    </linearGradient>
+    <linearGradient id="whiteGrad" x1="416" y1="314" x2="624" y2="675" gradientUnits="userSpaceOnUse">
+      <stop stop-color="#F6FBFF"/>
+      <stop offset="1" stop-color="#EAF4FF"/>
+    </linearGradient>
+  </defs>
+
+  <rect x="0" y="0" width="1024" height="1024" rx="220" fill="url(#bg)"/>
+
+  <circle cx="512" cy="512" r="330" stroke="#42D7FF" stroke-opacity="0.9" stroke-width="34" stroke-linecap="round" stroke-dasharray="0 1380"/>
+  <path d="M248 655C345 566 447 515 683 547C708 550 728 567 728 589C728 610 710 626 685 629C497 657 398 708 280 798C255 819 220 811 208 780C194 745 210 698 248 655Z" fill="url(#leftGrad)"/>
+  <path d="M280 660C410 550 498 496 659 474C682 471 701 486 707 507C713 528 705 552 681 565C562 624 472 697 355 785C321 812 276 801 256 770C239 744 249 690 280 660Z" fill="url(#rightGrad)"/>
+
+  <path d="M238 706C303 630 398 559 480 532C496 527 507 516 507 500C507 482 495 468 476 468H468C343 468 265 497 196 554C161 586 139 627 139 676C139 706 158 734 189 740C208 744 220 733 238 706Z" fill="url(#leftGrad)"/>
+
+  <path d="M513 248L666 388L521 682L495 724L469 682L323 388L513 248Z" fill="url(#whiteGrad)"/>
+  <path d="M513 318L602 455H515L429 455L513 318Z" fill="#DCEBFF" opacity="0.88"/>
+
+  <path d="M518 760C463 721 422 711 302 711H232C176 711 132 748 132 796V818C132 868 173 909 224 909H500C551 909 566 864 540 835L518 760Z" fill="url(#roadGrad)"/>
+
+  <path d="M420 770L640 770" stroke="#F7FBFF" stroke-width="28" stroke-linecap="round"/>
+  <path d="M770 400C770 379 783 362 804 362H876C896 362 910 379 910 400V419C910 440 896 457 876 457H804C783 457 770 440 770 419V400Z" fill="#F0F8FF" fill-opacity="0.9"/>
+  <path d="M186 400C186 379 199 362 220 362H290C311 362 325 379 325 400V419C325 440 311 457 290 457H220C199 457 186 440 186 419V400Z" fill="#F0F8FF" fill-opacity="0.9"/>
+
+  <path d="M518 246V319" stroke="#0B2137" stroke-opacity="0.6" stroke-width="18" stroke-linecap="round"/>
+  <path d="M170 680L221 680" stroke="#F1F9FF" stroke-width="20" stroke-linecap="round" stroke-opacity="0.8"/>
+  <path d="M803 680L854 680" stroke="#F1F9FF" stroke-width="20" stroke-linecap="round" stroke-opacity="0.8"/>
+</svg>

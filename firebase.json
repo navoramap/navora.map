@@ -1,0 +1,39 @@
+{
+  "storage": {
+    "rules": "storage.rules"
+  },
+  "firestore": {
+    "rules": "firestore.rules",
+    "indexes": "firestore.indexes.json"
+  },
+  "emulators": {
+    "firestore": {
+      "port": 8080
+    },
+    "storage": {
+      "port": 9199
+    },
+    "ui": {
+      "enabled": false
+    }
+  },
+  "flutter": {
+    "platforms": {
+      "dart": {
+        "lib/firebase_options.dart": {
+          "projectId": "navoramapa",
+          "configurations": {
+            "ios": "1:348191564859:ios:93702b7970299e9a02281e"
+          }
+        }
+      },
+      "android": {
+        "default": {
+          "projectId": "navoramapa",
+          "appId": "1:348191564859:android:e968d86eb14ed94102281e",
+          "fileOutput": "android/app/google-services.json"
+        }
+      }
+    }
+  }
+}

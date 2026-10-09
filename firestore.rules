@@ -1,0 +1,1082 @@
+rules_version = '2';
+
+service cloud.firestore {
+  match /databases/{database}/documents {
+    // =============================================================
+    // Assumed data model
+    // =============================================================
+    // users/{uid}: profile and private account metadata.
+    // users/{uid}/{subcollection}/{document}: saved routes, addresses,
+    // driving history, route history, SOS contacts, point ledger and AI chats.
+    // road_reports/{reportId}: expiring community reports with bounded
+    // confirmation_count/incorrect_count counters. Each user may create one
+    // immutable feedback/{uid} vote per report; its vote and counter update
+    // must be committed atomically.
+    // community_places/{placeId}: authenticated community-submitted places,
+    // owned by owner_uid and visible to signed-in users.
+    // chat_rooms/{roomId}: shared rooms owned by owner_id and member_ids.
+    // public_chat_messages/{messageId}: shared messages owned by senderId.
+    // chat_message_reports/{reportId}: moderation reports owned by reported_by.
+    // pet_adoption_listings/{listingId}: authenticated, owner-managed adoption
+    // listings with public map coordinates and explicitly shared contact phone.
+    //
+    // This is a prototype policy based on the current client data model.
+    // Review it before production deployment.
+
+    function signedIn() {
+      return request.auth != null;
+    }
+
+    function isUser(uid) {
+      return signedIn() && request.auth.uid == uid;
+    }
+
+    function hasOnly(fields) {
+      return request.resource.data.keys().hasOnly(fields);
+    }
+
+    function timestampOrMissing(data, field) {
+      return !(field in data) || data[field] is timestamp;
+    }
+
+    function optionalString(data, field, maxLength) {
+      return !(field in data)
+          || data[field] == null
+          || (data[field] is string && data[field].size() <= maxLength);
+    }
+
+    function optionalCoordinate(data, field, minValue, maxValue) {
+      return !(field in data)
+          || data[field] == null
+          || (data[field] is number
+              && data[field] >= minValue
+              && data[field] <= maxValue);
+    }
+
+    function serverManagedProfileFieldsUnchanged() {
+      return unchangedIfPresent('is_pro')
+          && unchangedIfPresent('plan')
+          && unchangedIfPresent('navora_points')
+          && unchangedIfPresent('daily_quota_date')
+          && unchangedIfPresent('daily_rooms_created')
+          && unchangedIfPresent('daily_ai_queries_used')
+          && unchangedIfPresent('visited_cities');
+    }
+
+    function unchangedIfPresent(field) {
+      return (field in resource.data
+          && field in request.resource.data
+          && request.resource.data[field] == resource.data[field])
+        || (!(field in resource.data)
+          && !(field in request.resource.data));
+    }
+
+    function noClientManagedProfileFields(data) {
+      return !data.keys().hasAny([
+        'is_pro', 'plan', 'navora_points', 'daily_quota_date',
+        'daily_rooms_created', 'daily_ai_queries_used', 'visited_cities'
+      ]);
+    }
+
+    function validDrivingAnalytics(analytics) {
+      return analytics is map
+          && analytics.keys().hasOnly([
+            'total_distance_km', 'average_speed_kmh',
+            'driving_score', 'saved_co2_kg'
+          ])
+          && (!('total_distance_km' in analytics) ||
+              (analytics.total_distance_km is number &&
+               analytics.total_distance_km >= 0 &&
+               analytics.total_distance_km <= 10000000))
+          && (!('average_speed_kmh' in analytics) ||
+              (analytics.average_speed_kmh is number &&
+               analytics.average_speed_kmh >= 0 &&
+               analytics.average_speed_kmh <= 300))
+          && (!('driving_score' in analytics) ||
+              (analytics.driving_score is number &&
+               analytics.driving_score >= 0 &&
+               analytics.driving_score <= 100))
+          && (!('saved_co2_kg' in analytics) ||
+              (analytics.saved_co2_kg is number &&
+               analytics.saved_co2_kg >= 0 &&
+               analytics.saved_co2_kg <= 10000000));
+    }
+
+    function validPreferenceAt(preferences, index) {
+      return preferences.size() <= index
+          || preferences[index] in [
+            'Kafeler', 'Restoranlar', 'Doğa',
+            'Tarih & kültür', 'Alışveriş', 'Etkinlikler'
+          ];
+    }
+
+    function validExplorePreferences(preferences) {
+      return preferences is list
+          && preferences.size() <= 6
+          && preferences.toSet().size() == preferences.size()
+          && validPreferenceAt(preferences, 0)
+          && validPreferenceAt(preferences, 1)
+          && validPreferenceAt(preferences, 2)
+          && validPreferenceAt(preferences, 3)
+          && validPreferenceAt(preferences, 4)
+          && validPreferenceAt(preferences, 5);
+    }
+
+    function validStopAt(stops, index) {
+      return stops.size() <= index
+          || (stops[index] is string
+              && stops[index].size() > 0
+              && stops[index].size() <= 120);
+    }
+
+    function validUserProfile(data) {
+      return hasOnly([
+          'display_name', 'email', 'phone', 'terms_accepted',
+          'privacy_accepted', 'email_marketing_accepted',
+          'consent_updated_at', 'photo_url', 'provider', 'gender_preference',
+          'gender', 'bio', 'selected_vehicle', 'vehicle_brand_model',
+          'vehicle_km', 'monthly_driving_analytics', 'explore_preferences',
+          'created_at', 'updated_at',
+          'is_pro', 'plan', 'navora_points', 'daily_quota_date',
+          'daily_rooms_created', 'daily_ai_queries_used', 'visited_cities'
+        ])
+        && (!('display_name' in data) ||
+            (data.display_name is string && data.display_name.size() <= 120))
+        && (!('email' in data) ||
+            (data.email == null ||
+             (data.email is string && data.email.size() <= 254)))
+        && (!('phone' in data) ||
+            (data.phone is string && data.phone.size() <= 40))
+        && (!('terms_accepted' in data) || data.terms_accepted is bool)
+        && (!('privacy_accepted' in data) || data.privacy_accepted is bool)
+        && (!('email_marketing_accepted' in data) ||
+            data.email_marketing_accepted is bool)
+        && (!('photo_url' in data) ||
+          (data.photo_url == null ||
+           (data.photo_url is string && data.photo_url.size() <= 2048)))
+        && (!('provider' in data) ||
+          (data.provider is string && data.provider.size() <= 40))
+        && optionalString(data, 'bio', 300)
+        && (!('gender_preference' in data) ||
+          data.gender_preference == null ||
+          (data.gender_preference is string &&
+           data.gender_preference in [
+             'Kadin', 'Erkek', 'Belirtmek istemiyorum'
+           ]))
+        && (!('gender' in data) || data.gender == null ||
+          (data.gender is string && data.gender.size() <= 40))
+        && (!('selected_vehicle' in data) ||
+          data.selected_vehicle in [
+            'Araba', 'Motosiklet', 'Bisiklet', 'Yürüyüş'
+          ])
+        && optionalString(data, 'vehicle_brand_model', 100)
+        && optionalString(data, 'vehicle_km', 32)
+        && (!('monthly_driving_analytics' in data) ||
+          validDrivingAnalytics(data.monthly_driving_analytics))
+        && (!('explore_preferences' in data) ||
+          validExplorePreferences(data.explore_preferences))
+        && (!('is_pro' in data) || data.is_pro is bool)
+        && (!('plan' in data) || data.plan in ['standard', 'pro'])
+        && (!('navora_points' in data) ||
+          (data.navora_points is int && data.navora_points >= 0 &&
+           data.navora_points <= 10000000))
+        && (!('daily_quota_date' in data) ||
+          (data.daily_quota_date is string &&
+           data.daily_quota_date.matches('^\\d{4}-\\d{2}-\\d{2}$')))
+        && (!('daily_rooms_created' in data) ||
+          (data.daily_rooms_created is int &&
+           data.daily_rooms_created >= 0 && data.daily_rooms_created <= 100))
+        && (!('daily_ai_queries_used' in data) ||
+          (data.daily_ai_queries_used is int &&
+           data.daily_ai_queries_used >= 0 &&
+           data.daily_ai_queries_used <= 100))
+        && (!('visited_cities' in data) ||
+          (data.visited_cities is list &&
+           data.visited_cities.size() <= 500 &&
+           data.visited_cities.toSet().size() == data.visited_cities.size()))
+        && timestampOrMissing(data, 'consent_updated_at')
+        && timestampOrMissing(data, 'created_at')
+        && timestampOrMissing(data, 'updated_at')
+        && (!('updated_at' in data) || data.updated_at == request.time);
+    }
+
+    function validOwnedDocument(data) {
+      return data.keys().size() <= 40;
+    }
+
+    function unchanged(field) {
+      return !(field in request.resource.data) ||
+          request.resource.data[field] == resource.data[field];
+    }
+
+    function roomPath(roomId) {
+      return /databases/$(database)/documents/chat_rooms/$(roomId);
+    }
+
+    function listingPath(roomId) {
+      return /databases/$(database)/documents/chat_room_listings/$(roomId);
+    }
+
+    function memberPath(roomId, uid) {
+      return /databases/$(database)/documents/chat_rooms/$(roomId)/members/$(uid);
+    }
+
+    function accessPath(roomId) {
+      return /databases/$(database)/documents/chat_rooms/$(roomId)/private/access;
+    }
+
+    function isRoomOwner(roomId) {
+      return signedIn() && exists(roomPath(roomId))
+          && get(roomPath(roomId)).data.owner_id == request.auth.uid;
+    }
+
+    function canReadRoom(roomId) {
+      let room = get(roomPath(roomId)).data;
+      return signedIn()
+          && room.schema_version == 2
+          && (room.owner_id == request.auth.uid
+              || room.is_protected != true
+              || exists(memberPath(roomId, request.auth.uid)));
+    }
+
+    function canReadRoomAfter(roomId) {
+      let room = getAfter(roomPath(roomId)).data;
+      return signedIn()
+          && room.schema_version == 2
+          && (room.owner_id == request.auth.uid
+              || room.is_protected != true
+              || existsAfter(memberPath(roomId, request.auth.uid)));
+    }
+
+    function validRoom(data) {
+      return data.keys().hasOnly([
+            'schema_version', 'owner_id', 'name', 'type', 'active_users',
+            'active_users_count', 'member_ids', 'moderator_ids', 'latitude',
+            'longitude', 'is_protected', 'password_salt', 'created_at',
+            'updated_at', 'expires_at', 'max_users'
+          ])
+          && data.keys().hasAll([
+            'schema_version', 'owner_id', 'name', 'type', 'active_users',
+            'active_users_count', 'member_ids', 'moderator_ids', 'latitude',
+            'longitude', 'is_protected', 'password_salt', 'created_at',
+            'updated_at', 'expires_at', 'max_users'
+          ])
+          && data.schema_version == 2
+          && data.owner_id is string
+          && data.owner_id.size() > 0
+          && data.owner_id.size() <= 128
+          && data.name is string
+          && data.name.size() > 0
+          && data.name.size() <= 80
+          && data.type is string
+          && data.type.size() <= 40
+          && data.active_users is string
+          && data.active_users.size() <= 80
+          && data.active_users_count is int
+          && data.active_users_count >= 1
+          && data.active_users_count <= 50
+          && data.member_ids is list
+          && data.member_ids.size() >= 1
+          && data.member_ids.size() <= 50
+          && data.owner_id in data.member_ids
+          && data.moderator_ids is list
+          && data.moderator_ids.size() <= 20
+          && data.latitude is number
+          && data.latitude >= -90
+          && data.latitude <= 90
+          && data.longitude is number
+          && data.longitude >= -180
+          && data.longitude <= 180
+          && data.is_protected is bool
+          && data.password_salt is string
+          && data.password_salt.size() <= 64
+          && (data.is_protected ? data.password_salt.size() >= 16
+                                : data.password_salt == '')
+          && data.created_at is timestamp
+          && data.updated_at is timestamp
+          && data.expires_at is timestamp
+          && data.expires_at > request.time
+          && data.expires_at <= request.time + duration.value(2, 'd')
+          && data.max_users is int
+          && data.max_users >= 2
+          && data.max_users <= 50;
+    }
+
+    function validRoomListing(data) {
+      return data.keys().hasOnly([
+            'owner_id', 'name', 'type', 'active_users', 'active_users_count',
+            'latitude', 'longitude', 'is_protected', 'password_salt',
+            'created_at', 'updated_at', 'expires_at', 'max_users'
+          ])
+          && data.keys().hasAll([
+            'owner_id', 'name', 'type', 'active_users', 'active_users_count',
+            'latitude', 'longitude', 'is_protected', 'password_salt',
+            'created_at', 'updated_at', 'expires_at', 'max_users'
+          ])
+          && data.owner_id is string
+          && data.owner_id.size() > 0
+          && data.owner_id.size() <= 128
+          && data.name is string
+          && data.name.size() > 0
+          && data.name.size() <= 80
+          && data.type is string
+          && data.type.size() <= 40
+          && data.active_users is string
+          && data.active_users.size() <= 80
+          && data.active_users_count is int
+          && data.active_users_count >= 1
+          && data.active_users_count <= 50
+          && data.latitude is number
+          && data.latitude >= -90
+          && data.latitude <= 90
+          && data.longitude is number
+          && data.longitude >= -180
+          && data.longitude <= 180
+          && data.is_protected is bool
+          && data.password_salt is string
+          && data.password_salt.size() <= 64
+          && (data.is_protected ? data.password_salt.size() >= 16
+                                : data.password_salt == '')
+          && data.created_at is timestamp
+          && data.updated_at is timestamp
+          && data.expires_at is timestamp
+          && data.expires_at > request.time
+          && data.expires_at <= request.time + duration.value(2, 'd')
+          && data.max_users is int
+          && data.max_users >= 2
+          && data.max_users <= 50;
+    }
+
+            function roomListingMatchesRoom(listing, room) {
+          return listing.owner_id == room.owner_id
+              && listing.name == room.name
+              && listing.type == room.type
+              && listing.active_users == room.active_users
+              && listing.active_users_count == room.active_users_count
+              && listing.latitude == room.latitude
+              && listing.longitude == room.longitude
+              && listing.is_protected == room.is_protected
+              && listing.password_salt == room.password_salt
+              && listing.created_at == room.created_at
+              && listing.updated_at == room.updated_at
+              && listing.expires_at == room.expires_at
+              && listing.max_users == room.max_users;
+            }
+
+    function validRoomMessage(data) {
+      return data.keys().hasOnly([
+            'sender', 'sender_id', 'text', 'time', 'created_at'
+          ])
+          && data.keys().hasAll(['sender', 'sender_id', 'text', 'time', 'created_at'])
+          && data.sender is string
+          && data.sender.size() > 0
+          && data.sender.size() <= 80
+          && data.sender_id == request.auth.uid
+          && data.text is string
+          && data.text.size() > 0
+          && data.text.size() <= 2000
+          && data.time is string
+          && data.time.size() <= 24
+          && data.created_at is timestamp
+          && data.created_at == request.time;
+    }
+
+    match /users/{uid} {
+      allow read: if isUser(uid);
+        allow create: if isUser(uid)
+          && validUserProfile(request.resource.data)
+          && noClientManagedProfileFields(request.resource.data);
+      allow update: if isUser(uid)
+          && validUserProfile(request.resource.data)
+          && unchanged('created_at')
+          && serverManagedProfileFieldsUnchanged();
+      allow delete: if isUser(uid);
+
+      match /{subcollection}/{documentId} {
+        allow read: if isUser(uid);
+        allow create: if isUser(uid) && validOwnedDocument(request.resource.data);
+        allow update: if isUser(uid) && validOwnedDocument(request.resource.data);
+        allow delete: if isUser(uid);
+      }
+    }
+
+    match /property_listings/{listingId} {
+      function validPhotoUrl(url) {
+        return url is string
+            && url.size() <= 2048
+            && url.matches('^https://firebasestorage.googleapis.com/.*$');
+      }
+
+      function validPhotoUrls(data) {
+        return data.photo_urls is list
+            && data.photo_urls.size() <= 5
+            && (data.photo_urls.size() < 1 || validPhotoUrl(data.photo_urls[0]))
+            && (data.photo_urls.size() < 2 || validPhotoUrl(data.photo_urls[1]))
+            && (data.photo_urls.size() < 3 || validPhotoUrl(data.photo_urls[2]))
+            && (data.photo_urls.size() < 4 || validPhotoUrl(data.photo_urls[3]))
+            && (data.photo_urls.size() < 5 || validPhotoUrl(data.photo_urls[4]))
+            && ((data.photo_urls.size() == 0 && data.cover_image_url == '')
+                || (data.photo_urls.size() > 0
+                    && data.cover_image_url == data.photo_urls[0]));
+      }
+
+      function validPropertyListing(data, ownerUid) {
+        return data.keys().hasOnly([
+              'owner_uid', 'listing_type', 'title', 'price', 'currency',
+              'city', 'district', 'address', 'latitude', 'longitude', 'area_sqm',
+              'rooms', 'description', 'photo_urls', 'cover_image_url',
+              'status', 'created_at', 'updated_at'
+            ])
+            && data.keys().hasAll([
+              'owner_uid', 'listing_type', 'title', 'price', 'currency',
+              'city', 'district', 'address', 'latitude', 'longitude', 'area_sqm',
+              'rooms', 'description', 'photo_urls', 'cover_image_url',
+              'status', 'created_at', 'updated_at'
+            ])
+            && data.owner_uid == ownerUid
+            && data.owner_uid.size() > 0
+            && data.owner_uid.size() <= 128
+            && data.listing_type in ['kiralik', 'satilik']
+            && data.title is string
+            && data.title.size() >= 3
+            && data.title.size() <= 100
+            && data.price is int
+            && data.price >= 1
+            && data.price <= 5000000000
+            && data.currency == 'TRY'
+            && data.city is string
+            && data.city.size() > 0
+            && data.city.size() <= 60
+            && data.district is string
+            && data.district.size() > 0
+            && data.district.size() <= 80
+            && data.address is string
+            && data.address.size() >= 8
+            && data.address.size() <= 250
+            && data.latitude is number
+            && data.latitude >= -90
+            && data.latitude <= 90
+            && data.longitude is number
+            && data.longitude >= -180
+            && data.longitude <= 180
+            && data.area_sqm is int
+            && data.area_sqm >= 1
+            && data.area_sqm <= 10000
+            && data.rooms in ['1+0', '1+1', '2+1', '3+1', '4+1', '5+']
+            && data.description is string
+            && data.description.size() > 0
+            && data.description.size() <= 1000
+            && data.cover_image_url is string
+            && data.cover_image_url.size() <= 2048
+            && validPhotoUrls(data)
+            && data.status == 'pending_review'
+            && data.created_at is timestamp
+            && data.updated_at is timestamp
+            && data.updated_at == request.time;
+      }
+
+      allow read: if signedIn()
+          && (resource.data.status == 'active'
+              || resource.data.owner_uid == request.auth.uid);
+      allow create: if signedIn()
+          && validPropertyListing(request.resource.data, request.auth.uid)
+          && request.resource.data.created_at == request.time;
+      allow update: if signedIn()
+          && resource.data.owner_uid == request.auth.uid
+          && resource.data.status == 'pending_review'
+          && request.resource.data.diff(resource.data).affectedKeys().hasOnly([
+            'photo_urls', 'cover_image_url', 'updated_at'
+          ])
+          && validPropertyListing(request.resource.data, request.auth.uid)
+          && request.resource.data.created_at == resource.data.created_at;
+      allow delete: if signedIn()
+          && resource.data.owner_uid == request.auth.uid
+          && resource.data.status == 'pending_review';
+    }
+
+    match /pet_adoption_listings/{listingId} {
+      function validAdoptionPhotoUrl(url) {
+        return url is string
+            && url.size() <= 2048
+            && url.matches('^https://firebasestorage.googleapis.com/.*$');
+      }
+
+      function validAdoptionPhotoUrls(data) {
+        return data.photo_urls is list
+            && data.photo_urls.size() <= 3
+            && (data.photo_urls.size() < 1 || validAdoptionPhotoUrl(data.photo_urls[0]))
+            && (data.photo_urls.size() < 2 || validAdoptionPhotoUrl(data.photo_urls[1]))
+            && (data.photo_urls.size() < 3 || validAdoptionPhotoUrl(data.photo_urls[2]))
+            && ((data.photo_urls.size() == 0 && data.cover_image_url == '')
+                || (data.photo_urls.size() > 0
+                    && data.cover_image_url == data.photo_urls[0]));
+      }
+
+      function validAdoptionListing(data, ownerUid) {
+        return data.keys().hasOnly([
+              'owner_uid', 'pet_type', 'pet_name', 'description', 'city',
+              'district', 'address', 'latitude', 'longitude', 'contact_phone',
+              'contact_phone_shared', 'photo_urls', 'cover_image_url', 'status',
+              'created_at', 'updated_at'
+            ])
+            && data.keys().hasAll([
+              'owner_uid', 'pet_type', 'pet_name', 'description', 'city',
+              'district', 'address', 'latitude', 'longitude', 'contact_phone',
+              'contact_phone_shared', 'photo_urls', 'cover_image_url', 'status',
+              'created_at', 'updated_at'
+            ])
+            && data.owner_uid == ownerUid
+            && data.pet_type in ['dog', 'cat', 'other']
+            && data.pet_name is string
+            && data.pet_name.size() <= 60
+            && data.description is string
+            && data.description.size() >= 10
+            && data.description.size() <= 800
+            && data.city is string
+            && data.city.size() > 0
+            && data.city.size() <= 60
+            && data.district is string
+            && data.district.size() > 0
+            && data.district.size() <= 80
+            && data.address is string
+            && data.address.size() >= 8
+            && data.address.size() <= 250
+            && data.latitude is number
+            && data.latitude >= -90
+            && data.latitude <= 90
+            && data.longitude is number
+            && data.longitude >= -180
+            && data.longitude <= 180
+            && data.contact_phone is string
+            && data.contact_phone.size() >= 7
+            && data.contact_phone.size() <= 40
+            && data.contact_phone_shared == true
+            && data.cover_image_url is string
+            && data.cover_image_url.size() <= 2048
+            && validAdoptionPhotoUrls(data)
+            && data.status in ['active', 'resolved']
+            && data.created_at is timestamp
+            && data.updated_at is timestamp;
+      }
+
+      allow read: if signedIn()
+          && (resource.data.status == 'active'
+              || resource.data.owner_uid == request.auth.uid);
+      allow create: if signedIn()
+          && validAdoptionListing(request.resource.data, request.auth.uid)
+          && request.resource.data.status == 'active'
+          && request.resource.data.created_at == request.time
+          && request.resource.data.updated_at == request.time;
+      allow update: if signedIn()
+          && resource.data.owner_uid == request.auth.uid
+          && resource.data.status == 'active'
+          && validAdoptionListing(request.resource.data, resource.data.owner_uid)
+          && request.resource.data.created_at == resource.data.created_at
+          && request.resource.data.updated_at == request.time
+          && (
+            (request.resource.data.diff(resource.data).affectedKeys().hasOnly([
+                'photo_urls', 'cover_image_url', 'updated_at'
+              ])
+              && request.resource.data.status == 'active')
+            ||
+            (request.resource.data.diff(resource.data).affectedKeys().hasOnly([
+                'status', 'updated_at'
+              ])
+              && request.resource.data.status == 'resolved')
+          );
+      allow delete: if signedIn()
+          && resource.data.owner_uid == request.auth.uid;
+    }
+
+    match /lost_pet_reports/{reportId} {
+      function validLostPetPhotoUrl(url) {
+        return url is string
+            && url.size() <= 2048
+            && url.matches('^https://firebasestorage.googleapis.com/.*$');
+      }
+
+      function validLostPetPhotoUrls(data) {
+        return data.photo_urls is list
+            && data.photo_urls.size() <= 3
+            && (data.photo_urls.size() < 1 || validLostPetPhotoUrl(data.photo_urls[0]))
+            && (data.photo_urls.size() < 2 || validLostPetPhotoUrl(data.photo_urls[1]))
+            && (data.photo_urls.size() < 3 || validLostPetPhotoUrl(data.photo_urls[2]))
+            && ((data.photo_urls.size() == 0 && data.cover_image_url == '')
+                || (data.photo_urls.size() > 0
+                    && data.cover_image_url == data.photo_urls[0]));
+      }
+
+      function validLostPetReport(data, ownerUid) {
+        return data.keys().hasOnly([
+              'owner_uid', 'pet_type', 'pet_name', 'description', 'city',
+              'district', 'address', 'latitude', 'longitude', 'last_seen_at',
+              'contact_phone', 'contact_phone_shared', 'photo_urls',
+              'cover_image_url', 'status', 'created_at', 'updated_at'
+            ])
+            && data.keys().hasAll([
+              'owner_uid', 'pet_type', 'pet_name', 'description', 'city',
+              'district', 'address', 'latitude', 'longitude', 'last_seen_at',
+              'contact_phone', 'contact_phone_shared', 'photo_urls',
+              'cover_image_url', 'status', 'created_at', 'updated_at'
+            ])
+            && data.owner_uid == ownerUid
+            && data.pet_type in ['dog', 'cat', 'other']
+            && data.pet_name is string
+            && data.pet_name.size() <= 60
+            && data.description is string
+            && data.description.size() >= 10
+            && data.description.size() <= 800
+            && data.city is string
+            && data.city.size() > 0
+            && data.city.size() <= 60
+            && data.district is string
+            && data.district.size() > 0
+            && data.district.size() <= 80
+            && data.address is string
+            && data.address.size() >= 8
+            && data.address.size() <= 250
+            && data.latitude is number
+            && data.latitude >= -90
+            && data.latitude <= 90
+            && data.longitude is number
+            && data.longitude >= -180
+            && data.longitude <= 180
+            && data.last_seen_at is timestamp
+            && data.last_seen_at <= request.time + duration.value(5, 'm')
+            && data.last_seen_at >= request.time - duration.value(60, 'd')
+            && data.contact_phone is string
+            && data.contact_phone.size() >= 7
+            && data.contact_phone.size() <= 40
+            && data.contact_phone_shared == true
+            && data.cover_image_url is string
+            && data.cover_image_url.size() <= 2048
+            && validLostPetPhotoUrls(data)
+            && data.status == 'active'
+            && data.created_at is timestamp
+            && data.created_at == request.time
+            && data.updated_at is timestamp
+            && data.updated_at == request.time;
+      }
+
+      allow read: if signedIn()
+          && (resource.data.status == 'active'
+              || resource.data.owner_uid == request.auth.uid);
+      allow create: if signedIn()
+          && validLostPetReport(request.resource.data, request.auth.uid);
+      allow update: if signedIn()
+          && resource.data.owner_uid == request.auth.uid
+          && resource.data.status == 'active'
+          && (
+            (request.resource.data.diff(resource.data).affectedKeys().hasOnly([
+                'photo_urls', 'cover_image_url', 'updated_at'
+              ])
+              && request.resource.data.status == 'active'
+              && validLostPetPhotoUrls(request.resource.data)
+              && request.resource.data.updated_at is timestamp
+              && request.resource.data.updated_at == request.time)
+            ||
+            (request.resource.data.diff(resource.data).affectedKeys().hasOnly([
+                'status', 'updated_at'
+              ])
+              && request.resource.data.status == 'resolved'
+              && request.resource.data.updated_at is timestamp
+              && request.resource.data.updated_at == request.time)
+          );
+      allow delete: if signedIn()
+          && resource.data.owner_uid == request.auth.uid;
+    }
+
+    match /road_reports/{reportId} {
+      allow read: if signedIn();
+      allow create: if signedIn()
+          && request.resource.data.user_id == request.auth.uid
+          && request.resource.data.keys().hasOnly([
+            'user_id', 'type', 'description', 'latitude', 'longitude',
+            'created_at', 'expires_at', 'confirmation_count', 'incorrect_count'
+          ])
+          && request.resource.data.keys().hasAll([
+            'user_id', 'type', 'description', 'latitude', 'longitude',
+            'created_at', 'expires_at', 'confirmation_count', 'incorrect_count'
+          ])
+          && request.resource.data.user_id is string
+          && request.resource.data.type in [
+            'Radar', 'Trafik', 'Yol çalışması', 'Kaza'
+          ]
+          && request.resource.data.description is string
+          && request.resource.data.description.size() > 0
+          && request.resource.data.description.size() <= 500
+          && request.resource.data.latitude is number
+          && request.resource.data.latitude >= -90
+          && request.resource.data.latitude <= 90
+          && request.resource.data.longitude is number
+          && request.resource.data.longitude >= -180
+          && request.resource.data.longitude <= 180
+          && request.resource.data.created_at is timestamp
+          && request.resource.data.created_at == request.time
+          && request.resource.data.expires_at is timestamp
+          && request.resource.data.expires_at > request.time
+          && request.resource.data.expires_at <=
+              request.time + duration.value(24, 'h')
+          && request.resource.data.confirmation_count is int
+          && request.resource.data.confirmation_count == 0
+          && request.resource.data.incorrect_count is int
+          && request.resource.data.incorrect_count == 0;
+
+      function validFeedbackCounterUpdate(field, vote) {
+        let feedbackPath = /databases/$(database)/documents/road_reports/$(reportId)/feedback/$(request.auth.uid);
+        let currentCount = field in resource.data
+            ? resource.data[field]
+            : 0;
+        return signedIn()
+            && resource.data.user_id != request.auth.uid
+            && resource.data.expires_at > request.time
+            && request.resource.data.diff(resource.data).affectedKeys().hasOnly([field])
+            && request.resource.data[field] is int
+            && request.resource.data[field] == currentCount + 1
+            && request.resource.data[field] <= 1000000
+            && !exists(feedbackPath)
+            && existsAfter(feedbackPath)
+            && getAfter(feedbackPath).data.vote == vote
+            && getAfter(feedbackPath).data.created_at == request.time;
+      }
+
+      allow update: if validFeedbackCounterUpdate(
+            'confirmation_count', 'confirmed'
+          )
+          || validFeedbackCounterUpdate('incorrect_count', 'incorrect');
+      allow delete: if signedIn() && resource.data.user_id == request.auth.uid;
+
+      match /feedback/{userId} {
+        function validFeedbackCreate() {
+          let reportPath = /databases/$(database)/documents/road_reports/$(reportId);
+          let report = get(reportPath).data;
+          let reportAfter = getAfter(reportPath).data;
+          let vote = request.resource.data.vote;
+          let countField = vote == 'confirmed'
+              ? 'confirmation_count'
+              : 'incorrect_count';
+          let currentCount = countField in report
+              ? report[countField]
+              : 0;
+
+          return isUser(userId)
+              && exists(reportPath)
+              && report.user_id != request.auth.uid
+              && report.expires_at > request.time
+              && request.resource.data.keys().hasOnly(['vote', 'created_at'])
+              && request.resource.data.keys().hasAll(['vote', 'created_at'])
+              && vote in ['confirmed', 'incorrect']
+              && request.resource.data.created_at is timestamp
+              && request.resource.data.created_at == request.time
+              && reportAfter.diff(report).affectedKeys().hasOnly([countField])
+              && reportAfter[countField] == currentCount + 1
+              && reportAfter[countField] <= 1000000;
+        }
+
+        allow get: if isUser(userId);
+        allow list: if false;
+        allow create: if validFeedbackCreate();
+        allow update, delete: if false;
+      }
+    }
+
+    match /community_places/{placeId} {
+      function validCommunityPlace(data, ownerUid) {
+        return data.keys().hasOnly([
+              'owner_uid', 'name', 'category', 'description', 'address',
+            'latitude', 'longitude', 'created_at', 'photo_url'
+            ])
+            && data.keys().hasAll([
+              'owner_uid', 'name', 'category', 'description', 'address',
+              'latitude', 'longitude', 'created_at'
+            ])
+            && data.owner_uid == ownerUid
+            && data.name is string
+            && data.name.size() >= 2
+            && data.name.size() <= 100
+            && data.category in [
+              'Kafe', 'Restoran', 'Doğa', 'Tarih & kültür',
+              'Alışveriş', 'Market', 'Etkinlik', 'Diğer'
+            ]
+            && data.description is string
+            && data.description.size() <= 500
+            && data.address is string
+            && data.address.size() <= 200
+            && data.latitude is number
+            && data.latitude >= -90
+            && data.latitude <= 90
+            && data.longitude is number
+            && data.longitude >= -180
+            && data.longitude <= 180
+            && data.created_at is timestamp
+            && (!data.keys().hasAny(['photo_url'])
+              || (data.photo_url is string
+                && data.photo_url.size() <= 2048
+                && data.photo_url.matches('^https://.*')));
+      }
+
+      allow read: if signedIn();
+      allow create: if signedIn()
+          && validCommunityPlace(request.resource.data, request.auth.uid)
+          && request.resource.data.created_at == request.time;
+      allow update: if signedIn()
+          && resource.data.owner_uid == request.auth.uid
+          && validCommunityPlace(request.resource.data, request.auth.uid)
+          && request.resource.data.created_at == resource.data.created_at;
+      allow delete: if signedIn()
+          && resource.data.owner_uid == request.auth.uid;
+    }
+
+    match /chat_rooms/{roomId} {
+      allow get: if signedIn()
+          && (resource.data.owner_id == request.auth.uid
+              || resource.data.is_protected != true
+              || exists(memberPath(roomId, request.auth.uid)));
+      allow list: if false;
+      allow create: if signedIn()
+          && request.resource.data.owner_id == request.auth.uid
+          && validRoom(request.resource.data)
+          && request.resource.data.member_ids.size() == 1
+          && request.resource.data.member_ids[0] == request.auth.uid
+          && request.resource.data.active_users_count == 1
+          && request.resource.data.created_at == request.time
+          && request.resource.data.updated_at == request.time
+          && roomListingMatchesRoom(
+            getAfter(listingPath(roomId)).data,
+            request.resource.data
+          )
+          && getAfter(listingPath(roomId)).data.owner_id == request.auth.uid
+          && getAfter(memberPath(roomId, request.auth.uid)).data.joined_at == request.time
+          && (!request.resource.data.is_protected ||
+              getAfter(accessPath(roomId)).data.password_hash ==
+                getAfter(memberPath(roomId, request.auth.uid)).data.password_hash);
+      allow update: if signedIn()
+          && resource.data.owner_id == request.auth.uid
+          && request.resource.data.owner_id == resource.data.owner_id
+          && validRoom(request.resource.data)
+          && request.resource.data.created_at == resource.data.created_at
+          && request.resource.data.diff(resource.data).affectedKeys().hasOnly([
+            'name', 'is_protected', 'password_salt', 'updated_at'
+          ])
+          && request.resource.data.updated_at == request.time
+          && roomListingMatchesRoom(
+            getAfter(listingPath(roomId)).data,
+            request.resource.data
+          )
+          || (signedIn()
+              && request.resource.data.owner_id == resource.data.owner_id
+              && validRoom(request.resource.data)
+              && request.resource.data.diff(resource.data).affectedKeys().hasOnly([
+                'member_ids', 'active_users_count', 'active_users', 'updated_at'
+              ])
+              && request.resource.data.member_ids is list
+              && request.resource.data.member_ids.size() ==
+                  resource.data.member_ids.size() + 1
+              && request.resource.data.member_ids.hasAll(resource.data.member_ids)
+              && !(request.auth.uid in resource.data.member_ids)
+              && request.auth.uid in request.resource.data.member_ids
+              && request.resource.data.member_ids.size() <= resource.data.max_users
+              && request.resource.data.active_users_count ==
+                  resource.data.active_users_count + 1
+              && request.resource.data.active_users_count ==
+                  request.resource.data.member_ids.size()
+              && request.resource.data.updated_at == request.time
+              && roomListingMatchesRoom(
+                getAfter(listingPath(roomId)).data,
+                request.resource.data
+              )
+              && !exists(memberPath(roomId, request.auth.uid))
+              && getAfter(memberPath(roomId, request.auth.uid)).data.joined_at == request.time);
+      allow delete: if isRoomOwner(roomId);
+
+      match /members/{memberId} {
+        allow get: if signedIn()
+            && (request.auth.uid == memberId || isRoomOwner(roomId));
+        allow list: if isRoomOwner(roomId);
+        allow create: if signedIn()
+            && memberId == request.auth.uid
+            && request.resource.data.keys().hasOnly(['password_hash', 'joined_at'])
+            && request.resource.data.keys().hasAll(['password_hash', 'joined_at'])
+            && request.resource.data.password_hash is string
+            && (request.resource.data.password_hash == '' ||
+                request.resource.data.password_hash.matches('^[0-9a-f]{64}$'))
+            && request.resource.data.joined_at is timestamp
+            && request.resource.data.joined_at == request.time
+            && existsAfter(roomPath(roomId))
+            && request.auth.uid in getAfter(roomPath(roomId)).data.member_ids
+            && existsAfter(listingPath(roomId))
+            && (!getAfter(roomPath(roomId)).data.is_protected ||
+                (request.resource.data.password_hash.size() == 64
+                 && existsAfter(accessPath(roomId))
+                 && getAfter(accessPath(roomId)).data.password_hash ==
+                    request.resource.data.password_hash));
+        allow update: if false;
+        allow delete: if isRoomOwner(roomId);
+      }
+
+      match /private/{documentId} {
+        allow get: if documentId == 'access' && isRoomOwner(roomId);
+        allow list: if false;
+        allow create, update: if documentId == 'access'
+            && signedIn()
+            && (isRoomOwner(roomId)
+                || getAfter(roomPath(roomId)).data.owner_id == request.auth.uid)
+            && request.resource.data.keys().hasOnly(['password_hash', 'updated_at'])
+            && request.resource.data.password_hash is string
+            && request.resource.data.password_hash.matches('^[0-9a-f]{64}$')
+            && request.resource.data.updated_at == request.time;
+        allow delete: if documentId == 'access' && isRoomOwner(roomId);
+      }
+
+      match /messages/{messageId} {
+        allow read: if canReadRoom(roomId);
+        allow create: if canReadRoomAfter(roomId)
+            && validRoomMessage(request.resource.data);
+        allow update: if false;
+        allow delete: if canReadRoom(roomId)
+            && (resource.data.sender_id == request.auth.uid
+                || isRoomOwner(roomId)
+                || request.auth.uid in get(roomPath(roomId)).data.moderator_ids);
+      }
+    }
+
+    match /chat_room_listings/{roomId} {
+      allow read: if signedIn();
+      allow create: if signedIn()
+          && request.resource.data.owner_id == request.auth.uid
+          && validRoomListing(request.resource.data)
+          && request.resource.data.active_users_count == 1
+          && request.resource.data.created_at == request.time
+          && request.resource.data.updated_at == request.time
+          && roomListingMatchesRoom(
+            request.resource.data,
+            getAfter(roomPath(roomId)).data
+          )
+          && getAfter(roomPath(roomId)).data.owner_id == request.auth.uid;
+      allow update: if signedIn()
+          && resource.data.owner_id == request.auth.uid
+          && request.resource.data.owner_id == resource.data.owner_id
+          && validRoomListing(request.resource.data)
+          && request.resource.data.created_at == resource.data.created_at
+          && request.resource.data.diff(resource.data).affectedKeys().hasOnly([
+            'name', 'is_protected', 'password_salt', 'updated_at'
+          ])
+          && request.resource.data.updated_at == request.time
+          && roomListingMatchesRoom(
+            request.resource.data,
+            getAfter(roomPath(roomId)).data
+          )
+          || (signedIn()
+              && request.resource.data.owner_id == resource.data.owner_id
+              && validRoomListing(request.resource.data)
+              && request.resource.data.diff(resource.data).affectedKeys().hasOnly([
+                'active_users', 'active_users_count', 'updated_at'
+              ])
+              && request.resource.data.active_users_count ==
+                  resource.data.active_users_count + 1
+              && request.resource.data.active_users_count <= resource.data.max_users
+              && request.resource.data.updated_at == request.time
+              && roomListingMatchesRoom(
+                request.resource.data,
+                getAfter(roomPath(roomId)).data
+              )
+              && request.auth.uid in getAfter(roomPath(roomId)).data.member_ids
+              && getAfter(memberPath(roomId, request.auth.uid)).data.joined_at == request.time);
+      allow delete: if signedIn() && resource.data.owner_id == request.auth.uid;
+    }
+
+    match /public_chat_messages/{messageId} {
+      allow read: if signedIn();
+      allow create: if signedIn()
+          && request.resource.data.senderId == request.auth.uid
+          && request.resource.data.keys().hasOnly([
+            'senderId', 'senderName', 'text', 'distance', 'latitude',
+            'longitude', 'createdAt'
+          ])
+          && request.resource.data.text is string
+          && request.resource.data.text.size() > 0
+          && request.resource.data.text.size() <= 2000
+          && request.resource.data.senderName is string
+          && request.resource.data.senderName.size() > 0
+          && request.resource.data.senderName.size() <= 120
+          && optionalString(request.resource.data, 'distance', 100)
+          && optionalCoordinate(request.resource.data, 'latitude', -90, 90)
+          && optionalCoordinate(request.resource.data, 'longitude', -180, 180)
+          && request.resource.data.createdAt is timestamp
+          && request.resource.data.createdAt == request.time;
+      allow update: if false;
+      allow delete: if signedIn() && resource.data.senderId == request.auth.uid;
+    }
+
+    match /chat_message_reports/{reportId} {
+      allow create: if signedIn()
+          && request.resource.data.reported_by == request.auth.uid
+          && request.resource.data.keys().hasOnly([
+            'room_id', 'reported_by', 'sender_id', 'text', 'created_at', 'status'
+          ])
+          && request.resource.data.created_at is timestamp
+          && request.resource.data.status == 'open';
+      allow read, update, delete: if false;
+    }
+
+    match /explore_highlights/{highlightId} {
+      function isExploreAdmin() {
+        return signedIn() && request.auth.token.admin == true;
+      }
+
+      function validExploreHighlight(data, editorUid) {
+        return data.keys().hasOnly([
+              'title', 'subtitle', 'image_url', 'action_url', 'icon_name',
+              'order', 'is_active', 'created_by', 'created_at', 'updated_at'
+            ])
+            && data.keys().hasAll([
+              'title', 'subtitle', 'image_url', 'action_url', 'icon_name',
+              'order', 'is_active', 'created_by', 'created_at', 'updated_at'
+            ])
+            && data.title is string
+            && data.title.size() > 0
+            && data.title.size() <= 70
+            && data.subtitle is string
+            && data.subtitle.size() <= 160
+            && data.image_url is string
+            && data.image_url.size() <= 2048
+            && data.image_url.matches('^https://.*$')
+            && data.action_url is string
+            && data.action_url.size() <= 2048
+            && (data.action_url == '' || data.action_url.matches('^https://.*$'))
+            && data.icon_name in [
+              'new_releases', 'pedal_bike', 'route', 'place',
+              'event', 'travel_explore', 'local_offer', 'campaign'
+            ]
+            && data.order is int
+            && data.order >= 0
+            && data.order <= 10000
+            && data.is_active is bool
+            && data.created_by == editorUid
+            && data.created_at is timestamp
+            && data.updated_at is timestamp;
+      }
+
+      allow read: if signedIn()
+          && (resource.data.is_active == true || isExploreAdmin());
+      allow create: if isExploreAdmin()
+          && validExploreHighlight(request.resource.data, request.auth.uid)
+          && request.resource.data.created_at == request.time
+          && request.resource.data.updated_at == request.time;
+      allow update: if isExploreAdmin()
+          && validExploreHighlight(request.resource.data, resource.data.created_by)
+          && request.resource.data.created_by == resource.data.created_by
+          && request.resource.data.created_at == resource.data.created_at
+          && request.resource.data.updated_at == request.time;
+      allow delete: if isExploreAdmin();
+    }
+
+    match /shared_lists/{listId} {
+      allow read, create, update, delete: if false;
+    }
+
+    match /{document=**} {
+      allow read, write: if false;
+    }
+  }
+}
