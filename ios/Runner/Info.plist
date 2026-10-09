@@ -34,6 +34,14 @@
 				<string>navora</string>
 			</array>
 		</dict>
+		<dict>
+			<key>CFBundleTypeRole</key>
+			<string>Editor</string>
+			<key>CFBundleURLSchemes</key>
+			<array>
+				<string>com.googleusercontent.apps.348191564859-5midietfkrqldc6l8f1r9vv30o4q89rh</string>
+			</array>
+		</dict>
 	</array>
 	<key>NSLocationWhenInUseUsageDescription</key>
 	<string>Navora Map, sürüş mesafesi ve hızını hesaplamak için konumunu kullanır.</string>

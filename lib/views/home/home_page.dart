@@ -421,7 +421,7 @@ class _HomePageState extends State<HomePage> {
     {"featureType":"administrative","elementType":"geometry","stylers":[{"visibility":"off"}]}
   ]''';
 
-  int _selectedIndex = 0;
+  int _selectedIndex = 1;
   final MapType _mapType = MapType.normal;
   GoogleMapController? _mapController;
   final TextEditingController _searchController = TextEditingController();
@@ -4663,6 +4663,8 @@ out center tags;
 
   @override
   Widget build(BuildContext context) {
+    final bottomSafeInset = MediaQuery.viewPaddingOf(context).bottom;
+
     return Theme(
       data: ThemeData.light().copyWith(
         scaffoldBackgroundColor: const Color(0xFF111111),
@@ -4670,6 +4672,7 @@ out center tags;
       child: Scaffold(
         resizeToAvoidBottomInset: false,
         body: SafeArea(
+          bottom: false,
           child: Stack(
             fit: StackFit.expand,
             children: [
@@ -4972,8 +4975,13 @@ out center tags;
                 right: 0,
                 bottom: 0,
                 child: Container(
-                  height: 72,
-                  padding: const EdgeInsets.fromLTRB(12, 8, 12, 12),
+                  height: 76 + bottomSafeInset,
+                  padding: EdgeInsets.fromLTRB(
+                    12,
+                    8,
+                    12,
+                    12 + bottomSafeInset,
+                  ),
                   decoration: BoxDecoration(
                     color: const Color(0xFFFF7A00),
                     border: const Border(
@@ -9879,23 +9887,29 @@ out center tags;
   }
 
   Future<bool> _ensureLocationPermission() async {
-    if (!await geo.Geolocator.isLocationServiceEnabled()) {
-      _showTrackingMessage('Konum hizmetlerini açmanız gerekiyor.');
-      return false;
-    }
-
     var permission = await geo.Geolocator.checkPermission();
     if (permission == geo.LocationPermission.denied) {
       permission = await geo.Geolocator.requestPermission();
     }
     if (permission == geo.LocationPermission.deniedForever) {
       _showTrackingMessage(
-        'Konum izni kalıcı olarak kapalı. Ayarlar üzerinden izin verin.',
+        'Konum izni kapalı. iPhone Ayarları’ndan Navora Map için izin verin.',
+        actionLabel: 'Ayarlar',
+        onAction: () => unawaited(geo.Geolocator.openAppSettings()),
       );
       return false;
     }
     if (permission == geo.LocationPermission.denied) {
       _showTrackingMessage('Konum izni gerekiyor.');
+      return false;
+    }
+
+    if (!await geo.Geolocator.isLocationServiceEnabled()) {
+      _showTrackingMessage(
+        'Konum servisleri kapalı. iPhone konum ayarlarını açın.',
+        actionLabel: 'Konum ayarları',
+        onAction: () => unawaited(geo.Geolocator.openLocationSettings()),
+      );
       return false;
     }
 
@@ -10253,10 +10267,20 @@ out center tags;
     }
   }
 
-  void _showTrackingMessage(String message) {
+  void _showTrackingMessage(
+    String message, {
+    String? actionLabel,
+    VoidCallback? onAction,
+  }) {
     if (!mounted) return;
-    ScaffoldMessenger.of(context)
-        .showSnackBar(SnackBar(content: Text(message)));
+    ScaffoldMessenger.of(context).showSnackBar(
+      SnackBar(
+        content: Text(message),
+        action: actionLabel != null && onAction != null
+            ? SnackBarAction(label: actionLabel, onPressed: onAction)
+            : null,
+      ),
+    );
   }
 
   void _showSosContactsDialog() {

@@ -315,7 +315,10 @@ Son güncelleme: 03.09.2026
       if (provider == 'Google') {
         final googleSignIn = GoogleSignIn.instance;
         await googleSignIn.initialize(
-          serverClientId: '1034975486898-4e7he1dh0tu4kjmut9ji4eio6bfc4jdp.apps.googleusercontent.com',
+          clientId:
+              '348191564859-5midietfkrqldc6l8f1r9vv30o4q89rh.apps.googleusercontent.com',
+          serverClientId:
+              '348191564859-m4ocm1b28056eshf92p0pib6oalr6m29.apps.googleusercontent.com',
         );
 
         final googleUser = await googleSignIn.authenticate();

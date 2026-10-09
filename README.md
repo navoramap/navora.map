@@ -56,10 +56,22 @@ Legacy `is_pro` and `plan` profile values are not trusted because older clients 
 
 Room documents and listing documents expire after 24 hours. Firestore TTL can remove expired documents asynchronously, but deleting a parent document does not recursively delete its subcollections. Configure TTL on both `chat_rooms` and `chat_room_listings`, and add a scheduled cleanup for each expired room's `messages`, `members`, and `private` subcollections.
 
+## Account Deletion
+
+The profile's **Hesabımı sil** action calls the `deleteAccount` Firebase callable. It requires recent authentication, recursively removes the user's private profile data, owned listings/reports/chat content, room memberships, and user-scoped Storage files, then deletes the Firebase Auth account. The operation is retryable if cleanup fails partway through.
+
+Before enabling this flow for users, install and test the backend, deploy it to the production project, and confirm the Functions runtime service account can access Firestore and Storage. Cloud Functions deployment requires the Firebase project to use the Blaze billing plan.
+
+```powershell
+npm ci --prefix functions
+npm test --prefix functions
+firebase deploy --only functions:deleteAccount --project navoramapa
+```
+
 ## Important Limitations
 
 - Pro purchase and cancellation are intentionally unavailable until app-store billing and trusted server-side receipt verification are implemented. Client writes cannot grant Pro.
 - Daily AI/room quotas and Navora points are currently device-local convenience state. They are not authoritative, do not sync across devices, and must not be used for billing, rewards with monetary value, or abuse prevention. Enforce quotas and point rewards in a trusted backend before launch.
 - Protected-room password checks use salted PBKDF2 verifiers, but joining has no server-side attempt throttling. Add a trusted join endpoint/rate limiter before exposing password-protected rooms to abuse.
 - Firestore security rules are prototypes. Run the emulator suite, migrate existing data, review the rules, and deploy only after confirming the migration and cleanup jobs in the target project.
-- Account deletion with complete cleanup of owned/shared data is not implemented yet.
+- Account deletion is implemented as a callable function, but it is unavailable until the function is deployed and verified against the production project's Firestore and Storage data model.
