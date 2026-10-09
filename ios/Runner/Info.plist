@@ -37,6 +37,10 @@
 	</array>
 	<key>NSLocationWhenInUseUsageDescription</key>
 	<string>Navora Map, sürüş mesafesi ve hızını hesaplamak için konumunu kullanır.</string>
+	<key>NSMicrophoneUsageDescription</key>
+	<string>Navora Map, sesli arama ve sesli navigasyon için mikrofon erişimi kullanır.</string>
+	<key>NSSpeechRecognitionUsageDescription</key>
+	<string>Navora Map, sesli arama ve sesli navigasyon komutlarını anlamak için konuşma tanımayı kullanır.</string>
 	<key>NSPhotoLibraryUsageDescription</key>
 	<string>İlanına fotoğraf eklemek için fotoğraf arşivine erişim gerekir.</string>
 	<key>LSRequiresIPhoneOS</key>
