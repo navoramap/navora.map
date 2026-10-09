@@ -412,11 +412,11 @@ class HomePage extends StatefulWidget {
 class _HomePageState extends State<HomePage> {
   static const Duration _chatRoomLifetime = Duration(hours: 24);
   static const String _darkGoogleMapStyle = '''[
-    {"featureType":"all","elementType":"geometry","stylers":[{"color":"#111111"}]},
+    {"featureType":"all","elementType":"geometry","stylers":[{"color":"#22282c"}]},
     {"featureType":"all","elementType":"labels.text.fill","stylers":[{"color":"#f5f5f5"}]},
     {"featureType":"all","elementType":"labels.text.stroke","stylers":[{"color":"#141414"}]},
-    {"featureType":"water","elementType":"geometry","stylers":[{"color":"#1b2731"}]},
-    {"featureType":"road","elementType":"geometry","stylers":[{"color":"#2b2b2b"}]},
+    {"featureType":"water","elementType":"geometry","stylers":[{"color":"#173344"}]},
+    {"featureType":"road","elementType":"geometry","stylers":[{"color":"#46535a"}]},
     {"featureType":"road","elementType":"labels.text.fill","stylers":[{"color":"#d9d9d9"}]},
     {"featureType":"transit","stylers":[{"visibility":"off"}]},
     {"featureType":"administrative","elementType":"geometry","stylers":[{"visibility":"off"}]}
@@ -4976,28 +4976,43 @@ out center tags;
                 left: 0,
                 right: 0,
                 bottom: 0,
-                child: Container(
+                child: SizedBox(
                   height: 76 + bottomSafeInset,
-                  padding: EdgeInsets.fromLTRB(
-                    12,
-                    8,
-                    12,
-                    12 + bottomSafeInset,
-                  ),
-                  decoration: BoxDecoration(
-                    color: const Color(0xFFFF7A00),
-                    border: const Border(
-                      top: BorderSide(color: Color(0xFFFFA04D), width: 1),
-                    ),
-                  ),
-                  child: Row(
-                    mainAxisAlignment: MainAxisAlignment.spaceAround,
+                  child: Stack(
                     children: [
-                      _buildNavItem(Icons.explore, 'Keşfet', 0),
-                      _buildNavItem(Icons.map_rounded, 'Harita', 1),
-                      _buildNavItem(Icons.auto_awesome, 'Navora AI', 2),
-                      _buildNavItem(Icons.forum, 'Sohbet', 3),
-                      _buildNavItem(Icons.person, 'Profil', 4),
+                      Positioned(
+                        left: 0,
+                        right: 0,
+                        bottom: bottomSafeInset,
+                        height: 76,
+                        child: Container(
+                          decoration: BoxDecoration(
+                            color: const Color(0xFFFF7A00),
+                            border: const Border(
+                              top: BorderSide(
+                                color: Color(0xFFFFA04D),
+                                width: 1,
+                              ),
+                            ),
+                          ),
+                        ),
+                      ),
+                      Positioned(
+                        left: 0,
+                        right: 0,
+                        bottom: 0,
+                        height: 56,
+                        child: Row(
+                          mainAxisAlignment: MainAxisAlignment.spaceAround,
+                          children: [
+                            _buildNavItem(Icons.explore, 'Keşfet', 0),
+                            _buildNavItem(Icons.map_rounded, 'Harita', 1),
+                            _buildNavItem(Icons.auto_awesome, 'Navora AI', 2),
+                            _buildNavItem(Icons.forum, 'Sohbet', 3),
+                            _buildNavItem(Icons.person, 'Profil', 4),
+                          ],
+                        ),
+                      ),
                     ],
                   ),
                 ),
@@ -11948,7 +11963,7 @@ $text''';
         height: 56,
         color: Colors.transparent,
         child: Column(
-          mainAxisAlignment: MainAxisAlignment.center,
+          mainAxisAlignment: MainAxisAlignment.start,
           children: [
             Icon(
               icon,
