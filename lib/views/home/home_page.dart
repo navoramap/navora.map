@@ -1,4 +1,4 @@
-﻿// ignore_for_file: avoid_types_as_parameter_names
+// ignore_for_file: avoid_types_as_parameter_names
 
 import 'dart:async';
 import 'dart:convert';
@@ -1362,7 +1362,8 @@ class _HomePageState extends State<HomePage> {
         .listen(
           (snapshot) {
             if (!mounted) return;
-            final places = snapshot.docs.map((document) {
+            final places = snapshot.docs
+                .map((document) {
               final data = document.data();
               return <String, dynamic>{
                 'id': document.id,
@@ -1375,19 +1376,22 @@ class _HomePageState extends State<HomePage> {
                 'latitude': (data['latitude'] as num?)?.toDouble(),
                 'longitude': (data['longitude'] as num?)?.toDouble(),
               };
-            }).where((place) {
+                })
+                .where((place) {
               return place['name'] is String &&
                   (place['name'] as String).isNotEmpty &&
                   place['latitude'] is double &&
                   place['longitude'] is double;
-            }).toList();
+                })
+                .toList();
             setState(() {
               _communityPlaces
                 ..clear()
                 ..addAll(places);
             });
           },
-          onError: (error) => debugPrint('Topluluk mekânları alınamadı: $error'),
+          onError: (error) =>
+              debugPrint('Topluluk mekânları alınamadı: $error'),
         );
   }
 
@@ -1921,7 +1925,8 @@ class _HomePageState extends State<HomePage> {
     final websiteUri = Uri.tryParse(
       placeDetails['websiteUri']?.toString() ?? '',
     );
-    final openingHours = (placeDetails['openingHours'] as List<dynamic>? ?? const [])
+    final openingHours =
+        (placeDetails['openingHours'] as List<dynamic>? ?? const [])
         .map((day) => day.toString())
         .toList(growable: false);
     final isOpenNow = placeDetails['isOpenNow'] as bool?;
@@ -2098,9 +2103,8 @@ class _HomePageState extends State<HomePage> {
                   children: [
                     if (phoneNumber != null && phoneNumber.isNotEmpty)
                       TextButton.icon(
-                        onPressed: () => launchUrl(
-                          Uri(scheme: 'tel', path: phoneNumber),
-                        ),
+                        onPressed: () =>
+                            launchUrl(Uri(scheme: 'tel', path: phoneNumber)),
                         icon: const Icon(Icons.call_outlined, size: 18),
                         label: Text(phoneNumber),
                       ),
@@ -2126,7 +2130,8 @@ class _HomePageState extends State<HomePage> {
                 ),
               ],
               if (placeDetails['source'] == 'community_place' &&
-                  (placeDetails['description']?.toString().isNotEmpty ?? false)) ...[
+                  (placeDetails['description']?.toString().isNotEmpty ??
+                      false)) ...[
                 const SizedBox(height: 10),
                 Text(
                   placeDetails['description'].toString(),
@@ -2408,10 +2413,7 @@ class _HomePageState extends State<HomePage> {
           initialHistory: _searchHistory,
           initialLocation: _currentPosition == null
               ? null
-              : LatLng(
-                  _currentPosition!.latitude,
-                  _currentPosition!.longitude,
-                ),
+              : LatLng(_currentPosition!.latitude, _currentPosition!.longitude),
         ),
       ),
     );
@@ -4861,7 +4863,8 @@ out center tags;
                                 _buildChip(
                                   Icons.add_location_alt_rounded,
                                   'Mekân Ekle',
-                                  onTap: () => unawaited(_createCommunityPlace()),
+                                  onTap: () =>
+                                      unawaited(_createCommunityPlace()),
                                 ),
                               ],
                             ),
@@ -4973,47 +4976,37 @@ out center tags;
                   child: _buildLiveNavigationCard(),
                 ),
               Positioned(
-                left: 0,
-                right: 0,
-                bottom: 0,
-                child: SizedBox(
-                  height: 76 + bottomSafeInset,
-                  child: Stack(
-                    children: [
-                      Positioned(
-                        left: 0,
-                        right: 0,
-                        bottom: bottomSafeInset,
-                        height: 76,
-                        child: Container(
-                          decoration: BoxDecoration(
-                            color: const Color(0xFFFF7A00),
-                            border: const Border(
-                              top: BorderSide(
-                                color: Color(0xFFFFA04D),
-                                width: 1,
-                              ),
-                            ),
+                left: 12,
+                right: 12,
+                bottom: bottomSafeInset + 10,
+                child: Center(
+                  child: ConstrainedBox(
+                    constraints: const BoxConstraints(maxWidth: 440),
+                    child: Container(
+                      height: 68,
+                      padding: const EdgeInsets.all(5),
+                      decoration: BoxDecoration(
+                        color: const Color(0xF21A1A1A),
+                        borderRadius: BorderRadius.circular(36),
+                        border: Border.all(color: const Color(0xFF3A3A3A)),
+                        boxShadow: const [
+                          BoxShadow(
+                            color: Color(0x66000000),
+                            blurRadius: 20,
+                            offset: Offset(0, 7),
                           ),
-                        ),
+                        ],
                       ),
-                      Positioned(
-                        left: 0,
-                        right: 0,
-                        bottom: 0,
-                        height: 56,
-                        child: Row(
-                          mainAxisAlignment: MainAxisAlignment.spaceAround,
-                          children: [
-                            _buildNavItem(Icons.explore, 'Keşfet', 0),
-                            _buildNavItem(Icons.map_rounded, 'Harita', 1),
-                            _buildNavItem(Icons.auto_awesome, 'Navora AI', 2),
-                            _buildNavItem(Icons.forum, 'Sohbet', 3),
-                            _buildNavItem(Icons.person, 'Profil', 4),
-                          ],
-                        ),
+                      child: Row(
+                        children: [
+                          _buildNavItem(Icons.explore, 'Keşfet', 0),
+                          _buildNavItem(Icons.map_rounded, 'Harita', 1),
+                          _buildNavItem(Icons.auto_awesome, 'Navora AI', 2),
+                          _buildNavItem(Icons.forum, 'Sohbet', 3),
+                          _buildNavItem(Icons.person, 'Profil', 4),
+                        ],
                       ),
-                    ],
+                    ),
                   ),
                 ),
               ),
@@ -5243,8 +5236,7 @@ out center tags;
         onAddCommunityPlace: () => unawaited(_createCommunityPlace()),
         onSelectCommunityPlace: (place) =>
           unawaited(_openCommunityPlaceFromExplore(place)),
-        onShowCommunityPlaces: () =>
-            unawaited(_showCommunityPlacesOnMap()),
+      onShowCommunityPlaces: () => unawaited(_showCommunityPlacesOnMap()),
       recentSearches: _searchHistory
           .map(
             (search) => <String, String>{
@@ -5312,7 +5304,8 @@ out center tags;
         longitude: selectedCoordinate.longitude,
         initialName: initialName,
         initialAddress: initialAddress,
-        onSubmit: ({
+        onSubmit:
+            ({
           required name,
           required category,
           required description,
@@ -5323,7 +5316,8 @@ out center tags;
           final placeReference = FirebaseFirestore.instance
               .collection('community_places')
               .doc();
-          final photoReference = photoBytes == null || photoExtension == null
+              final photoReference =
+                  photoBytes == null || photoExtension == null
               ? null
               : FirebaseStorage.instance.ref().child(
                   'community_places/${user.uid}/${placeReference.id}/cover',
@@ -5345,7 +5339,9 @@ out center tags;
                 'jpg' || 'jpeg' => 'image/jpeg',
                 'png' => 'image/png',
                 'webp' => 'image/webp',
-                _ => throw StateError('JPG, PNG veya WebP fotoğraf seçmelisin.'),
+                    _ => throw StateError(
+                      'JPG, PNG veya WebP fotoğraf seçmelisin.',
+                    ),
               };
               await photoReference.putData(
                 photoBytes,
@@ -5956,7 +5952,8 @@ out center tags;
   void _showRoadReportDialog(Map<String, dynamic> report) {
     final reportId = report['id']?.toString();
     final currentUser = FirebaseAuth.instance.currentUser;
-    final canVote = reportId != null &&
+    final canVote =
+        reportId != null &&
         currentUser != null &&
         report['userId'] != currentUser.uid;
     showModalBottomSheet(
@@ -6091,7 +6088,8 @@ out center tags;
           throw StateError('own-report');
         }
         final expiresAt = reportData['expires_at'];
-        if (expiresAt is! Timestamp || !expiresAt.toDate().isAfter(DateTime.now())) {
+        if (expiresAt is! Timestamp ||
+            !expiresAt.toDate().isAfter(DateTime.now())) {
           throw StateError('report-expired');
         }
 
@@ -9766,11 +9764,10 @@ out center tags;
       final shareText = [
         title,
         if (start != null && start.isNotEmpty) 'Başlangıç: $start',
-        if (destination != null && destination.isNotEmpty) 'Varış: $destination',
+        if (destination != null && destination.isNotEmpty)
+          'Varış: $destination',
       ].join('\n');
-      await SharePlus.instance.share(
-        ShareParams(text: shareText),
-      );
+      await SharePlus.instance.share(ShareParams(text: shareText));
     } catch (_) {
       if (mounted) _showTrackingMessage('Rota bağlantısı oluşturulamadı.');
     }
@@ -11951,35 +11948,42 @@ $text''';
 
   Widget _buildNavItem(IconData icon, String label, int index) {
     final isSelected = _selectedIndex == index;
-    return GestureDetector(
-      onTap: () {
-        setState(() {
-          _selectedIndex = index;
-        });
-      },
-      child: AnimatedContainer(
-        duration: const Duration(milliseconds: 200),
-        width: 70,
-        height: 56,
+    return Expanded(
+      child: Material(
         color: Colors.transparent,
-        child: Column(
-          mainAxisAlignment: MainAxisAlignment.start,
-          children: [
-            Icon(
-              icon,
-              color: isSelected ? Colors.white : Colors.white60,
-              size: isSelected ? 28 : 22,
+        child: InkWell(
+          onTap: () => setState(() => _selectedIndex = index),
+          borderRadius: BorderRadius.circular(30),
+          child: AnimatedContainer(
+            duration: const Duration(milliseconds: 200),
+            height: 56,
+            margin: const EdgeInsets.symmetric(horizontal: 2),
+            decoration: BoxDecoration(
+              color: isSelected ? const Color(0xFFFF7A00) : Colors.transparent,
+              borderRadius: BorderRadius.circular(30),
             ),
-            const SizedBox(height: 3),
-            Text(
-              label,
-              style: TextStyle(
-                color: isSelected ? Colors.white : Colors.white60,
-                fontSize: 10,
-                fontWeight: isSelected ? FontWeight.w800 : FontWeight.w500,
-              ),
+            child: Column(
+              mainAxisAlignment: MainAxisAlignment.center,
+              children: [
+                Icon(
+                  icon,
+                  color: isSelected ? Colors.white : Colors.white60,
+                  size: 21,
+                ),
+                const SizedBox(height: 2),
+                Text(
+                  label,
+                  maxLines: 1,
+                  overflow: TextOverflow.ellipsis,
+                  style: TextStyle(
+                    color: isSelected ? Colors.white : Colors.white60,
+                    fontSize: 9,
+                    fontWeight: isSelected ? FontWeight.w700 : FontWeight.w500,
+                  ),
+                ),
+              ],
             ),
-          ],
+          ),
         ),
       ),
     );
