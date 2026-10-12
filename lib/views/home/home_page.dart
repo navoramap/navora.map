@@ -411,6 +411,8 @@ class HomePage extends StatefulWidget {
 
 class _HomePageState extends State<HomePage> {
   static const Duration _chatRoomLifetime = Duration(hours: 24);
+  static const double _bottomNavigationBarHeight = 68;
+  static const double _bottomNavigationGap = 16;
   static const String _darkGoogleMapStyle = '''[
     {"featureType":"all","elementType":"geometry","stylers":[{"color":"#22282c"}]},
     {"featureType":"all","elementType":"labels.text.fill","stylers":[{"color":"#f5f5f5"}]},
@@ -1329,9 +1331,9 @@ class _HomePageState extends State<HomePage> {
                         ? _formatReportTime(createdAt.toDate())
                         : 'Yeni',
                     'confirmationCount':
-                      (data['confirmation_count'] as num?)?.toInt() ?? 0,
+                        (data['confirmation_count'] as num?)?.toInt() ?? 0,
                     'incorrectCount':
-                      (data['incorrect_count'] as num?)?.toInt() ?? 0,
+                        (data['incorrect_count'] as num?)?.toInt() ?? 0,
                     'expiresAt': expiry,
                     'reference': document.reference,
                   };
@@ -1364,24 +1366,24 @@ class _HomePageState extends State<HomePage> {
             if (!mounted) return;
             final places = snapshot.docs
                 .map((document) {
-              final data = document.data();
-              return <String, dynamic>{
-                'id': document.id,
-                'ownerUid': data['owner_uid']?.toString() ?? '',
-                'name': data['name']?.toString() ?? '',
-                'category': data['category']?.toString() ?? 'Diğer',
-                'description': data['description']?.toString() ?? '',
-                'address': data['address']?.toString() ?? '',
-                'photoUrl': data['photo_url']?.toString() ?? '',
-                'latitude': (data['latitude'] as num?)?.toDouble(),
-                'longitude': (data['longitude'] as num?)?.toDouble(),
-              };
+                  final data = document.data();
+                  return <String, dynamic>{
+                    'id': document.id,
+                    'ownerUid': data['owner_uid']?.toString() ?? '',
+                    'name': data['name']?.toString() ?? '',
+                    'category': data['category']?.toString() ?? 'Diğer',
+                    'description': data['description']?.toString() ?? '',
+                    'address': data['address']?.toString() ?? '',
+                    'photoUrl': data['photo_url']?.toString() ?? '',
+                    'latitude': (data['latitude'] as num?)?.toDouble(),
+                    'longitude': (data['longitude'] as num?)?.toDouble(),
+                  };
                 })
                 .where((place) {
-              return place['name'] is String &&
-                  (place['name'] as String).isNotEmpty &&
-                  place['latitude'] is double &&
-                  place['longitude'] is double;
+                  return place['name'] is String &&
+                      (place['name'] as String).isNotEmpty &&
+                      place['latitude'] is double &&
+                      place['longitude'] is double;
                 })
                 .toList();
             setState(() {
@@ -1927,8 +1929,8 @@ class _HomePageState extends State<HomePage> {
     );
     final openingHours =
         (placeDetails['openingHours'] as List<dynamic>? ?? const [])
-        .map((day) => day.toString())
-        .toList(growable: false);
+            .map((day) => day.toString())
+            .toList(growable: false);
     final isOpenNow = placeDetails['isOpenNow'] as bool?;
     final currentPosition = _currentPosition;
     final distanceText = currentPosition == null
@@ -4978,12 +4980,12 @@ out center tags;
               Positioned(
                 left: 12,
                 right: 12,
-                bottom: bottomSafeInset + 10,
+                bottom: bottomSafeInset,
                 child: Center(
                   child: ConstrainedBox(
                     constraints: const BoxConstraints(maxWidth: 440),
                     child: Container(
-                      height: 68,
+                      height: _bottomNavigationBarHeight,
                       padding: const EdgeInsets.all(5),
                       decoration: BoxDecoration(
                         color: const Color(0xF21A1A1A),
@@ -5232,9 +5234,9 @@ out center tags;
       currentUserUid: FirebaseAuth.instance.currentUser?.uid,
       canManageHighlights: _canManageExploreHighlights,
       savedAddresses: _savedAddresses,
-        communityPlaces: _communityPlaces,
-        onAddCommunityPlace: () => unawaited(_createCommunityPlace()),
-        onSelectCommunityPlace: (place) =>
+      communityPlaces: _communityPlaces,
+      onAddCommunityPlace: () => unawaited(_createCommunityPlace()),
+      onSelectCommunityPlace: (place) =>
           unawaited(_openCommunityPlaceFromExplore(place)),
       onShowCommunityPlaces: () => unawaited(_showCommunityPlacesOnMap()),
       recentSearches: _searchHistory
@@ -5306,67 +5308,67 @@ out center tags;
         initialAddress: initialAddress,
         onSubmit:
             ({
-          required name,
-          required category,
-          required description,
-          required address,
-          required photoBytes,
-          required photoExtension,
-        }) async {
-          final placeReference = FirebaseFirestore.instance
-              .collection('community_places')
-              .doc();
+              required name,
+              required category,
+              required description,
+              required address,
+              required photoBytes,
+              required photoExtension,
+            }) async {
+              final placeReference = FirebaseFirestore.instance
+                  .collection('community_places')
+                  .doc();
               final photoReference =
                   photoBytes == null || photoExtension == null
-              ? null
-              : FirebaseStorage.instance.ref().child(
-                  'community_places/${user.uid}/${placeReference.id}/cover',
-                );
+                  ? null
+                  : FirebaseStorage.instance.ref().child(
+                      'community_places/${user.uid}/${placeReference.id}/cover',
+                    );
 
-          try {
-            await placeReference.set({
-              'owner_uid': user.uid,
-              'name': name,
-              'category': category,
-              'description': description,
-              'address': address,
-              'latitude': selectedCoordinate.latitude,
-              'longitude': selectedCoordinate.longitude,
-              'created_at': FieldValue.serverTimestamp(),
-            });
-            if (photoReference != null && photoBytes != null) {
-              final contentType = switch (photoExtension) {
-                'jpg' || 'jpeg' => 'image/jpeg',
-                'png' => 'image/png',
-                'webp' => 'image/webp',
+              try {
+                await placeReference.set({
+                  'owner_uid': user.uid,
+                  'name': name,
+                  'category': category,
+                  'description': description,
+                  'address': address,
+                  'latitude': selectedCoordinate.latitude,
+                  'longitude': selectedCoordinate.longitude,
+                  'created_at': FieldValue.serverTimestamp(),
+                });
+                if (photoReference != null && photoBytes != null) {
+                  final contentType = switch (photoExtension) {
+                    'jpg' || 'jpeg' => 'image/jpeg',
+                    'png' => 'image/png',
+                    'webp' => 'image/webp',
                     _ => throw StateError(
                       'JPG, PNG veya WebP fotoğraf seçmelisin.',
                     ),
-              };
-              await photoReference.putData(
-                photoBytes,
-                SettableMetadata(contentType: contentType),
-              );
-              await placeReference.update({
-                'photo_url': await photoReference.getDownloadURL(),
-              });
-            }
-          } catch (_) {
-            if (photoReference != null) {
-              try {
-                await photoReference.delete();
-              } catch (cleanupError) {
-                debugPrint('Mekân fotoğrafı temizlenemedi: $cleanupError');
+                  };
+                  await photoReference.putData(
+                    photoBytes,
+                    SettableMetadata(contentType: contentType),
+                  );
+                  await placeReference.update({
+                    'photo_url': await photoReference.getDownloadURL(),
+                  });
+                }
+              } catch (_) {
+                if (photoReference != null) {
+                  try {
+                    await photoReference.delete();
+                  } catch (cleanupError) {
+                    debugPrint('Mekân fotoğrafı temizlenemedi: $cleanupError');
+                  }
+                }
+                try {
+                  await placeReference.delete();
+                } catch (cleanupError) {
+                  debugPrint('Mekân kaydı temizlenemedi: $cleanupError');
+                }
+                rethrow;
               }
-            }
-            try {
-              await placeReference.delete();
-            } catch (cleanupError) {
-              debugPrint('Mekân kaydı temizlenemedi: $cleanupError');
-            }
-            rethrow;
-          }
-        },
+            },
       ),
     );
     if (submitted == true && mounted) {
@@ -5965,90 +5967,90 @@ out center tags;
         builder: (context, setSheetState) {
           final isSubmitting = report['isSubmittingFeedback'] == true;
           return Padding(
-          padding: const EdgeInsets.fromLTRB(20, 22, 20, 28),
-          child: Column(
-            mainAxisSize: MainAxisSize.min,
-            crossAxisAlignment: CrossAxisAlignment.start,
-            children: [
-              Row(
-                children: [
-                  Icon(
-                    _reportIcon(report['type'] as String),
-                    color: const Color(0xFFFF6B00),
-                    size: 28,
-                  ),
-                  const SizedBox(width: 12),
-                  Expanded(
-                    child: Text(
-                      report['type'] as String,
-                      style: const TextStyle(
-                        fontSize: 18,
-                        fontWeight: FontWeight.bold,
-                      ),
-                    ),
-                  ),
-                  IconButton(
-                    onPressed: () => Navigator.pop(context),
-                    icon: const Icon(Icons.close_rounded),
-                  ),
-                ],
-              ),
-              const SizedBox(height: 12),
-              Text(
-                report['description'] as String,
-                style: const TextStyle(fontSize: 14, height: 1.4),
-              ),
-              const SizedBox(height: 8),
-              Text(
-                'Topluluk bildirimi • ${report['time']}',
-                style: TextStyle(color: Colors.grey.shade600, fontSize: 12),
-              ),
-              const SizedBox(height: 12),
-              Text(
-                '${report['confirmationCount'] ?? 0} doğrulama • '
-                '${report['incorrectCount'] ?? 0} yanlış bildirimi',
-                style: TextStyle(color: Colors.grey.shade400, fontSize: 12),
-              ),
-              if (canVote) ...[
-                const SizedBox(height: 12),
+            padding: const EdgeInsets.fromLTRB(20, 22, 20, 28),
+            child: Column(
+              mainAxisSize: MainAxisSize.min,
+              crossAxisAlignment: CrossAxisAlignment.start,
+              children: [
                 Row(
                   children: [
+                    Icon(
+                      _reportIcon(report['type'] as String),
+                      color: const Color(0xFFFF6B00),
+                      size: 28,
+                    ),
+                    const SizedBox(width: 12),
                     Expanded(
-                      child: OutlinedButton.icon(
-                        onPressed: isSubmitting
-                            ? null
-                            : () => _sendRoadReportFeedback(
-                                context,
-                                setSheetState,
-                                report,
-                                reportId,
-                                'confirmed',
-                              ),
-                        icon: const Icon(Icons.thumb_up_alt_outlined),
-                        label: const Text('Doğrula'),
+                      child: Text(
+                        report['type'] as String,
+                        style: const TextStyle(
+                          fontSize: 18,
+                          fontWeight: FontWeight.bold,
+                        ),
                       ),
                     ),
-                    const SizedBox(width: 10),
-                    Expanded(
-                      child: OutlinedButton.icon(
-                        onPressed: isSubmitting
-                            ? null
-                            : () => _sendRoadReportFeedback(
-                                context,
-                                setSheetState,
-                                report,
-                                reportId,
-                                'incorrect',
-                              ),
-                        icon: const Icon(Icons.flag_outlined),
-                        label: const Text('Yanlış bildir'),
-                      ),
+                    IconButton(
+                      onPressed: () => Navigator.pop(context),
+                      icon: const Icon(Icons.close_rounded),
                     ),
                   ],
                 ),
+                const SizedBox(height: 12),
+                Text(
+                  report['description'] as String,
+                  style: const TextStyle(fontSize: 14, height: 1.4),
+                ),
+                const SizedBox(height: 8),
+                Text(
+                  'Topluluk bildirimi • ${report['time']}',
+                  style: TextStyle(color: Colors.grey.shade600, fontSize: 12),
+                ),
+                const SizedBox(height: 12),
+                Text(
+                  '${report['confirmationCount'] ?? 0} doğrulama • '
+                  '${report['incorrectCount'] ?? 0} yanlış bildirimi',
+                  style: TextStyle(color: Colors.grey.shade400, fontSize: 12),
+                ),
+                if (canVote) ...[
+                  const SizedBox(height: 12),
+                  Row(
+                    children: [
+                      Expanded(
+                        child: OutlinedButton.icon(
+                          onPressed: isSubmitting
+                              ? null
+                              : () => _sendRoadReportFeedback(
+                                  context,
+                                  setSheetState,
+                                  report,
+                                  reportId,
+                                  'confirmed',
+                                ),
+                          icon: const Icon(Icons.thumb_up_alt_outlined),
+                          label: const Text('Doğrula'),
+                        ),
+                      ),
+                      const SizedBox(width: 10),
+                      Expanded(
+                        child: OutlinedButton.icon(
+                          onPressed: isSubmitting
+                              ? null
+                              : () => _sendRoadReportFeedback(
+                                  context,
+                                  setSheetState,
+                                  report,
+                                  reportId,
+                                  'incorrect',
+                                ),
+                          icon: const Icon(Icons.flag_outlined),
+                          label: const Text('Yanlış bildir'),
+                        ),
+                      ),
+                    ],
+                  ),
+                ],
               ],
-            ],
-          ),
+            ),
           );
         },
       ),
@@ -6284,8 +6286,15 @@ out center tags;
 
   Widget _buildAiPage() {
     final keyboardInset = MediaQuery.of(context).viewInsets.bottom;
+    final bottomSafeInset = MediaQuery.viewPaddingOf(context).bottom;
     return Padding(
-      padding: EdgeInsets.only(bottom: keyboardInset > 0 ? 0 : 90),
+      padding: EdgeInsets.only(
+        bottom: keyboardInset > 0
+            ? 0
+            : bottomSafeInset +
+                  _bottomNavigationBarHeight +
+                  _bottomNavigationGap,
+      ),
       child: Column(
         children: [
           Container(
@@ -6429,8 +6438,15 @@ out center tags;
   // --- SOHBET SAYFASI ---
   Widget _buildChatPage() {
     final keyboardInset = MediaQuery.of(context).viewInsets.bottom;
+    final bottomSafeInset = MediaQuery.viewPaddingOf(context).bottom;
     return Padding(
-      padding: EdgeInsets.only(bottom: keyboardInset > 0 ? 0 : 90),
+      padding: EdgeInsets.only(
+        bottom: keyboardInset > 0
+            ? 0
+            : bottomSafeInset +
+                  _bottomNavigationBarHeight +
+                  _bottomNavigationGap,
+      ),
       child: Column(
         children: [
           Container(
@@ -8129,9 +8145,15 @@ out center tags;
 
   Widget _buildProfilePage() {
     final isGuest = FirebaseAuth.instance.currentUser == null;
+    final bottomSafeInset = MediaQuery.viewPaddingOf(context).bottom;
 
     return SingleChildScrollView(
-      padding: const EdgeInsets.only(top: 16, left: 16, right: 16, bottom: 100),
+      padding: EdgeInsets.fromLTRB(
+        16,
+        16,
+        16,
+        bottomSafeInset + _bottomNavigationBarHeight + _bottomNavigationGap,
+      ),
       child: Column(
         crossAxisAlignment: CrossAxisAlignment.start,
         children: [

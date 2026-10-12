@@ -436,31 +436,10 @@ class _NavoraMapAppState extends State<NavoraMapApp> {
         ),
       ),
       builder: (context, child) {
-        final keyboardInset = MediaQuery.viewInsetsOf(context).bottom;
-        return Stack(
-          fit: StackFit.expand,
-          children: [
-            ?child,
-            if (keyboardInset > 0)
-              Positioned(
-                left: 12,
-                bottom: keyboardInset + 8,
-                child: Material(
-                  color: raisedSurface,
-                  shape: const CircleBorder(
-                    side: BorderSide(color: outline),
-                  ),
-                  clipBehavior: Clip.antiAlias,
-                  child: IconButton(
-                    tooltip: 'Klavyeyi kapat',
-                    onPressed: () =>
-                        FocusManager.instance.primaryFocus?.unfocus(),
-                    icon: const Icon(Icons.keyboard_hide_rounded),
-                    color: Colors.white,
-                  ),
-                ),
-              ),
-          ],
+        return GestureDetector(
+          behavior: HitTestBehavior.translucent,
+          onTap: () => FocusManager.instance.primaryFocus?.unfocus(),
+          child: child ?? const SizedBox.shrink(),
         );
       },
       home: const MainWrapper(),

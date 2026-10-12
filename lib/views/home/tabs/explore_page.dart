@@ -43,15 +43,13 @@ class _ExplorePageState extends State<ExplorePage> {
     _ExploreImageTileData(
       label: 'Kafeler',
       query: 'kafeler',
-      imageUrl:
-          'https://images.unsplash.com/photo-1445116572660-236099ec97a0?auto=format&fit=crop&w=700&h=420&q=82',
+      imageUrl: 'https://images.unsplash.com/photo-1445116572660-236099ec97a0?auto=format&fit=crop&w=700&h=420&q=82',
       icon: Icons.local_cafe_rounded,
     ),
     _ExploreImageTileData(
       label: 'Restoranlar',
       query: 'restoranlar',
-      imageUrl:
-          'https://images.unsplash.com/photo-1414235077428-338989a2e8c0?auto=format&fit=crop&w=700&h=420&q=82',
+      imageUrl: 'https://images.unsplash.com/photo-1414235077428-338989a2e8c0?auto=format&fit=crop&w=700&h=420&q=82',
       icon: Icons.restaurant_rounded,
     ),
     _ExploreImageTileData(
@@ -69,8 +67,7 @@ class _ExplorePageState extends State<ExplorePage> {
     _ExploreImageTileData(
       label: 'Alışveriş',
       query: 'alışveriş merkezleri ve çarşılar',
-      imageUrl:
-          'https://images.unsplash.com/photo-1441986300917-64674bd600d8?auto=format&fit=crop&w=700&h=420&q=82',
+      imageUrl: 'https://images.unsplash.com/photo-1441986300917-64674bd600d8?auto=format&fit=crop&w=700&h=420&q=82',
       icon: Icons.shopping_bag_rounded,
     ),
     _ExploreImageTileData(
@@ -88,7 +85,7 @@ class _ExplorePageState extends State<ExplorePage> {
       'https://images.unsplash.com/photo-1623387641168-d9803ddd3f35?auto=format&fit=crop&crop=faces&w=1200&h=380&q=90';
   static const _nearbyImage =
       'https://images.unsplash.com/photo-1500530855697-b586d89ba3ee?auto=format&fit=crop&w=1200&h=500&q=85';
-    static const _communityPlacesImage =
+  static const _communityPlacesImage =
       'https://images.unsplash.com/photo-1470770841072-f978cf4d019e?auto=format&fit=crop&w=1200&h=500&q=85';
   static const _festivalImage =
       'https://images.unsplash.com/photo-1492684223066-81342ee5ff30?auto=format&fit=crop&w=700&h=420&q=82';
@@ -100,9 +97,13 @@ class _ExplorePageState extends State<ExplorePage> {
 
   @override
   Widget build(BuildContext context) {
+    final bottomContentPadding =
+        MediaQuery.viewPaddingOf(context).bottom + 68 + 16;
+
     return ColoredBox(
       color: const Color(0xFF111111),
       child: SafeArea(
+        bottom: false,
         child: Column(
           crossAxisAlignment: CrossAxisAlignment.start,
           children: [
@@ -132,7 +133,7 @@ class _ExplorePageState extends State<ExplorePage> {
             ),
             Expanded(
               child: ListView(
-                padding: const EdgeInsets.fromLTRB(20, 4, 20, 104),
+                padding: EdgeInsets.fromLTRB(20, 4, 20, bottomContentPadding),
                 children: [
                   if (widget.currentUserUid != null) ...[
                     _buildHighlightCarousel(context),
@@ -215,19 +216,15 @@ class _ExplorePageState extends State<ExplorePage> {
                   const SizedBox(height: 12),
                   _ExploreImageGrid(
                     items: _placeCategories,
-                    onTap: (label, query) => widget.onSearchCategory(
-                      'Mekânlar • $label',
-                      query,
-                    ),
+                    onTap: (label, query) =>
+                        widget.onSearchCategory('Mekânlar • $label', query),
                   ),
                   if (widget.currentUserUid != null) ...[
                     const SizedBox(height: 26),
                     Row(
                       children: [
                         const Expanded(
-                          child: _SectionHeading(
-                            title: 'TOPLULUK MEKÂNLARI',
-                          ),
+                          child: _SectionHeading(title: 'TOPLULUK MEKÂNLARI'),
                         ),
                         IconButton(
                           tooltip: 'Yeni mekân ekle',
@@ -246,17 +243,27 @@ class _ExplorePageState extends State<ExplorePage> {
                         ),
                       )
                     else
-                      ...widget.communityPlaces.take(8).map(
-                        (place) => _ExploreListTile(
-                          icon: Icons.place_rounded,
-                          title: place['name']?.toString() ?? 'Topluluk mekânı',
-                          subtitle: [
-                            place['category']?.toString(),
-                            place['address']?.toString(),
-                          ].where((part) => part != null && part.isNotEmpty).join(' • '),
-                          onTap: () => widget.onSelectCommunityPlace(place),
-                        ),
-                      ),
+                      ...widget.communityPlaces
+                          .take(8)
+                          .map(
+                            (place) => _ExploreListTile(
+                              icon: Icons.place_rounded,
+                              title:
+                                  place['name']?.toString() ??
+                                  'Topluluk mekânı',
+                              subtitle:
+                                  [
+                                        place['category']?.toString(),
+                                        place['address']?.toString(),
+                                      ]
+                                      .where(
+                                        (part) =>
+                                            part != null && part.isNotEmpty,
+                                      )
+                                      .join(' • '),
+                              onTap: () => widget.onSelectCommunityPlace(place),
+                            ),
+                          ),
                   ],
                   if (widget.savedAddresses.isNotEmpty) ...[
                     const SizedBox(height: 26),
@@ -429,7 +436,6 @@ class _ExplorePageState extends State<ExplorePage> {
           .showSnackBar(const SnackBar(content: Text('Profil açılamadı.')));
     }
   }
-
 }
 
 class _SocialFollowButton extends StatelessWidget {
