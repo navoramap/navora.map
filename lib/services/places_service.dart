@@ -17,17 +17,31 @@ class NavoraPlacesService {
     'tramvay', 'metro',
   ];
 
-  static const String apiKey = String.fromEnvironment(
+  static const String _defaultApiKey = String.fromEnvironment(
     'GOOGLE_PLACES_API_KEY',
     defaultValue: 'AIzaSyAgDEdDHf08ePqpkCJBTx0oaCzJetyhawg',
   );
+  static const String _iosApiKey = String.fromEnvironment(
+    'GOOGLE_PLACES_IOS_API_KEY',
+  );
+  static const String _iosBundleIdentifier = 'com.navora.app';
+  static String get apiKey => !kIsWeb &&
+          defaultTargetPlatform == TargetPlatform.iOS &&
+          _iosApiKey.isNotEmpty
+      ? _iosApiKey
+      : _defaultApiKey;
+
   static final Future<Map<String, String>> _clientIdentityHeaders =
       _loadClientIdentityHeaders();
 
   static Future<Map<String, String>> _loadClientIdentityHeaders() async {
-    if (kIsWeb || defaultTargetPlatform != TargetPlatform.android) {
+    if (kIsWeb) {
       return const {};
     }
+    if (defaultTargetPlatform == TargetPlatform.iOS) {
+      return const {'X-Ios-Bundle-Identifier': _iosBundleIdentifier};
+    }
+    if (defaultTargetPlatform != TargetPlatform.android) return const {};
 
     final identity = await _identityChannel.invokeMapMethod<String, String>(
       'getIdentity',
