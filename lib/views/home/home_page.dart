@@ -2420,7 +2420,10 @@ class _HomePageState extends State<HomePage> {
         ),
       ),
     );
-    if (selected == null || !mounted) return;
+    if (!mounted) return;
+    _searchFocusNode.unfocus();
+    await SystemChannels.textInput.invokeMethod<void>('TextInput.hide');
+    if (selected == null) return;
     await _selectSearchSuggestion(selected);
   }
 
@@ -4889,7 +4892,10 @@ out center tags;
               if (_selectedIndex == 1)
                 Positioned(
                   right: 16,
-                  bottom: 90,
+                  bottom:
+                      bottomSafeInset +
+                      _bottomNavigationBarHeight +
+                      _bottomNavigationGap,
                   child: Column(
                     mainAxisSize: MainAxisSize.min,
                     children: [
@@ -4911,6 +4917,7 @@ out center tags;
                               : 'Eğimli harita görünümü',
                           backgroundColor: const Color(0xFF191919),
                           foregroundColor: const Color(0xFFFF6B00),
+                          shape: const CircleBorder(),
                           child: Icon(
                             _isMapTilted
                                 ? Icons.terrain_rounded
@@ -4951,11 +4958,46 @@ out center tags;
                             : 'Takibe dön',
                         backgroundColor: const Color(0xFF191919),
                         foregroundColor: const Color(0xFFFF6B00),
+                        shape: const CircleBorder(),
                         child: Icon(
                           _isFollowingCurrentPosition
                               ? Icons.my_location
                               : Icons.near_me_rounded,
                         ),
+                      ),
+                      const SizedBox(height: 8),
+                      FloatingActionButton.small(
+                        heroTag: 'map-zoom-in',
+                        onPressed: () {
+                          final controller = _mapController;
+                          if (controller != null) {
+                            unawaited(
+                              controller.animateCamera(CameraUpdate.zoomIn()),
+                            );
+                          }
+                        },
+                        tooltip: 'Yakınlaştır',
+                        backgroundColor: const Color(0xFF191919),
+                        foregroundColor: const Color(0xFFFF6B00),
+                        shape: const CircleBorder(),
+                        child: const Icon(Icons.add_rounded),
+                      ),
+                      const SizedBox(height: 8),
+                      FloatingActionButton.small(
+                        heroTag: 'map-zoom-out',
+                        onPressed: () {
+                          final controller = _mapController;
+                          if (controller != null) {
+                            unawaited(
+                              controller.animateCamera(CameraUpdate.zoomOut()),
+                            );
+                          }
+                        },
+                        tooltip: 'Uzaklaştır',
+                        backgroundColor: const Color(0xFF191919),
+                        foregroundColor: const Color(0xFFFF6B00),
+                        shape: const CircleBorder(),
+                        child: const Icon(Icons.remove_rounded),
                       ),
                       if (_isDriveTracking) ...[
                         const SizedBox(height: 10),
@@ -4965,6 +5007,7 @@ out center tags;
                           tooltip: 'Yol bildirimi ekle',
                           backgroundColor: const Color(0xFF191919),
                           foregroundColor: const Color(0xFFFF6B00),
+                          shape: const CircleBorder(),
                           child: const Icon(Icons.add_alert_rounded),
                         ),
                       ],
@@ -5783,7 +5826,8 @@ out center tags;
           ),
         )
         .toList();
-    final currentVehicleMarker = _currentPosition == null
+    final currentVehicleMarker =
+        _currentPosition == null || !_isNavigationActive
         ? null
         : Marker(
             markerId: const MarkerId('current-vehicle-location'),
@@ -5791,14 +5835,11 @@ out center tags;
               _currentPosition!.latitude,
               _currentPosition!.longitude,
             ),
-            icon: _isNavigationActive
-                ? _vehicleMarkerIcons[_selectedVehicle] ??
-                      BitmapDescriptor.defaultMarkerWithHue(
-                        BitmapDescriptor.hueAzure,
-                      )
-                : BitmapDescriptor.defaultMarkerWithHue(
-                    BitmapDescriptor.hueAzure,
-                  ),
+            icon:
+                _vehicleMarkerIcons[_selectedVehicle] ??
+                BitmapDescriptor.defaultMarkerWithHue(
+                  BitmapDescriptor.hueAzure,
+                ),
             zIndexInt: 999,
           );
     final savedAddressMarkers = _savedAddresses
@@ -5921,7 +5962,7 @@ out center tags;
       style: _darkGoogleMapStyle,
       mapType: _mapType,
       myLocationEnabled: _locationPermissionGranted && !_isNavigationActive,
-      myLocationButtonEnabled: true,
+      myLocationButtonEnabled: false,
       zoomControlsEnabled: false,
       compassEnabled: true,
       markers: mapMarkers,
