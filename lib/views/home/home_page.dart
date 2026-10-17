@@ -8,7 +8,8 @@ import 'dart:ui' as ui;
 import 'package:http/http.dart' as http;
 import 'package:flutter_tts/flutter_tts.dart';
 import 'package:speech_to_text/speech_to_text.dart';
-import 'package:flutter/foundation.dart' show kIsWeb;
+import 'package:flutter/foundation.dart'
+    show defaultTargetPlatform, kIsWeb, TargetPlatform;
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
 import 'package:cloud_functions/cloud_functions.dart';
@@ -5782,8 +5783,7 @@ out center tags;
           ),
         )
         .toList();
-    final currentVehicleMarker =
-        _currentPosition == null || !_isNavigationActive
+    final currentVehicleMarker = _currentPosition == null
         ? null
         : Marker(
             markerId: const MarkerId('current-vehicle-location'),
@@ -5791,11 +5791,14 @@ out center tags;
               _currentPosition!.latitude,
               _currentPosition!.longitude,
             ),
-            icon:
-                _vehicleMarkerIcons[_selectedVehicle] ??
-                BitmapDescriptor.defaultMarkerWithHue(
-                  BitmapDescriptor.hueAzure,
-                ),
+            icon: _isNavigationActive
+                ? _vehicleMarkerIcons[_selectedVehicle] ??
+                      BitmapDescriptor.defaultMarkerWithHue(
+                        BitmapDescriptor.hueAzure,
+                      )
+                : BitmapDescriptor.defaultMarkerWithHue(
+                    BitmapDescriptor.hueAzure,
+                  ),
             zIndexInt: 999,
           );
     final savedAddressMarkers = _savedAddresses
@@ -5926,6 +5929,10 @@ out center tags;
       polylines: _routePolylines.toSet(),
       onMapCreated: (controller) {
         _mapController = controller;
+        final currentPosition = _currentPosition;
+        if (currentPosition != null) {
+          unawaited(_centerOnPosition(currentPosition));
+        }
       },
       onTap: _handleRouteMapTap,
       onLongPress: _selectMapLocation,
@@ -9973,6 +9980,24 @@ out center tags;
     if (permission == geo.LocationPermission.always ||
         permission == geo.LocationPermission.whileInUse) {
       setState(() => _locationPermissionGranted = true);
+      if (defaultTargetPlatform != TargetPlatform.iOS ||
+          !await geo.Geolocator.isLocationServiceEnabled()) {
+        return;
+      }
+      try {
+        final position =
+            await geo.Geolocator.getLastKnownPosition() ??
+            await geo.Geolocator.getCurrentPosition(
+              locationSettings: const geo.LocationSettings(
+                accuracy: geo.LocationAccuracy.medium,
+              ),
+            ).timeout(const Duration(seconds: 20));
+        if (!mounted) return;
+        setState(() => _currentPosition = position);
+        await _centerOnPosition(position);
+      } catch (error) {
+        debugPrint('iOS konumu alınırken hata: $error');
+      }
     }
   }
 
