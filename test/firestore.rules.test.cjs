@@ -76,7 +76,7 @@ const activePropertyListing = {
   rooms: '2+1',
   description: 'Bakımlı daire.',
   photo_urls: ['https://firebasestorage.googleapis.com/v0/b/test/o/photo.jpg'],
-  cover_image_url: 'https://example.com/cover.jpg',
+  cover_image_url: 'https://firebasestorage.googleapis.com/v0/b/test/o/photo.jpg',
   status: 'active',
   created_at: now,
   updated_at: now,
@@ -489,7 +489,7 @@ test('property listing access is authenticated and pending data is owner-only', 
   );
 });
 
-test('owners can submit pending listings but cannot publish or edit them', async () => {
+test('owners can submit and edit pending listings but cannot publish them', async () => {
   const firestore = testEnvironment.authenticatedContext('visitor').firestore();
   const listingReference = doc(firestore, 'property_listings/new-listing');
   await assertSucceeds(
@@ -509,7 +509,7 @@ test('owners can submit pending listings but cannot publish or edit them', async
       updated_at: serverTimestamp(),
     }),
   );
-  await assertFails(
+  await assertSucceeds(
     updateDoc(listingReference, {
       price: 1,
       updated_at: serverTimestamp(),
@@ -524,7 +524,36 @@ test('owners can submit pending listings but cannot publish or edit them', async
       updated_at: serverTimestamp(),
     }),
   );
-  await assertSucceeds(deleteDoc(listingReference));
+  await assertFails(deleteDoc(listingReference));
+});
+
+test('active listing owners can edit, but edits return to review', async () => {
+  const firestore = testEnvironment.authenticatedContext('owner').firestore();
+  const listingReference = doc(firestore, 'property_listings/rent-1');
+  await assertSucceeds(
+    updateDoc(listingReference, {
+      title: 'Güncellenmiş daire',
+      status: 'pending_review',
+      updated_at: serverTimestamp(),
+    }),
+  );
+  await assertFails(
+    updateDoc(listingReference, {
+      view_count: 500,
+      updated_at: serverTimestamp(),
+    }),
+  );
+  await assertFails(deleteDoc(listingReference));
+});
+
+test('clients cannot read or write property listing view records', async () => {
+  const firestore = testEnvironment.authenticatedContext('visitor').firestore();
+  const viewReference = doc(
+    firestore,
+    'property_listings/rent-1/_views/visitor',
+  );
+  await assertFails(getDoc(viewReference));
+  await assertFails(setDoc(viewReference, { created_at: serverTimestamp() }));
 });
 
 test('users cannot submit listings for another owner or with invalid values', async () => {
@@ -542,6 +571,16 @@ test('users cannot submit listings for another owner or with invalid values', as
       ...activePropertyListing,
       owner_uid: 'visitor',
       price: -1,
+      status: 'pending_review',
+      created_at: serverTimestamp(),
+      updated_at: serverTimestamp(),
+    }),
+  );
+  await assertFails(
+    setDoc(doc(firestore, 'property_listings/forged-view-count'), {
+      ...activePropertyListing,
+      owner_uid: 'visitor',
+      view_count: 10,
       status: 'pending_review',
       created_at: serverTimestamp(),
       updated_at: serverTimestamp(),
@@ -757,6 +796,34 @@ test('existing legacy entitlements survive editable profile updates unchanged', 
     updateDoc(profileReference, {
       is_pro: false,
       updated_at: serverTimestamp(),
+    }),
+  );
+});
+
+test('monthly driving analytics cannot be created or changed', async () => {
+  const firestore = testEnvironment.authenticatedContext('new-user').firestore();
+  await assertFails(
+    setDoc(doc(firestore, 'users/new-user'), {
+      display_name: 'New user',
+      monthly_driving_analytics: { total_distance_km: 10 },
+      created_at: serverTimestamp(),
+    }),
+  );
+
+  await testEnvironment.withSecurityRulesDisabled(async (context) => {
+    await setDoc(doc(context.firestore(), 'users/legacy-analytics'), {
+      display_name: 'Legacy user',
+      monthly_driving_analytics: { total_distance_km: 10 },
+    });
+  });
+  const legacyProfile = doc(
+    testEnvironment.authenticatedContext('legacy-analytics').firestore(),
+    'users/legacy-analytics',
+  );
+  await assertSucceeds(updateDoc(legacyProfile, { bio: 'Profil güncellendi' }));
+  await assertFails(
+    updateDoc(legacyProfile, {
+      monthly_driving_analytics: { total_distance_km: 20 },
     }),
   );
 });

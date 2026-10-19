@@ -11,7 +11,7 @@ flutter pub get
 flutter run
 ```
 
-The app uses the Firebase project configured in `lib/firebase_options.dart` and the Android/iOS platform configuration files. Restrict Google Maps and Places API keys by app identity and API; do not treat mobile API keys as secrets. Supply optional service keys with Dart defines, for example `--dart-define=GOOGLE_PLACES_API_KEY=...` and `--dart-define=TOMTOM_API_KEY=...`. iOS Places requests can use a separate key restricted to the `com.navora.app` bundle ID via `--dart-define=GOOGLE_PLACES_IOS_API_KEY=...`; include that define when building the iOS app.
+The app uses the Firebase project configured in `lib/firebase_options.dart` and the Android/iOS platform configuration files. Restrict Google Maps, Places, and Routes API keys by app identity and API; do not treat mobile API keys as secrets. Supply optional service keys with Dart defines, for example `--dart-define=GOOGLE_PLACES_API_KEY=...` and `--dart-define=GOOGLE_ROUTES_API_KEY=...`. iOS Places requests can use a separate key restricted to the `com.navora.app` bundle ID via `--dart-define=GOOGLE_PLACES_IOS_API_KEY=...`; include that define when building the iOS app.
 
 ## Tests
 

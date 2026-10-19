@@ -13,6 +13,7 @@ import 'package:flutter/foundation.dart'
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
 import 'package:cloud_functions/cloud_functions.dart';
+import 'package:firebase_app_check/firebase_app_check.dart';
 import 'package:firebase_auth/firebase_auth.dart';
 import 'package:firebase_ai/firebase_ai.dart';
 import 'package:cloud_firestore/cloud_firestore.dart';
@@ -32,72 +33,67 @@ import 'tabs/create_property_listing_sheet.dart';
 import 'tabs/create_lost_pet_report_sheet.dart';
 import 'tabs/create_community_place_sheet.dart';
 import 'tabs/explore_page.dart';
+import 'my_property_listings_page.dart';
 import '../../services/places_service.dart';
 import '../../services/chat_room_service.dart';
+import '../../services/property_listing_service.dart';
 
 class NavoraTrafficService {
-  static const String _tomTomApiKey = String.fromEnvironment(
-    'TOMTOM_API_KEY',
-    defaultValue: 'nDfLbvCCiy55ZR0BtMe5VYbzKeMR8tib',
+  static const String _googleRoutesApiKey = String.fromEnvironment(
+    'GOOGLE_ROUTES_API_KEY',
   );
 
-  static Future<Map<String, dynamic>> fetchTrafficStatus(
-    LatLng position, {
-    String? apiKey,
-  }) async {
-    final key = (apiKey ?? _tomTomApiKey).trim();
-    if (key.isNotEmpty) {
-      try {
-        final uri = Uri.https(
-          'api.tomtom.com',
-          '/traffic/services/4/flowSegmentData/absolute/10/json',
-          {
-            'point': '${position.latitude},${position.longitude}',
-            'unit': 'KMPH',
-            'openLr': 'false',
-            'key': key,
-          },
-        );
+  static String get googleRoutesApiKey => _googleRoutesApiKey.trim().isEmpty
+      ? NavoraPlacesService.apiKey
+      : _googleRoutesApiKey.trim();
 
-        final response = await http
-            .get(uri)
-            .timeout(const Duration(seconds: 12));
-        if (response.statusCode == 200) {
-          final data = jsonDecode(response.body) as Map<String, dynamic>;
-          final flow =
-              (data['flowSegmentData'] as Map<String, dynamic>?) ?? const {};
-          final currentSpeed = (flow['currentSpeed'] as num?)?.toDouble() ?? 0;
-          final freeFlowSpeed =
-              (flow['freeFlowSpeed'] as num?)?.toDouble() ?? 0;
-          final confidence = (flow['confidence'] as num?)?.toInt() ?? 0;
-          final delay = currentSpeed > 0 && freeFlowSpeed > 0
-              ? ((freeFlowSpeed - currentSpeed) / freeFlowSpeed * 100)
-                    .clamp(0, 100)
-                    .round()
-              : 0;
-          final status = delay >= 35
-              ? 'Yoğun'
-              : delay >= 15
-              ? 'Orta'
-              : 'Açık';
-          return {
-            'status': status,
-            'delayPercent': delay,
-            'confidence': confidence,
-            'description': 'Canlı trafik verisi aktif.',
-          };
-        }
-      } catch (_) {
-        debugPrint('TomTom trafik verisi alınamadı, yerel durum kullanılacak.');
-      }
+  static Color? colorForSpeed(String speed) => switch (speed) {
+    'SLOW' => const Color(0xFFFFC107),
+    'TRAFFIC_JAM' => const Color(0xFFE53935),
+    _ => null,
+  };
+
+  static List<Polyline> buildRouteTrafficPolylines(
+    List<LatLng> routePoints,
+    List<dynamic> intervals,
+  ) {
+    if (routePoints.length < 2) return const [];
+    final polylines = <Polyline>[];
+    for (var index = 0; index < intervals.length; index++) {
+      final interval = intervals[index];
+      if (interval is! Map<String, dynamic>) continue;
+      final color = colorForSpeed(interval['speed']?.toString() ?? '');
+      if (color == null) continue;
+
+      final start = (interval['startPolylinePointIndex'] as num?)?.toInt() ?? 0;
+      final end =
+          (interval['endPolylinePointIndex'] as num?)?.toInt() ??
+          routePoints.length - 1;
+      final boundedStart = start.clamp(0, routePoints.length - 1);
+      final boundedEnd = end.clamp(0, routePoints.length - 1);
+      if (boundedEnd <= boundedStart) continue;
+
+      polylines.add(
+        Polyline(
+          polylineId: PolylineId('route-traffic-$index'),
+          points: routePoints.sublist(boundedStart, boundedEnd + 1),
+          color: color,
+          width: 5,
+          zIndex: 1,
+        ),
+      );
     }
+    return polylines;
+  }
 
-    return {
-      'status': 'Açık',
-      'delayPercent': 0,
-      'confidence': 0,
-      'description': 'Anahtar yoksa yerel trafik görünümü gösteriliyor.',
-    };
+  static String statusForIntervals(List<dynamic> intervals) {
+    final speeds = intervals
+        .whereType<Map<String, dynamic>>()
+        .map((interval) => interval['speed']?.toString())
+        .toSet();
+    if (speeds.contains('TRAFFIC_JAM')) return 'Yoğun';
+    if (speeds.contains('SLOW')) return 'Orta';
+    return intervals.isEmpty ? 'Trafik bilgisi yok' : 'Açık';
   }
 }
 
@@ -120,47 +116,23 @@ double navoraSafeDistanceKm(geo.Position previous, geo.Position current) {
   return deltaMeters / 1000;
 }
 
-double navoraAverageSpeedKmh({
-  required double distanceKm,
-  required int durationSeconds,
-}) {
-  if (distanceKm <= 0 || durationSeconds <= 0) {
-    return 0;
-  }
+String navoraFormatNavigationDuration(int? durationMinutes) {
+  if (durationMinutes == null) return '-';
+  if (durationMinutes < 60) return '$durationMinutes dk';
 
-  return (distanceKm / durationSeconds) * 3600;
-}
-
-int navoraDriveScorePenalty({
-  required double speedKmh,
-  required double? previousSpeedKmh,
-}) {
-  var speedPenalty = 0;
-  if (speedKmh > 150) {
-    speedPenalty = 2;
-  } else if (speedKmh > 120) {
-    speedPenalty = 1;
-  }
-
-  var changePenalty = 0;
-  if (previousSpeedKmh != null) {
-    final delta = (speedKmh - previousSpeedKmh).abs();
-    if (delta > 35) {
-      changePenalty = 2;
-    } else if (delta > 20) {
-      changePenalty = 1;
-    }
-  }
-
-  return speedPenalty > changePenalty ? speedPenalty : changePenalty;
+  final hours = durationMinutes ~/ 60;
+  final remainingMinutes = durationMinutes % 60;
+  return remainingMinutes == 0 ? '$hours sa' : '$hours sa $remainingMinutes dk';
 }
 
 bool navoraShouldFollowCurrentPosition({
   required bool isNavigationActive,
   required bool isDriveTracking,
+  bool isLocationTracking = false,
   bool isFollowing = true,
 }) {
-  return (isNavigationActive || isDriveTracking) && isFollowing;
+  return (isNavigationActive || isDriveTracking || isLocationTracking) &&
+      isFollowing;
 }
 
 double navoraSmoothBearing(
@@ -242,19 +214,6 @@ double navoraDistanceToRouteMeters(LatLng position, List<LatLng> route) {
   }
 
   return nearestDistance;
-}
-
-String navoraRouteProfileForVehicle(String vehicle) {
-  switch (vehicle) {
-    case 'Bisiklet':
-      return 'cycling';
-    case 'Yürüyüş':
-      return 'foot';
-    case 'Motosiklet':
-    case 'Araba':
-    default:
-      return 'driving';
-  }
 }
 
 double navoraRouteTrimToleranceMeters(String vehicle) {
@@ -411,6 +370,9 @@ class HomePage extends StatefulWidget {
 }
 
 class _HomePageState extends State<HomePage> {
+  final PropertyListingService _propertyListingService =
+      PropertyListingService();
+
   static const Duration _chatRoomLifetime = Duration(hours: 24);
   static const double _bottomNavigationBarHeight = 68;
   static const double _bottomNavigationGap = 16;
@@ -433,6 +395,7 @@ class _HomePageState extends State<HomePage> {
   Timer? _searchDebounce;
   List<Marker> _searchMarkers = const [];
   List<Polyline> _routePolylines = const [];
+  List<Polyline> _navigationTrafficPolylines = const [];
   List<Map<String, dynamic>> _navigationSteps = [];
   double? _navigationDistanceKm;
   int? _navigationDurationMinutes;
@@ -441,6 +404,7 @@ class _HomePageState extends State<HomePage> {
   bool _isMapTilted = false;
   bool _isFollowingCurrentPosition = true;
   bool _isProgrammaticCameraMove = false;
+  bool _isLocationTracking = false;
   bool _hasNavigationBearing = false;
   bool _isOffRoute = false;
   bool _isNavigationVoiceEnabled = true;
@@ -465,7 +429,6 @@ class _HomePageState extends State<HomePage> {
   bool _isLoadingLostPetReports = false;
   String? _lostPetReportsError;
   int _lostPetQueryGeneration = 0;
-  String? _navigationTrafficStatus;
   LatLng? _selectedDestinationCoordinate;
   String? _selectedDestinationName;
   Map<String, dynamic>? _selectedPlaceDetails;
@@ -481,6 +444,7 @@ class _HomePageState extends State<HomePage> {
   LatLng? _routeDraftStart;
   LatLng? _routeDraftDestination;
   StreamSubscription<geo.Position>? _positionSubscription;
+  StreamSubscription<geo.Position>? _locationPositionSubscription;
   StreamSubscription<sensors.AccelerometerEvent>? _accelerometerSubscription;
   StreamSubscription<QuerySnapshot<Map<String, dynamic>>>?
   _roadReportsSubscription;
@@ -505,14 +469,11 @@ class _HomePageState extends State<HomePage> {
   bool _isDriveTracking = false;
   double _driveDistanceKm = 0;
   double _vehicleStartKm = 0;
-  double? _previousSpeedKmh;
-  int _driveScore = 100;
   DateTime? _lastCrashAlertAt;
 
   late String _userName;
   late String _userEmail;
   String _userPhone = '+90 532 000 0000';
-  String _userBio = '🧭 İstanbul Keşif Tutkunu | Sık Seyahat Eden';
   String _userGender = 'Belirtmek istemiyorum';
   String _selectedVehicle = 'Araba';
   final Map<String, BitmapDescriptor> _vehicleMarkerIcons = {};
@@ -534,13 +495,8 @@ class _HomePageState extends State<HomePage> {
   int _navoraPoints = 0;
   int _bonusChatRooms = 0;
   int _bonusAiQueries = 0;
-  bool _hasProfileFrame = false;
-  bool _hasAuroraTheme = false;
   bool _proDiscountUnlocked = false;
   final List<String> _visitedCities = [];
-  int _communityReports = 0;
-  Map<String, dynamic>? _monthlyDrivingAnalytics;
-  int _monthlyDriveCount = 0;
   final List<Map<String, String>> _savedRoutes = [];
 
   final List<Map<String, dynamic>> _pointLedger = [];
@@ -657,6 +613,19 @@ class _HomePageState extends State<HomePage> {
   @override
   void initState() {
     super.initState();
+    if (!kIsWeb && defaultTargetPlatform == TargetPlatform.android) {
+      unawaited(SystemChrome.setEnabledSystemUIMode(SystemUiMode.edgeToEdge));
+      SystemChrome.setSystemUIOverlayStyle(
+        const SystemUiOverlayStyle(
+          statusBarColor: Colors.transparent,
+          statusBarIconBrightness: Brightness.light,
+          systemNavigationBarColor: Colors.transparent,
+          systemNavigationBarDividerColor: Colors.transparent,
+          systemNavigationBarIconBrightness: Brightness.light,
+          systemNavigationBarContrastEnforced: false,
+        ),
+      );
+    }
     _userName = widget.userName;
     _userEmail = widget.userEmail;
     _initializeVoiceNavigation();
@@ -1155,6 +1124,13 @@ class _HomePageState extends State<HomePage> {
   }
 
   void _showPropertyListing(Map<String, dynamic> listing) {
+    final listingId = listing['id']?.toString();
+    if (listingId != null &&
+        listing['status'] == 'active' &&
+        listing['owner_uid'] != FirebaseAuth.instance.currentUser?.uid) {
+      unawaited(_recordPropertyListingView(listingId));
+    }
+
     final imageUrl = listing['cover_image_url']?.toString() ?? '';
     final district = listing['district']?.toString() ?? '';
     final city = listing['city']?.toString() ?? '';
@@ -1275,6 +1251,14 @@ class _HomePageState extends State<HomePage> {
         ),
       ),
     );
+  }
+
+  Future<void> _recordPropertyListingView(String listingId) async {
+    try {
+      await _propertyListingService.recordView(listingId);
+    } catch (error) {
+      debugPrint('İlan görüntülenmesi kaydedilemedi: $error');
+    }
   }
 
   Future<void> _scrollPublicChatToBottom() async {
@@ -2358,12 +2342,15 @@ class _HomePageState extends State<HomePage> {
         LatLng(position.latitude, position.longitude),
         vehicle: _selectedVehicle,
       );
+      final trafficPolylines =
+          route['trafficPolylines'] as List<Polyline>? ?? const [];
       setState(() {
+        _navigationTrafficPolylines = trafficPolylines;
         _routePolylines = [
           Polyline(
             polylineId: const PolylineId('route-live'),
             points: remainingRoute,
-            color: const Color(0xFFE85D04),
+            color: const Color(0xFF4285F4),
             width: 7,
           ),
         ];
@@ -2863,6 +2850,7 @@ class _HomePageState extends State<HomePage> {
 
   void _clearRouteState() {
     _routePolylines = const <Polyline>[];
+    _navigationTrafficPolylines = const <Polyline>[];
     _navigationSteps = [];
     _navigationStepIndex = 0;
     _navigationDistanceKm = null;
@@ -3478,214 +3466,6 @@ out center tags;
     }
   }
 
-  Future<String?> _showVehiclePicker() {
-    const vehicles = [
-      ('Araba', 'Araba', Icons.directions_car_rounded),
-      ('Motosiklet', 'Motor', Icons.two_wheeler_rounded),
-      ('Bisiklet', 'Bisiklet', Icons.pedal_bike_rounded),
-      ('Yürüyüş', 'Yaya', Icons.directions_walk_rounded),
-    ];
-    final kmController = TextEditingController(text: _vehicleKm);
-
-    return showModalBottomSheet<String>(
-      context: context,
-      isScrollControlled: true,
-      backgroundColor: const Color(0xFF191919),
-      shape: const RoundedRectangleBorder(
-        borderRadius: BorderRadius.vertical(top: Radius.circular(24)),
-      ),
-      builder: (sheetContext) {
-        String localSelectedVehicle = _selectedVehicle;
-
-        return StatefulBuilder(
-          builder: (context, setSheetState) {
-            final shouldShowKmInput = localSelectedVehicle != 'Yürüyüş';
-            final kmFieldLabel = switch (localSelectedVehicle) {
-              'Araba' => 'Araba KM',
-              'Motosiklet' => 'Motor KM',
-              'Bisiklet' => 'Bisiklet KM',
-              _ => 'KM',
-            };
-            final kmHintText = switch (localSelectedVehicle) {
-              'Araba' => 'Mevcut araç kilometresini girin',
-              'Motosiklet' => 'Mevcut motor kilometresini girin',
-              'Bisiklet' => 'Mevcut bisiklet kilometresini girin',
-              _ => 'Mevcut kilometre değerini girin',
-            };
-
-            return SafeArea(
-              child: Padding(
-                padding: EdgeInsets.fromLTRB(
-                  20,
-                  18,
-                  20,
-                  MediaQuery.of(sheetContext).viewInsets.bottom + 12,
-                ),
-                child: ConstrainedBox(
-                  constraints: BoxConstraints(
-                    maxHeight: MediaQuery.of(sheetContext).size.height * 0.85,
-                  ),
-                  child: Column(
-                    mainAxisSize: MainAxisSize.min,
-                    crossAxisAlignment: CrossAxisAlignment.start,
-                    children: [
-                      const SizedBox(height: 4),
-                      ...vehicles.map(
-                        (vehicle) => Container(
-                          margin: const EdgeInsets.only(bottom: 8),
-                          decoration: BoxDecoration(
-                            color: localSelectedVehicle == vehicle.$1
-                                ? const Color(0xFF2B1A10)
-                                : const Color(0xFF1B1B1B),
-                            borderRadius: BorderRadius.circular(16),
-                            border: Border.all(
-                              color: localSelectedVehicle == vehicle.$1
-                                  ? const Color(0xFFFF8A3D)
-                                        .withValues(alpha: 0.9)
-                                  : const Color(0xFFFF8A3D)
-                                        .withValues(alpha: 0.25),
-                            ),
-                          ),
-                          child: Material(
-                            color: Colors.transparent,
-                            child: InkWell(
-                              borderRadius: BorderRadius.circular(16),
-                              onTap: () {
-                                setSheetState(
-                                  () => localSelectedVehicle = vehicle.$1,
-                                );
-                              },
-                              child: Padding(
-                                padding: const EdgeInsets.symmetric(
-                                  horizontal: 14,
-                                  vertical: 12,
-                                ),
-                                child: Row(
-                                  children: [
-                                    CircleAvatar(
-                                      backgroundColor: const Color(0xFF2A180D),
-                                      child: Icon(
-                                        vehicle.$3,
-                                        color: const Color(0xFFFF6B00),
-                                      ),
-                                    ),
-                                    const SizedBox(width: 12),
-                                    Expanded(
-                                      child: Text(
-                                        vehicle.$2,
-                                        style: const TextStyle(
-                                          color: Colors.white,
-                                          fontWeight: FontWeight.w600,
-                                        ),
-                                      ),
-                                    ),
-                                    if (localSelectedVehicle == vehicle.$1)
-                                      const Icon(
-                                        Icons.check_circle,
-                                        color: Color(0xFFFF6B00),
-                                      ),
-                                  ],
-                                ),
-                              ),
-                            ),
-                          ),
-                        ),
-                      ),
-                      if (shouldShowKmInput) ...[
-                        const SizedBox(height: 10),
-                        Container(
-                          padding: const EdgeInsets.all(0),
-                          decoration: BoxDecoration(
-                            color: const Color(0xFF171717),
-                            borderRadius: BorderRadius.circular(18),
-                          ),
-                          child: TextField(
-                            controller: kmController,
-                            keyboardType: const TextInputType.numberWithOptions(
-                              decimal: true,
-                            ),
-                            style: const TextStyle(
-                              color: Colors.white,
-                              fontSize: 15,
-                              fontWeight: FontWeight.w700,
-                            ),
-                            decoration: InputDecoration(
-                              hintText: kmHintText,
-                              hintStyle: const TextStyle(
-                                color: Colors.white54,
-                                fontSize: 13,
-                              ),
-                              labelText: kmFieldLabel,
-                              labelStyle: const TextStyle(
-                                color: Color(0xFFFFB066),
-                                fontWeight: FontWeight.w700,
-                              ),
-                              filled: true,
-                              fillColor: const Color(0xFF171717),
-                              contentPadding: const EdgeInsets.symmetric(
-                                horizontal: 14,
-                                vertical: 14,
-                              ),
-                              enabledBorder: OutlineInputBorder(
-                                borderRadius: BorderRadius.circular(14),
-                                borderSide: BorderSide(
-                                  color: const Color(0xFFFF8A3D)
-                                      .withValues(alpha: 0.45),
-                                ),
-                              ),
-                              focusedBorder: OutlineInputBorder(
-                                borderRadius: BorderRadius.circular(14),
-                                borderSide: const BorderSide(
-                                  color: Color(0xFFFF8A3D),
-                                  width: 1.5,
-                                ),
-                              ),
-                            ),
-                          ),
-                        ),
-                      ],
-                      const SizedBox(height: 16),
-                      SizedBox(
-                        width: double.infinity,
-                        child: ElevatedButton(
-                          onPressed: () {
-                            final cleanedKm = kmController.text
-                                .replaceAll(RegExp(r'[^0-9,\.]'), '')
-                                .trim();
-                            if (cleanedKm.isNotEmpty) {
-                              _vehicleKm = cleanedKm;
-                            }
-                            setState(
-                              () => _selectedVehicle = localSelectedVehicle,
-                            );
-                            unawaited(_persistVehicleProfile());
-                            Navigator.pop(sheetContext, localSelectedVehicle);
-                          },
-                          style: ElevatedButton.styleFrom(
-                            backgroundColor: const Color(0xFFFF6B00),
-                            foregroundColor: Colors.white,
-                            padding: const EdgeInsets.symmetric(vertical: 14),
-                            shape: RoundedRectangleBorder(
-                              borderRadius: BorderRadius.circular(14),
-                            ),
-                          ),
-                          child: const Text(
-                            'Seç ve kaydet',
-                            style: TextStyle(fontWeight: FontWeight.w700),
-                          ),
-                        ),
-                      ),
-                    ],
-                  ),
-                ),
-              ),
-            );
-          },
-        );
-      },
-    );
-  }
-
   Future<void> _showDirectionsSheet() async {
     if (!mounted || _isOpeningDirections) return;
     _isOpeningDirections = true;
@@ -3715,6 +3495,10 @@ out center tags;
       return;
     }
     final start = LatLng(currentPosition.latitude, currentPosition.longitude);
+    final routeVehicle = _selectedVehicle == 'Bisiklet'
+        ? 'Araba'
+        : _selectedVehicle;
+    final shouldPersistRouteVehicle = routeVehicle != _selectedVehicle;
 
     if (mounted) {
       setState(() {
@@ -3724,15 +3508,11 @@ out center tags;
 
     Map<String, dynamic> route;
     try {
-      route = await _fetchRoadRoute(
-        start,
-        destination,
-        vehicle: _selectedVehicle,
-      );
+      route = await _fetchRoadRoute(start, destination, vehicle: routeVehicle);
     } catch (error) {
       debugPrint('Yol rotası alınamadı: $error');
       _showTrackingMessage(
-        'Gerçek yol tarifi alınamadı. İnternet bağlantınızı kontrol edin.',
+        'Google Routes kullanılamadı. API anahtarını, Routes API erişimini ve faturalandırmayı kontrol edin.',
       );
       _isOpeningDirections = false;
       return;
@@ -3743,30 +3523,37 @@ out center tags;
     }
 
     final routePoints = route['points'] as List<LatLng>;
-    final routeDistanceKm = route['distanceKm'] as double;
-    final durationMinutes = route['durationMinutes'] as int;
-    final trafficInfo = await NavoraTrafficService.fetchTrafficStatus(start);
+    var routeDistanceKm = route['distanceKm'] as double;
+    var durationMinutes = route['durationMinutes'] as int;
+    var routeTrafficStatus = route['trafficStatus'] as String? ?? 'Açık';
+    var navigationSteps = List<Map<String, dynamic>>.from(route['steps']);
+    var selectedTravelMode = routeVehicle;
+    var isRecalculatingRoute = false;
     final remainingRoute = navoraTrimRouteToRemainingPath(
       routePoints,
       start,
-      vehicle: _selectedVehicle,
+      vehicle: routeVehicle,
     );
+    final trafficPolylines =
+        route['trafficPolylines'] as List<Polyline>? ?? const [];
 
     setState(() {
-      _navigationTrafficStatus = trafficInfo['status'] as String? ?? 'Açık';
+      _selectedVehicle = routeVehicle;
+      _navigationTrafficPolylines = trafficPolylines;
       _routePolylines = [
         Polyline(
           polylineId: const PolylineId('route-navigation'),
           points: remainingRoute,
-          color: const Color(0xFFE85D04),
+          color: const Color(0xFF4285F4),
           width: 7,
         ),
       ];
-      _navigationSteps = List<Map<String, dynamic>>.from(route['steps']);
+      _navigationSteps = navigationSteps;
       _navigationStepIndex = 0;
       _navigationDistanceKm = routeDistanceKm;
       _navigationDurationMinutes = durationMinutes;
     });
+    if (shouldPersistRouteVehicle) unawaited(_persistVehicleProfile());
     await _fitMapToPoints([start, destination]);
     if (!mounted) {
       _isOpeningDirections = false;
@@ -3782,183 +3569,296 @@ out center tags;
       shape: const RoundedRectangleBorder(
         borderRadius: BorderRadius.vertical(top: Radius.circular(30)),
       ),
-      builder: (context) => SafeArea(
-        child: Padding(
-          padding: const EdgeInsets.fromLTRB(18, 12, 18, 22),
-          child: Column(
-            mainAxisSize: MainAxisSize.min,
-            crossAxisAlignment: CrossAxisAlignment.start,
-            children: [
-              Center(
-                child: Container(
-                  width: 42,
-                  height: 5,
-                  margin: const EdgeInsets.only(bottom: 18),
-                  decoration: BoxDecoration(
-                    color: const Color(0xFF4A4A4A),
-                    borderRadius: BorderRadius.circular(8),
+      builder: (modalContext) => StatefulBuilder(
+        builder: (context, setSheetState) {
+          Future<void> selectTravelMode(String vehicle) async {
+            if (vehicle == selectedTravelMode || isRecalculatingRoute) return;
+            setSheetState(() => isRecalculatingRoute = true);
+            try {
+              final updatedRoute = await _fetchRoadRoute(
+                start,
+                destination,
+                vehicle: vehicle,
+              );
+              if (!mounted || !modalContext.mounted) return;
+
+              final updatedPoints = updatedRoute['points'] as List<LatLng>;
+              final updatedRemainingRoute = navoraTrimRouteToRemainingPath(
+                updatedPoints,
+                start,
+                vehicle: vehicle,
+              );
+              final updatedTrafficPolylines =
+                  updatedRoute['trafficPolylines'] as List<Polyline>? ??
+                  const [];
+              final updatedSteps = List<Map<String, dynamic>>.from(
+                updatedRoute['steps'],
+              );
+
+              selectedTravelMode = vehicle;
+              routeDistanceKm = updatedRoute['distanceKm'] as double;
+              durationMinutes = updatedRoute['durationMinutes'] as int;
+              routeTrafficStatus =
+                  updatedRoute['trafficStatus'] as String? ?? 'Açık';
+              navigationSteps = updatedSteps;
+
+              setState(() {
+                _selectedVehicle = vehicle;
+                _navigationTrafficPolylines = updatedTrafficPolylines;
+                _routePolylines = [
+                  Polyline(
+                    polylineId: const PolylineId('route-navigation'),
+                    points: updatedRemainingRoute,
+                    color: const Color(0xFF4285F4),
+                    width: 7,
                   ),
-                ),
-              ),
-              Row(
+                ];
+                _navigationSteps = updatedSteps;
+                _navigationStepIndex = 0;
+                _navigationDistanceKm = routeDistanceKm;
+                _navigationDurationMinutes = durationMinutes;
+                _isOffRoute = false;
+              });
+              unawaited(_persistVehicleProfile());
+              await _fitMapToPoints([start, destination]);
+            } catch (error) {
+              debugPrint('Ulaşım türü için rota alınamadı: $error');
+              if (mounted) {
+                _showTrackingMessage(
+                  'Bu ulaşım türü için rota hesaplanamadı. Tekrar deneyin.',
+                );
+              }
+            } finally {
+              if (modalContext.mounted) {
+                setSheetState(() => isRecalculatingRoute = false);
+              }
+            }
+          }
+
+          return SafeArea(
+            child: Padding(
+              padding: const EdgeInsets.fromLTRB(18, 12, 18, 22),
+              child: Column(
+                mainAxisSize: MainAxisSize.min,
+                crossAxisAlignment: CrossAxisAlignment.start,
                 children: [
-                  Container(
-                    width: 46,
-                    height: 46,
-                    decoration: BoxDecoration(
-                      color: const Color(0xFFFF6B00),
-                      borderRadius: BorderRadius.circular(15),
+                  Center(
+                    child: Container(
+                      width: 42,
+                      height: 5,
+                      margin: const EdgeInsets.only(bottom: 18),
+                      decoration: BoxDecoration(
+                        color: const Color(0xFF4A4A4A),
+                        borderRadius: BorderRadius.circular(8),
+                      ),
                     ),
-                    child: const Icon(
-                      Icons.navigation_rounded,
+                  ),
+                  Row(
+                    children: [
+                      Container(
+                        width: 46,
+                        height: 46,
+                        decoration: BoxDecoration(
+                          color: const Color(0xFFFF6B00),
+                          borderRadius: BorderRadius.circular(15),
+                        ),
+                        child: const Icon(
+                          Icons.navigation_rounded,
+                          color: Colors.white,
+                        ),
+                      ),
+                      const SizedBox(width: 12),
+                      const Expanded(
+                        child: Column(
+                          crossAxisAlignment: CrossAxisAlignment.start,
+                          children: [
+                            Text(
+                              'Hazır mısınız?',
+                              style: TextStyle(
+                                fontSize: 12,
+                                color: Color(0xFFBDBDBD),
+                                fontWeight: FontWeight.w600,
+                              ),
+                            ),
+                            SizedBox(height: 3),
+                            Text(
+                              'Yolculuk özeti',
+                              style: TextStyle(
+                                fontSize: 20,
+                                color: Colors.white,
+                                fontWeight: FontWeight.w800,
+                              ),
+                            ),
+                          ],
+                        ),
+                      ),
+                      IconButton(
+                        tooltip: 'Kapat',
+                        onPressed: () => Navigator.pop(context),
+                        icon: const Icon(
+                          Icons.close_rounded,
+                          color: Colors.white70,
+                        ),
+                      ),
+                    ],
+                  ),
+                  const SizedBox(height: 16),
+                  Text(
+                    _selectedDestinationName ?? 'Seçilen konum',
+                    maxLines: 2,
+                    overflow: TextOverflow.ellipsis,
+                    style: const TextStyle(
+                      fontSize: 19,
+                      fontWeight: FontWeight.bold,
                       color: Colors.white,
                     ),
                   ),
-                  const SizedBox(width: 12),
-                  const Expanded(
-                    child: Column(
-                      crossAxisAlignment: CrossAxisAlignment.start,
-                      children: [
-                        Text(
-                          'Hazır mısınız?',
-                          style: TextStyle(
-                            fontSize: 12,
-                            color: Color(0xFFBDBDBD),
-                            fontWeight: FontWeight.w600,
-                          ),
+                  const SizedBox(height: 6),
+                  const Text(
+                    'Mevcut konumunuzdan yol tarifi',
+                    style: TextStyle(color: Color(0xFFBDBDBD), fontSize: 13),
+                  ),
+                  const SizedBox(height: 16),
+                  const Text(
+                    'Ulaşım türü',
+                    style: TextStyle(
+                      color: Colors.white,
+                      fontSize: 13,
+                      fontWeight: FontWeight.w700,
+                    ),
+                  ),
+                  const SizedBox(height: 8),
+                  SingleChildScrollView(
+                    scrollDirection: Axis.horizontal,
+                    child: SegmentedButton<String>(
+                      segments: const [
+                        ButtonSegment(
+                          value: 'Araba',
+                          label: Text('Araba'),
+                          icon: Icon(Icons.directions_car_rounded),
                         ),
-                        SizedBox(height: 3),
-                        Text(
-                          'Yolculuk özeti',
-                          style: TextStyle(
-                            fontSize: 20,
-                            color: Colors.white,
-                            fontWeight: FontWeight.w800,
-                          ),
+                        ButtonSegment(
+                          value: 'Motosiklet',
+                          label: Text('Motor'),
+                          icon: Icon(Icons.two_wheeler_rounded),
+                        ),
+                        ButtonSegment(
+                          value: 'Yürüyüş',
+                          label: Text('Yaya'),
+                          icon: Icon(Icons.directions_walk_rounded),
+                        ),
+                      ],
+                      selected: {selectedTravelMode},
+                      showSelectedIcon: false,
+                      onSelectionChanged: isRecalculatingRoute
+                          ? null
+                          : (selection) =>
+                                unawaited(selectTravelMode(selection.first)),
+                      style: SegmentedButton.styleFrom(
+                        foregroundColor: const Color(0xFFD7D7D7),
+                        selectedForegroundColor: Colors.white,
+                        selectedBackgroundColor: const Color(0xFFFF7A00),
+                      ),
+                    ),
+                  ),
+                  if (isRecalculatingRoute) ...[
+                    const SizedBox(height: 8),
+                    const LinearProgressIndicator(
+                      minHeight: 2,
+                      color: Color(0xFFFF7A00),
+                      backgroundColor: Color(0xFF303030),
+                    ),
+                  ],
+                  const SizedBox(height: 18),
+                  Container(
+                    width: double.infinity,
+                    padding: const EdgeInsets.fromLTRB(12, 16, 12, 16),
+                    decoration: BoxDecoration(
+                      color: const Color(0xFF242424),
+                      borderRadius: BorderRadius.circular(20),
+                    ),
+                    child: Row(
+                      mainAxisAlignment: MainAxisAlignment.spaceAround,
+                      children: [
+                        _buildRouteSummary(
+                          Icons.straighten_rounded,
+                          '${routeDistanceKm.toStringAsFixed(1)} km',
+                          'Yaklaşık mesafe',
+                        ),
+                        _buildRouteSummary(
+                          Icons.schedule_rounded,
+                          navoraFormatNavigationDuration(durationMinutes),
+                          'Tahmini süre',
+                        ),
+                        _buildRouteSummary(
+                          Icons.traffic_rounded,
+                          routeTrafficStatus,
+                          'Trafik katmanı',
                         ),
                       ],
                     ),
                   ),
-                  IconButton(
-                    tooltip: 'Kapat',
-                    onPressed: () => Navigator.pop(context),
-                    icon: const Icon(
-                      Icons.close_rounded,
-                      color: Colors.white70,
+                  if (navigationSteps.isNotEmpty) ...[
+                    const SizedBox(height: 14),
+                    const Text(
+                      'Yol üzerindeki adımlar',
+                      style: TextStyle(
+                        fontWeight: FontWeight.bold,
+                        fontSize: 14,
+                        color: Colors.white,
+                      ),
+                    ),
+                    const SizedBox(height: 6),
+                    ...navigationSteps.take(3).map(_buildNavigationStep),
+                  ],
+                  const SizedBox(height: 16),
+                  SizedBox(
+                    width: double.infinity,
+                    height: 54,
+                    child: ElevatedButton.icon(
+                      onPressed: isRecalculatingRoute
+                          ? null
+                          : () async {
+                              Navigator.pop(context);
+                              if (mounted) {
+                                setState(() {
+                                  _isNavigationActive = true;
+                                  _isMapTilted = true;
+                                  _isFollowingCurrentPosition = true;
+                                  _hasNavigationBearing = false;
+                                  _isOffRoute = false;
+                                  _selectedIndex = 1;
+                                  _activeNavigationTitle =
+                                      _selectedDestinationName;
+                                  _activeNavigationDestination =
+                                      _searchController.text.trim().isEmpty
+                                      ? _selectedDestinationName
+                                      : _searchController.text.trim();
+                                  _showSearchPanel = false;
+                                  FocusManager.instance.primaryFocus?.unfocus();
+                                });
+                              }
+                              await _speakNavigation(
+                                'Yola çıkıldı. ${navigationSteps.isEmpty ? 'Rotanızı takip edin.' : navigationSteps.first['voice']}',
+                              );
+                              await _toggleDriveTracking();
+                            },
+                      icon: const Icon(Icons.navigation_rounded),
+                      label: const Text('Yola çık'),
+                      style: ElevatedButton.styleFrom(
+                        backgroundColor: const Color(0xFFFF6B00),
+                        foregroundColor: Colors.white,
+                        shape: RoundedRectangleBorder(
+                          borderRadius: BorderRadius.circular(17),
+                        ),
+                      ),
                     ),
                   ),
                 ],
               ),
-              const SizedBox(height: 16),
-              Text(
-                _selectedDestinationName ?? 'Seçilen konum',
-                maxLines: 2,
-                overflow: TextOverflow.ellipsis,
-                style: const TextStyle(
-                  fontSize: 19,
-                  fontWeight: FontWeight.bold,
-                  color: Colors.white,
-                ),
-              ),
-              const SizedBox(height: 6),
-              const Text(
-                'Mevcut konumunuzdan yol tarifi',
-                style: TextStyle(color: Color(0xFFBDBDBD), fontSize: 13),
-              ),
-              const SizedBox(height: 6),
-              Text(
-                'Araç: ${_vehicleDisplayName(_selectedVehicle)}',
-                style: const TextStyle(
-                  color: Color(0xFFFFB066),
-                  fontSize: 12,
-                  fontWeight: FontWeight.w700,
-                ),
-              ),
-              const SizedBox(height: 18),
-              Container(
-                width: double.infinity,
-                padding: const EdgeInsets.fromLTRB(12, 16, 12, 16),
-                decoration: BoxDecoration(
-                  color: const Color(0xFF242424),
-                  borderRadius: BorderRadius.circular(20),
-                ),
-                child: Row(
-                  mainAxisAlignment: MainAxisAlignment.spaceAround,
-                  children: [
-                    _buildRouteSummary(
-                      Icons.straighten_rounded,
-                      '${routeDistanceKm.toStringAsFixed(1)} km',
-                      'Yaklaşık mesafe',
-                    ),
-                    _buildRouteSummary(
-                      Icons.schedule_rounded,
-                      '$durationMinutes dk',
-                      'Tahmini süre',
-                    ),
-                    _buildRouteSummary(
-                      Icons.traffic_rounded,
-                      _navigationTrafficStatus ?? 'Açık',
-                      'Trafik katmanı',
-                    ),
-                  ],
-                ),
-              ),
-              if (_navigationSteps.isNotEmpty) ...[
-                const SizedBox(height: 14),
-                const Text(
-                  'Yol üzerindeki adımlar',
-                  style: TextStyle(
-                    fontWeight: FontWeight.bold,
-                    fontSize: 14,
-                    color: Colors.white,
-                  ),
-                ),
-                const SizedBox(height: 6),
-                ..._navigationSteps.take(3).map(_buildNavigationStep),
-              ],
-              const SizedBox(height: 16),
-              SizedBox(
-                width: double.infinity,
-                height: 54,
-                child: ElevatedButton.icon(
-                  onPressed: () async {
-                    Navigator.pop(context);
-                    if (mounted) {
-                      setState(() {
-                        _isNavigationActive = true;
-                        _isMapTilted = true;
-                        _isFollowingCurrentPosition = true;
-                        _hasNavigationBearing = false;
-                        _isOffRoute = false;
-                        _selectedIndex = 1;
-                        _activeNavigationTitle = _selectedDestinationName;
-                        _activeNavigationDestination =
-                            _searchController.text.trim().isEmpty
-                            ? _selectedDestinationName
-                            : _searchController.text.trim();
-                        _showSearchPanel = false;
-                        FocusManager.instance.primaryFocus?.unfocus();
-                      });
-                    }
-                    await _speakNavigation(
-                      'Yola çıkıldı. ${_navigationSteps.isEmpty ? 'Rotanızı takip edin.' : _navigationSteps.first['voice']}',
-                    );
-                    await _toggleDriveTracking();
-                  },
-                  icon: const Icon(Icons.navigation_rounded),
-                  label: const Text('Yola çık'),
-                  style: ElevatedButton.styleFrom(
-                    backgroundColor: const Color(0xFFFF6B00),
-                    foregroundColor: Colors.white,
-                    shape: RoundedRectangleBorder(
-                      borderRadius: BorderRadius.circular(17),
-                    ),
-                  ),
-                ),
-              ),
-            ],
-          ),
-        ),
+            ),
+          );
+        },
       ),
     );
   }
@@ -4016,24 +3916,88 @@ out center tags;
     LatLng destination, {
     String vehicle = 'Araba',
   }) async {
-    final profile = navoraRouteProfileForVehicle(vehicle);
-    final uri = Uri.parse(
-      'https://router.project-osrm.org/route/v1/$profile/'
-      '${start.longitude},${start.latitude};'
-      '${destination.longitude},${destination.latitude}'
-      '?overview=full&geometries=geojson&steps=true',
-    );
-    final response = await http.get(uri).timeout(const Duration(seconds: 15));
-    if (response.statusCode != 200) {
-      throw Exception('OSRM HTTP ${response.statusCode}');
+    if (NavoraTrafficService.googleRoutesApiKey.isEmpty) {
+      throw StateError('Google Routes API anahtarı tanımlanmamış.');
     }
+    return _fetchGoogleRoadRoute(start, destination, vehicle: vehicle);
+  }
+
+  Future<Map<String, dynamic>> _fetchGoogleRoadRoute(
+    LatLng start,
+    LatLng destination, {
+    required String vehicle,
+  }) async {
+    final travelMode = switch (vehicle) {
+      'Yürüyüş' => 'WALK',
+      'Bisiklet' => 'BICYCLE',
+      _ => 'DRIVE',
+    };
+    final includeTraffic = travelMode == 'DRIVE';
+    final fieldMask = <String>[
+      'routes.distanceMeters',
+      'routes.duration',
+      'routes.polyline.geoJsonLinestring',
+      'routes.legs.steps.distanceMeters',
+      'routes.legs.steps.navigationInstruction',
+      'routes.legs.steps.startLocation',
+      if (includeTraffic) 'routes.travelAdvisory.speedReadingIntervals',
+    ].join(',');
+    final identityHeaders = await NavoraPlacesService.clientIdentityHeaders;
+    final response = await http
+        .post(
+          Uri.parse(
+            'https://routes.googleapis.com/directions/v2:computeRoutes',
+          ),
+          headers: {
+            ...identityHeaders,
+            'Content-Type': 'application/json',
+            'X-Goog-Api-Key': NavoraTrafficService.googleRoutesApiKey,
+            'X-Goog-FieldMask': fieldMask,
+          },
+          body: jsonEncode({
+            'origin': {
+              'location': {
+                'latLng': {
+                  'latitude': start.latitude,
+                  'longitude': start.longitude,
+                },
+              },
+            },
+            'destination': {
+              'location': {
+                'latLng': {
+                  'latitude': destination.latitude,
+                  'longitude': destination.longitude,
+                },
+              },
+            },
+            'travelMode': travelMode,
+            'polylineEncoding': 'GEO_JSON_LINESTRING',
+            'polylineQuality': 'HIGH_QUALITY',
+            if (includeTraffic) ...{
+              'routingPreference': 'TRAFFIC_AWARE_OPTIMAL',
+              'extraComputations': ['TRAFFIC_ON_POLYLINE'],
+            },
+          }),
+        )
+        .timeout(const Duration(seconds: 20));
+    if (response.statusCode != 200) {
+      throw Exception('Google Routes API HTTP ${response.statusCode}');
+    }
+
     final data = jsonDecode(response.body) as Map<String, dynamic>;
     final routes = data['routes'] as List<dynamic>?;
-    if (routes == null || routes.isEmpty) throw Exception('Rota bulunamadı');
-    final selectedRoute = routes.first as Map<String, dynamic>;
-    final geometry = selectedRoute['geometry'] as Map<String, dynamic>;
-    final coordinates = geometry['coordinates'] as List<dynamic>;
+    if (routes == null || routes.isEmpty) {
+      throw Exception('Google Routes rota döndürmedi');
+    }
+    final route = routes.first as Map<String, dynamic>;
+    final polyline = route['polyline'] as Map<String, dynamic>? ?? const {};
+    final geoJson =
+        polyline['geoJsonLinestring'] as Map<String, dynamic>? ?? const {};
+    final coordinates = geoJson['coordinates'] as List<dynamic>? ?? const [];
     final points = coordinates
+        .whereType<List<dynamic>>()
+        .where((coordinate) => coordinate.length >= 2)
         .map(
           (coordinate) => LatLng(
             (coordinate[1] as num).toDouble(),
@@ -4041,91 +4005,68 @@ out center tags;
           ),
         )
         .toList();
-    final legs = selectedRoute['legs'] as List<dynamic>? ?? [];
-    final rawSteps = legs
-        .expand(
-          (leg) =>
-              (leg as Map<String, dynamic>)['steps'] as List<dynamic>? ?? [],
-        )
-        .map((step) => _formatNavigationStep(step as Map<String, dynamic>))
+    if (points.length < 2) throw Exception('Google Routes geometrisi boş');
+
+    final advisory =
+        route['travelAdvisory'] as Map<String, dynamic>? ?? const {};
+    final trafficIntervals =
+        advisory['speedReadingIntervals'] as List<dynamic>? ?? const [];
+    final legs = route['legs'] as List<dynamic>? ?? const [];
+    final steps = legs
+        .whereType<Map<String, dynamic>>()
+        .expand((leg) => leg['steps'] as List<dynamic>? ?? const [])
+        .whereType<Map<String, dynamic>>()
+        .map(_formatGoogleNavigationStep)
         .toList();
+    final durationSeconds = double.tryParse(
+      route['duration']?.toString().replaceFirst('s', '') ?? '',
+    );
     return {
       'points': points,
-      'distanceKm': ((selectedRoute['distance'] as num).toDouble() / 1000),
-      'durationMinutes':
-          (((selectedRoute['duration'] as num).toDouble() / 60).ceil()).clamp(
-            1,
-            999,
-          ),
-      'steps': rawSteps,
+      'distanceKm': ((route['distanceMeters'] as num?)?.toDouble() ?? 0) / 1000,
+      'durationMinutes': (((durationSeconds ?? 0) / 60).ceil()).clamp(1, 999),
+      'steps': steps,
+      'trafficPolylines': NavoraTrafficService.buildRouteTrafficPolylines(
+        points,
+        trafficIntervals,
+      ),
+      'trafficStatus': NavoraTrafficService.statusForIntervals(
+        trafficIntervals,
+      ),
     };
   }
 
-  Map<String, dynamic> _formatNavigationStep(Map<String, dynamic> step) {
-    final maneuver = step['maneuver'] as Map<String, dynamic>? ?? {};
-    final type = maneuver['type']?.toString() ?? 'continue';
-    final modifier = maneuver['modifier']?.toString();
-    final roadName = step['name']?.toString();
-    final maneuverLocation = maneuver['location'] as List<dynamic>?;
-    final action = switch (type) {
-      'depart' => 'Yola çık',
-      'arrive' => 'Hedefe ulaştın',
-      'roundabout' || 'rotary' => 'Döner kavşaktan çık',
-      'turn' => '${_turkishDirection(modifier)} dön',
-      'merge' => 'Yola katıl',
-      'fork' => 'Yol ayrımında ${_turkishDirection(modifier)} devam et',
-      _ => 'Düz devam et',
-    };
-    final distance = (step['distance'] as num? ?? 0).toDouble();
+  Map<String, dynamic> _formatGoogleNavigationStep(Map<String, dynamic> step) {
+    final instruction =
+        step['navigationInstruction'] as Map<String, dynamic>? ?? const {};
+    final text = instruction['instructions']?.toString() ?? 'Yola devam et';
+    final maneuver = instruction['maneuver']?.toString() ?? '';
+    final startLocation =
+        step['startLocation'] as Map<String, dynamic>? ?? const {};
+    final latLng = startLocation['latLng'] as Map<String, dynamic>? ?? const {};
+    final distance = (step['distanceMeters'] as num?)?.toDouble() ?? 0;
     final distanceText = distance >= 1000
         ? '${(distance / 1000).toStringAsFixed(1)} km'
         : '${distance.round()} m';
-    return {
-      'text': roadName == null || roadName.isEmpty
-          ? action
-          : '$action, $roadName',
-      'distance': distanceText,
-      'icon': _navigationIcon(type, modifier),
-      'voice':
-          '$distanceText sonra ${roadName == null || roadName.isEmpty ? action : '$action, $roadName'}',
-      'latitude': maneuverLocation != null && maneuverLocation.length > 1
-          ? (maneuverLocation[1] as num).toDouble()
-          : null,
-      'longitude': maneuverLocation != null && maneuverLocation.isNotEmpty
-          ? (maneuverLocation[0] as num).toDouble()
-          : null,
+    final icon = switch (maneuver) {
+      'ARRIVE' => Icons.flag_rounded,
+      'TURN_LEFT' ||
+      'TURN_SLIGHT_LEFT' ||
+      'TURN_SHARP_LEFT' => Icons.turn_left_rounded,
+      'TURN_RIGHT' ||
+      'TURN_SLIGHT_RIGHT' ||
+      'TURN_SHARP_RIGHT' => Icons.turn_right_rounded,
+      'ROUNDABOUT_LEFT' || 'ROUNDABOUT_RIGHT' => Icons.roundabout_right_rounded,
+      _ => Icons.straight_rounded,
     };
-  }
-
-  String _turkishDirection(String? modifier) {
-    switch (modifier) {
-      case 'left':
-        return 'sola';
-      case 'right':
-        return 'sağa';
-      case 'slight left':
-        return 'hafif sola';
-      case 'slight right':
-        return 'hafif sağa';
-      case 'uturn':
-        return 'U dönüşü';
-      default:
-        return 'ileriye';
-    }
-  }
-
-  IconData _navigationIcon(String type, String? modifier) {
-    if (type == 'arrive') return Icons.flag_rounded;
-    if (type == 'roundabout' || type == 'rotary') {
-      return Icons.roundabout_right_rounded;
-    }
-    if (modifier == 'left' || modifier == 'slight left') {
-      return Icons.turn_left_rounded;
-    }
-    if (modifier == 'right' || modifier == 'slight right') {
-      return Icons.turn_right_rounded;
-    }
-    return Icons.straight_rounded;
+    return {
+      'text': text,
+      'distance': distanceText,
+      'icon': icon,
+      'voice': text,
+      'latitude': (latLng['latitude'] as num?)?.toDouble(),
+      'longitude': (latLng['longitude'] as num?)?.toDouble(),
+    };
   }
 
   Widget _buildNavigationStep(Map<String, dynamic> step) {
@@ -4220,9 +4161,10 @@ out center tags;
               ),
               IconButton(
                 tooltip: 'Navigasyonu kapat',
-                onPressed: () => setState(() {
-                  _clearRouteState();
-                }),
+                onPressed: () {
+                  setState(_clearRouteState);
+                  unawaited(_resetNavigationCamera());
+                },
                 icon: const Icon(Icons.close_rounded, size: 20),
               ),
             ],
@@ -4274,7 +4216,6 @@ out center tags;
                         'Sıradaki hareket',
                         style: TextStyle(color: Colors.white, fontSize: 11),
                       ),
-                      const SizedBox(height: 2),
                       Text(
                         nextStep['text'] as String,
                         maxLines: 2,
@@ -4330,7 +4271,7 @@ out center tags;
                 ),
               ),
               Text(
-                '${_navigationDurationMinutes ?? '-'} dk',
+                navoraFormatNavigationDuration(_navigationDurationMinutes),
                 style: const TextStyle(
                   color: Colors.white,
                   fontWeight: FontWeight.bold,
@@ -4466,10 +4407,6 @@ out center tags;
           .doc(user.uid)
           .collection('sos_contacts')
           .get();
-      final communityReportsSnapshot = await FirebaseFirestore.instance
-          .collection('road_reports')
-          .where('user_id', isEqualTo: user.uid)
-          .get();
       final data = profile.data();
       if (!mounted || data == null) return;
 
@@ -4525,7 +4462,6 @@ out center tags;
                 'date': history['date']?.toString() ?? '',
                 'duration': '${history['duration_minutes'] ?? 0} dk',
                 'km': '${history['distance_km'] ?? 0} km',
-                'score': history['score']?.toString() ?? '0',
               },
             )
             .toList();
@@ -4538,7 +4474,6 @@ out center tags;
                 'date': _formatHistoryDate(history['completed_at']),
                 'duration': '${history['duration_minutes'] ?? 0} dk',
                 'km': '${history['distance_km'] ?? 0} km',
-                'score': history['score']?.toString() ?? '0',
               },
             )
             .toList();
@@ -4547,46 +4482,6 @@ out center tags;
           _drivingHistory
             ..clear()
             ..addAll(drivingHistory);
-        }
-        final now = DateTime.now();
-        final monthStart = DateTime(now.year, now.month);
-        final monthlyDrives = drivingHistorySnapshot.docs.where((document) {
-          final data = document.data();
-          final timestamp = data['completed_at'];
-          final completedAt = timestamp is Timestamp
-              ? timestamp.toDate()
-              : DateTime.tryParse(data['date']?.toString() ?? '');
-          return completedAt != null && !completedAt.isBefore(monthStart);
-        }).toList();
-        if (monthlyDrives.isEmpty) {
-          _monthlyDriveCount = 0;
-          _monthlyDrivingAnalytics = null;
-        } else {
-          _monthlyDriveCount = monthlyDrives.length;
-          final totalDistance = monthlyDrives.fold<double>(
-            0,
-            (total, document) =>
-                total +
-                ((document.data()['distance_km'] as num?)?.toDouble() ?? 0),
-          );
-          final totalSpeed = monthlyDrives.fold<double>(
-            0,
-            (total, document) =>
-                total +
-                ((document.data()['average_speed_kmh'] as num?)?.toDouble() ??
-                    0),
-          );
-          final totalScore = monthlyDrives.fold<double>(
-            0,
-            (total, document) =>
-                total + ((document.data()['score'] as num?)?.toDouble() ?? 0),
-          );
-          _monthlyDrivingAnalytics = {
-            'total_distance_km': totalDistance,
-            'average_speed_kmh': totalSpeed / monthlyDrives.length,
-            'driving_score': totalScore / monthlyDrives.length,
-            'saved_co2_kg': totalDistance * 0.12,
-          };
         }
         final sosContacts = sosContactsSnapshot.docs
             .map(
@@ -4609,7 +4504,6 @@ out center tags;
                 ? visitedCities.whereType<String>()
                 : const [],
           );
-        _communityReports = communityReportsSnapshot.docs.length;
         final storedPoints = data['navora_points'];
         _navoraPoints =
             preferences.getInt('navora.points.${user.uid}') ??
@@ -4638,7 +4532,6 @@ out center tags;
           ..clear()
           ..addAll(pointLedger);
         final phone = data['phone'];
-        final bio = data['bio'];
         final email =
             data['email']?.toString() ?? user.email ?? widget.userEmail;
         final gender =
@@ -4664,7 +4557,6 @@ out center tags;
         }
         if (vehicleKm != null && vehicleKm.isNotEmpty) _vehicleKm = vehicleKm;
         if (phone is String && phone.isNotEmpty) _userPhone = phone;
-        if (bio is String && bio.isNotEmpty) _userBio = bio;
       });
     } catch (_) {
       // Profil verisi okunamazsa varsayılan bilgiler kullanılmaya devam eder.
@@ -4674,6 +4566,9 @@ out center tags;
   @override
   Widget build(BuildContext context) {
     final bottomSafeInset = MediaQuery.viewPaddingOf(context).bottom;
+    final mapTopInset = _selectedIndex == 1
+        ? MediaQuery.viewPaddingOf(context).top
+        : 0.0;
 
     return Theme(
       data: ThemeData.light().copyWith(
@@ -4682,6 +4577,7 @@ out center tags;
       child: Scaffold(
         resizeToAvoidBottomInset: false,
         body: SafeArea(
+          top: _selectedIndex != 1,
           bottom: false,
           child: Stack(
             fit: StackFit.expand,
@@ -4700,7 +4596,7 @@ out center tags;
                   !_isNavigationActive &&
                   _isLostPetMapActive)
                 Positioned(
-                  top: 10,
+                  top: mapTopInset + 10,
                   left: 16,
                   right: 16,
                   child: _buildLostPetMapToolbar(),
@@ -4710,7 +4606,7 @@ out center tags;
                   !_isLostPetMapActive &&
                   _activePropertyListingType != null)
                 Positioned(
-                  top: 10,
+                  top: mapTopInset + 10,
                   left: 16,
                   right: 16,
                   child: _buildPropertyMapToolbar(),
@@ -4720,7 +4616,7 @@ out center tags;
                   !_isLostPetMapActive &&
                   _activePropertyListingType == null)
                 Positioned(
-                  top: 10,
+                  top: mapTopInset + 10,
                   left: 16,
                   right: 16,
                   child: Column(
@@ -4928,31 +4824,7 @@ out center tags;
                       ],
                       FloatingActionButton.small(
                         heroTag: 'my-location',
-                        onPressed: () async {
-                          try {
-                            if (!await _ensureLocationPermission()) return;
-                            final position =
-                                _currentPosition ??
-                                await geo.Geolocator.getLastKnownPosition() ??
-                                await geo.Geolocator.getCurrentPosition(
-                                  locationSettings: const geo.LocationSettings(
-                                    accuracy: geo.LocationAccuracy.medium,
-                                  ),
-                                ).timeout(const Duration(seconds: 20));
-                            if (mounted) {
-                              setState(() {
-                                _currentPosition = position;
-                                _isFollowingCurrentPosition = true;
-                              });
-                              await _centerOnPosition(position);
-                            }
-                          } catch (error) {
-                            debugPrint('Konum alınırken hata: $error');
-                            _showTrackingMessage(
-                              'Konum alınamadı. GPS ayarlarını kontrol edin.',
-                            );
-                          }
-                        },
+                        onPressed: _startLocationTracking,
                         tooltip: _isFollowingCurrentPosition
                             ? 'Konumum'
                             : 'Takibe dön',
@@ -4964,40 +4836,6 @@ out center tags;
                               ? Icons.my_location
                               : Icons.near_me_rounded,
                         ),
-                      ),
-                      const SizedBox(height: 8),
-                      FloatingActionButton.small(
-                        heroTag: 'map-zoom-in',
-                        onPressed: () {
-                          final controller = _mapController;
-                          if (controller != null) {
-                            unawaited(
-                              controller.animateCamera(CameraUpdate.zoomIn()),
-                            );
-                          }
-                        },
-                        tooltip: 'Yakınlaştır',
-                        backgroundColor: const Color(0xFF191919),
-                        foregroundColor: const Color(0xFFFF6B00),
-                        shape: const CircleBorder(),
-                        child: const Icon(Icons.add_rounded),
-                      ),
-                      const SizedBox(height: 8),
-                      FloatingActionButton.small(
-                        heroTag: 'map-zoom-out',
-                        onPressed: () {
-                          final controller = _mapController;
-                          if (controller != null) {
-                            unawaited(
-                              controller.animateCamera(CameraUpdate.zoomOut()),
-                            );
-                          }
-                        },
-                        tooltip: 'Uzaklaştır',
-                        backgroundColor: const Color(0xFF191919),
-                        foregroundColor: const Color(0xFFFF6B00),
-                        shape: const CircleBorder(),
-                        child: const Icon(Icons.remove_rounded),
                       ),
                       if (_isDriveTracking) ...[
                         const SizedBox(height: 10),
@@ -5018,7 +4856,7 @@ out center tags;
                 Positioned(
                   left: 16,
                   right: 16,
-                  top: 10,
+                  top: mapTopInset + 10,
                   child: _buildLiveNavigationCard(),
                 ),
               Positioned(
@@ -5232,7 +5070,6 @@ out center tags;
         'confirmation_count': 0,
         'incorrect_count': 0,
       });
-      if (mounted) setState(() => _communityReports++);
     } catch (error) {
       debugPrint('Yol bildirimi kaydedilemedi: $error');
       if (!mounted) return;
@@ -5246,7 +5083,9 @@ out center tags;
     );
   }
 
-  Future<void> _showCreatePropertyListingSheet() async {
+  Future<void> _showCreatePropertyListingSheet({
+    Map<String, dynamic>? listing,
+  }) async {
     if (FirebaseAuth.instance.currentUser == null) {
       ScaffoldMessenger.of(context).showSnackBar(
         const SnackBar(
@@ -5262,12 +5101,59 @@ out center tags;
       useSafeArea: true,
       showDragHandle: false,
       backgroundColor: Colors.transparent,
-      builder: (context) => const CreatePropertyListingSheet(),
+      builder: (context) => CreatePropertyListingSheet(listing: listing),
     );
     if (submitted == true && mounted) {
       ScaffoldMessenger.of(context).showSnackBar(
-        const SnackBar(content: Text('İlanın incelemeye gönderildi.')),
+        SnackBar(
+          content: Text(
+            listing == null
+                ? 'İlanın incelemeye gönderildi.'
+                : 'Değişiklikler incelemeye gönderildi.',
+          ),
+        ),
       );
+    }
+  }
+
+  Future<void> _confirmDeletePropertyListing(
+    Map<String, dynamic> listing,
+  ) async {
+    final confirmed = await showDialog<bool>(
+      context: context,
+      builder: (dialogContext) => AlertDialog(
+        title: const Text('İlan silinsin mi?'),
+        content: Text(
+          '“${listing['title'] ?? 'Konut ilanı'}” ve fotoğrafları kalıcı olarak silinecek.',
+        ),
+        actions: [
+          TextButton(
+            onPressed: () => Navigator.pop(dialogContext, false),
+            child: const Text('Vazgeç'),
+          ),
+          FilledButton(
+            style: FilledButton.styleFrom(backgroundColor: Colors.redAccent),
+            onPressed: () => Navigator.pop(dialogContext, true),
+            child: const Text('Sil'),
+          ),
+        ],
+      ),
+    );
+    if (confirmed != true || !mounted) return;
+
+    try {
+      await _propertyListingService.deleteListing(listing['id'].toString());
+      if (mounted) {
+        ScaffoldMessenger.of(context)
+            .showSnackBar(const SnackBar(content: Text('İlan silindi.')));
+      }
+    } catch (error) {
+      debugPrint('İlan silinemedi: $error');
+      if (mounted) {
+        ScaffoldMessenger.of(context).showSnackBar(
+          const SnackBar(content: Text('İlan silinemedi. Tekrar dene.')),
+        );
+      }
     }
   }
 
@@ -5961,13 +5847,17 @@ out center tags;
       minMaxZoomPreference: const MinMaxZoomPreference(5.5, 20),
       style: _darkGoogleMapStyle,
       mapType: _mapType,
+      trafficEnabled: false,
       myLocationEnabled: _locationPermissionGranted && !_isNavigationActive,
       myLocationButtonEnabled: false,
       zoomControlsEnabled: false,
       compassEnabled: true,
       markers: mapMarkers,
       circles: roomGlowCircles,
-      polylines: _routePolylines.toSet(),
+      polylines: {
+        ..._routePolylines,
+        if (_isNavigationActive) ..._navigationTrafficPolylines,
+      },
       onMapCreated: (controller) {
         _mapController = controller;
         final currentPosition = _currentPosition;
@@ -6328,6 +6218,7 @@ out center tags;
     _roadReportCleanupTimer?.cancel();
     _roomExpiryTimer?.cancel();
     _positionSubscription?.cancel();
+    _locationPositionSubscription?.cancel();
     _accelerometerSubscription?.cancel();
     super.dispose();
   }
@@ -8262,19 +8153,9 @@ out center tags;
                           child: Stack(
                             children: [
                               Container(
-                                padding: EdgeInsets.all(
-                                  _hasProfileFrame ? 3 : 0,
-                                ),
+                                padding: const EdgeInsets.all(0),
                                 decoration: BoxDecoration(
                                   shape: BoxShape.circle,
-                                  gradient: _hasProfileFrame
-                                      ? const LinearGradient(
-                                          colors: [
-                                            Color(0xFFFFD166),
-                                            Color(0xFFFFA000),
-                                          ],
-                                        )
-                                      : null,
                                   boxShadow: [
                                     BoxShadow(
                                       color: Colors.black.withValues(
@@ -8414,31 +8295,6 @@ out center tags;
                                   fontSize: 12,
                                 ),
                               ),
-                              const SizedBox(height: 6),
-                              Container(
-                                padding: const EdgeInsets.symmetric(
-                                  horizontal: 10,
-                                  vertical: 6,
-                                ),
-                                decoration: BoxDecoration(
-                                  color: const Color(0xFF1F120C)
-                                      .withValues(alpha: 0.55),
-                                  borderRadius: BorderRadius.circular(10),
-                                  border: Border.all(
-                                    color: Colors.white.withValues(alpha: 0.14),
-                                  ),
-                                ),
-                                child: Text(
-                                  _userBio,
-                                  maxLines: 2,
-                                  overflow: TextOverflow.ellipsis,
-                                  style: TextStyle(
-                                    color: Colors.white.withValues(alpha: 0.9),
-                                    fontSize: 11,
-                                    fontStyle: FontStyle.italic,
-                                  ),
-                                ),
-                              ),
                             ],
                           ),
                         ),
@@ -8517,21 +8373,10 @@ out center tags;
             ),
           ),
 
-          const SizedBox(height: 20),
-
-          const Text(
-            'Bu Ayki Sürüş Analizleri',
-            style: TextStyle(
-              fontSize: 15,
-              fontWeight: FontWeight.w800,
-              color: Colors.white,
-            ),
-          ),
-          const SizedBox(height: 10),
-          if (_monthlyDrivingAnalytics == null)
-            _buildEmptyAnalyticsCard()
-          else
-            _buildMonthlyAnalyticsCard(),
+          if (!isGuest) ...[
+            const SizedBox(height: 28),
+            _buildMyPropertyListings(),
+          ],
 
           const SizedBox(height: 22),
 
@@ -8544,12 +8389,6 @@ out center tags;
             ),
           ),
           const SizedBox(height: 10),
-          _buildProfileMenuItem(
-            icon: Icons.add_home_work_rounded,
-            title: 'İlan ver',
-            subtitle: 'Kiralık veya satılık konutunu paylaş',
-            onTap: () => unawaited(_showCreatePropertyListingSheet()),
-          ),
           _buildProfileMenuItem(
             icon: Icons.stars_rounded,
             title: 'Navora Puan & Takas',
@@ -8565,8 +8404,8 @@ out center tags;
           ),
           _buildProfileMenuItem(
             icon: Icons.history_rounded,
-            title: 'Geçmiş Rotalar & Sürüşler',
-            subtitle: 'Önceki seyahatleriniz ve skorlarınız',
+            title: 'Geçmiş Rotalar',
+            subtitle: 'Önceki seyahatlerinizi görüntüleyin',
             onTap: _showDrivingHistoryDialog,
           ),
           _buildProfileMenuItem(
@@ -8582,94 +8421,11 @@ out center tags;
             onTap: _showAboutSupportSheet,
           ),
 
-          const SizedBox(height: 18),
-
-          Row(
-            mainAxisAlignment: MainAxisAlignment.spaceBetween,
-            children: [
-              const Text(
-                'Keşif Rozeti & Başarımlar',
-                style: TextStyle(
-                  fontSize: 15,
-                  fontWeight: FontWeight.w800,
-                  color: Colors.white,
-                ),
-              ),
-              TextButton(
-                onPressed: _showAllBadgesSheet,
-                child: const Text(
-                  'Tümünü Gör (9)',
-                  style: TextStyle(fontSize: 12, color: Color(0xFFFFA15C)),
-                ),
-              ),
-            ],
-          ),
-          Container(
-            padding: const EdgeInsets.all(12),
-            decoration: BoxDecoration(
-              color: const Color(0xFF111111),
-              borderRadius: BorderRadius.circular(20),
-              border: Border.all(color: const Color(0xFF2A2A2A)),
-              boxShadow: [
-                BoxShadow(
-                  color: Colors.black.withValues(alpha: 0.18),
-                  blurRadius: 12,
-                  offset: const Offset(0, 6),
-                ),
-              ],
-            ),
-            child: SizedBox(
-              height: 108,
-              child: ListView(
-                scrollDirection: Axis.horizontal,
-                children: [
-                  _buildBadgeItem(
-                    Icons.explore,
-                    'Şehir Kaşifi',
-                    '10+ Şehir',
-                    Colors.amber,
-                  ),
-                  _buildBadgeItem(
-                    Icons.nightlight_round,
-                    'Gece Sürücüsü',
-                    '50 Gece Gezisi',
-                    Colors.deepOrange,
-                  ),
-                  _buildBadgeItem(
-                    Icons.ev_station,
-                    'Çevre Dostu',
-                    'E-Şarj Kullanıcısı',
-                    Colors.green,
-                  ),
-                  _buildBadgeItem(
-                    Icons.verified_user,
-                    'Topluluk Lideri',
-                    '20 Bildirim',
-                    const Color(0xFFFF6B00),
-                  ),
-                ],
-              ),
-            ),
-          ),
-
           const SizedBox(height: 20),
 
           _buildPremiumPlanBanner(),
 
           const SizedBox(height: 18),
-
-          _buildVehicleSelectionCard(),
-
-          const SizedBox(height: 18),
-
-          if (!isGuest)
-            _buildProfileMenuItem(
-              icon: Icons.delete_forever_rounded,
-              title: _isDeletingAccount ? 'Hesap siliniyor...' : 'Hesabımı sil',
-              subtitle: 'Hesabını ve ilişkili verileri kalıcı olarak sil',
-              isDangerous: true,
-              onTap: _isDeletingAccount ? () {} : _deleteAccount,
-            ),
 
           _buildProfileMenuItem(
             icon: isGuest ? Icons.login_rounded : Icons.logout_rounded,
@@ -8679,6 +8435,233 @@ out center tags;
                 : 'Hesabından güvenli bir şekilde ayrıl',
             isDangerous: !isGuest,
             onTap: widget.onLogout,
+          ),
+        ],
+      ),
+    );
+  }
+
+  Widget _buildMyPropertyListings() {
+    return Row(
+      children: [
+        Expanded(
+          child: _buildProfileListingActionCard(
+            icon: Icons.home_work_outlined,
+            title: 'İlanlarım',
+            subtitle: 'İlanlarını yönet',
+            onTap: () => unawaited(
+              Navigator.of(context).push<void>(
+                MaterialPageRoute<void>(
+                  builder: (context) => MyPropertyListingsPage(
+                    listingBuilder: _buildMyPropertyListingCard,
+                    onCreateListing: () =>
+                        unawaited(_showCreatePropertyListingSheet()),
+                  ),
+                ),
+              ),
+            ),
+          ),
+        ),
+        const SizedBox(width: 10),
+        Expanded(
+          child: _buildProfileListingActionCard(
+            icon: Icons.add_home_work_rounded,
+            title: 'İlan ver',
+            subtitle: 'Yeni konut ilanı oluştur',
+            onTap: () => unawaited(_showCreatePropertyListingSheet()),
+          ),
+        ),
+      ],
+    );
+  }
+
+  Widget _buildProfileListingActionCard({
+    required IconData icon,
+    required String title,
+    required String subtitle,
+    required VoidCallback onTap,
+  }) {
+    return Material(
+      color: const Color(0xFF191919),
+      shape: RoundedRectangleBorder(
+        side: const BorderSide(color: Color(0xFFFF7A00), width: 1),
+        borderRadius: BorderRadius.circular(12),
+      ),
+      clipBehavior: Clip.antiAlias,
+      child: InkWell(
+        borderRadius: BorderRadius.circular(12),
+        onTap: onTap,
+        child: SizedBox(
+          height: 112,
+          child: Padding(
+            padding: const EdgeInsets.all(12),
+            child: Column(
+              mainAxisAlignment: MainAxisAlignment.center,
+              crossAxisAlignment: CrossAxisAlignment.center,
+              children: [
+                Icon(icon, color: const Color(0xFFFF9A3D), size: 22),
+                const SizedBox(height: 7),
+                Text(
+                  title,
+                  maxLines: 1,
+                  overflow: TextOverflow.ellipsis,
+                  textAlign: TextAlign.center,
+                  style: const TextStyle(
+                    color: Colors.white,
+                    fontSize: 14,
+                    fontWeight: FontWeight.w800,
+                  ),
+                ),
+                const SizedBox(height: 3),
+                Text(
+                  subtitle,
+                  maxLines: 1,
+                  overflow: TextOverflow.ellipsis,
+                  textAlign: TextAlign.center,
+                  style: const TextStyle(
+                    color: Color(0xFFB8B8B8),
+                    fontSize: 11,
+                  ),
+                ),
+              ],
+            ),
+          ),
+        ),
+      ),
+    );
+  }
+
+  Widget _buildMyPropertyListingCard(Map<String, dynamic> listing) {
+    final status = listing['status']?.toString() ?? 'unknown';
+    final isActive = status == 'active';
+    final statusLabel = switch (status) {
+      'active' => 'Yayında',
+      'pending_review' => 'İncelemede',
+      _ => 'Pasif',
+    };
+    final statusColor = isActive
+        ? const Color(0xFF69C981)
+        : const Color(0xFFFFC266);
+    final imageUrl = listing['cover_image_url']?.toString() ?? '';
+
+    return Container(
+      margin: const EdgeInsets.only(bottom: 10),
+      padding: const EdgeInsets.all(10),
+      decoration: BoxDecoration(
+        color: const Color(0xFF191919),
+        borderRadius: BorderRadius.circular(12),
+        border: Border.all(color: const Color(0xFF303030)),
+      ),
+      child: Column(
+        children: [
+          Row(
+            children: [
+              ClipRRect(
+                borderRadius: BorderRadius.circular(8),
+                child: imageUrl.isEmpty
+                    ? const SizedBox(
+                        width: 76,
+                        height: 68,
+                        child: ColoredBox(
+                          color: Color(0xFF252525),
+                          child: Icon(
+                            Icons.home_work_outlined,
+                            color: Color(0xFFFF9A3D),
+                          ),
+                        ),
+                      )
+                    : Image.network(
+                        imageUrl,
+                        width: 76,
+                        height: 68,
+                        fit: BoxFit.cover,
+                        errorBuilder: (context, error, stackTrace) =>
+                            const SizedBox(
+                              width: 76,
+                              height: 68,
+                              child: Icon(
+                                Icons.broken_image_outlined,
+                                color: Color(0xFFB8B8B8),
+                              ),
+                            ),
+                      ),
+              ),
+              const SizedBox(width: 11),
+              Expanded(
+                child: Column(
+                  crossAxisAlignment: CrossAxisAlignment.start,
+                  children: [
+                    Text(
+                      listing['title']?.toString() ?? 'Konut ilanı',
+                      maxLines: 2,
+                      overflow: TextOverflow.ellipsis,
+                      style: const TextStyle(
+                        color: Colors.white,
+                        fontSize: 14,
+                        fontWeight: FontWeight.w700,
+                      ),
+                    ),
+                    const SizedBox(height: 5),
+                    Text(
+                      _formatListingPrice(listing['price']),
+                      style: const TextStyle(
+                        color: Color(0xFFFFA052),
+                        fontSize: 13,
+                        fontWeight: FontWeight.w700,
+                      ),
+                    ),
+                  ],
+                ),
+              ),
+              Container(
+                padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 5),
+                decoration: BoxDecoration(
+                  color: statusColor.withValues(alpha: 0.12),
+                  borderRadius: BorderRadius.circular(8),
+                ),
+                child: Text(
+                  statusLabel,
+                  style: TextStyle(
+                    color: statusColor,
+                    fontSize: 10,
+                    fontWeight: FontWeight.w700,
+                  ),
+                ),
+              ),
+            ],
+          ),
+          const Divider(height: 18, color: Color(0xFF303030)),
+          Row(
+            children: [
+              const Icon(
+                Icons.visibility_outlined,
+                color: Color(0xFFB8B8B8),
+                size: 17,
+              ),
+              const SizedBox(width: 5),
+              Text(
+                '${(listing['view_count'] as num?)?.toInt() ?? 0} görüntülenme',
+                style: const TextStyle(color: Color(0xFFB8B8B8), fontSize: 12),
+              ),
+              const Spacer(),
+              IconButton(
+                tooltip: 'İlanı düzenle',
+                visualDensity: VisualDensity.compact,
+                onPressed: () => unawaited(
+                  _showCreatePropertyListingSheet(listing: listing),
+                ),
+                icon: const Icon(Icons.edit_outlined),
+                color: const Color(0xFFFFA052),
+              ),
+              IconButton(
+                tooltip: 'İlanı sil',
+                visualDensity: VisualDensity.compact,
+                onPressed: () =>
+                    unawaited(_confirmDeletePropertyListing(listing)),
+                icon: const Icon(Icons.delete_outline_rounded),
+                color: const Color(0xFFE57373),
+              ),
+            ],
           ),
         ],
       ),
@@ -9001,29 +8984,6 @@ out center tags;
                               ),
                             ],
                           ),
-                          Container(
-                            padding: const EdgeInsets.symmetric(
-                              horizontal: 8,
-                              vertical: 4,
-                            ),
-                            decoration: BoxDecoration(
-                              color: const Color(0xFFFF8A3D)
-                                  .withValues(alpha: 0.14),
-                              borderRadius: BorderRadius.circular(8),
-                              border: Border.all(
-                                color: const Color(0xFFFF8A3D)
-                                    .withValues(alpha: 0.5),
-                              ),
-                            ),
-                            child: Text(
-                              '${h['score']} Puan',
-                              style: const TextStyle(
-                                fontSize: 11,
-                                fontWeight: FontWeight.bold,
-                                color: Color(0xFFFFB066),
-                              ),
-                            ),
-                          ),
                         ],
                       ),
                     ),
@@ -9074,11 +9034,6 @@ out center tags;
                 Icons.schedule,
                 'Süre',
                 history['duration'] ?? '-',
-              ),
-              _buildHistoryDetailRow(
-                Icons.verified,
-                'Sürüş skoru',
-                '${history['score'] ?? '-'} puan',
               ),
               const SizedBox(height: 14),
               const Text(
@@ -9726,7 +9681,7 @@ out center tags;
           Polyline(
             polylineId: const PolylineId('saved-route'),
             points: [_activeRouteStart!, _activeRouteDestination!],
-            color: const Color(0xFFFF6B00),
+            color: const Color(0xFF4285F4),
             width: 6,
           ),
         ];
@@ -9966,6 +9921,60 @@ out center tags;
     );
   }
 
+  Future<void> _startLocationTracking() async {
+    try {
+      if (!await _ensureLocationPermission()) return;
+      final position = await geo.Geolocator.getCurrentPosition(
+        locationSettings: const geo.LocationSettings(
+          accuracy: geo.LocationAccuracy.high,
+        ),
+      );
+      if (!mounted) return;
+
+      await _locationPositionSubscription?.cancel();
+      _locationPositionSubscription =
+          geo.Geolocator.getPositionStream(
+            locationSettings: const geo.LocationSettings(
+              accuracy: geo.LocationAccuracy.high,
+              distanceFilter: 5,
+            ),
+          ).listen(
+            _handleLocationPosition,
+            onError: (Object error) {
+              debugPrint('Konum akışı durdu: $error');
+              if (!mounted) return;
+              setState(() => _isLocationTracking = false);
+              _showTrackingMessage(
+                'Konum takibi durdu. GPS ayarlarını kontrol edin.',
+              );
+            },
+          );
+
+      setState(() {
+        _currentPosition = position;
+        _isLocationTracking = true;
+        _isFollowingCurrentPosition = true;
+      });
+      await _centerOnPosition(position);
+    } catch (error) {
+      debugPrint('Konum alınırken hata: $error');
+      _showTrackingMessage('Konum alınamadı. GPS ayarlarını kontrol edin.');
+    }
+  }
+
+  void _handleLocationPosition(geo.Position position) {
+    if (!mounted) return;
+    setState(() => _currentPosition = position);
+    if (navoraShouldFollowCurrentPosition(
+      isNavigationActive: _isNavigationActive,
+      isDriveTracking: _isDriveTracking,
+      isLocationTracking: _isLocationTracking,
+      isFollowing: _isFollowingCurrentPosition,
+    )) {
+      Future.microtask(() => _centerOnPosition(position));
+    }
+  }
+
   Future<void> _toggleDriveTracking() async {
     try {
       if (_isDriveTracking) {
@@ -9974,6 +9983,10 @@ out center tags;
       }
 
       if (!await _ensureLocationPermission()) return;
+
+      await _locationPositionSubscription?.cancel();
+      _locationPositionSubscription = null;
+      _isLocationTracking = false;
 
       final position = await geo.Geolocator.getCurrentPosition(
         locationSettings: const geo.LocationSettings(
@@ -9985,8 +9998,6 @@ out center tags;
       _driveStartedAt = DateTime.now();
       _driveDistanceKm = 0;
       _vehicleStartKm = _parseVehicleKm();
-      _previousSpeedKmh = null;
-      _driveScore = 100;
       _positionSubscription = geo.Geolocator.getPositionStream(
         locationSettings: const geo.LocationSettings(
           accuracy: geo.LocationAccuracy.high,
@@ -10082,20 +10093,6 @@ out center tags;
       }
     }
 
-    final speedKmh = position.speed < 0 ? 0.0 : position.speed * 3.6;
-    final sanitizedSpeedKmh = speedKmh.isNaN || speedKmh.isInfinite
-        ? 0.0
-        : speedKmh;
-    if (sanitizedSpeedKmh > 2) {
-      final penalty = navoraDriveScorePenalty(
-        speedKmh: sanitizedSpeedKmh,
-        previousSpeedKmh: _previousSpeedKmh,
-      );
-      if (penalty > 0) {
-        _driveScore = (_driveScore - penalty).clamp(0, 100);
-      }
-      _previousSpeedKmh = sanitizedSpeedKmh;
-    }
     _announceUpcomingNavigationStep(position);
     _lastDrivePosition = position;
     if (!mounted) return;
@@ -10107,6 +10104,7 @@ out center tags;
     if (navoraShouldFollowCurrentPosition(
       isNavigationActive: _isNavigationActive,
       isDriveTracking: _isDriveTracking,
+      isLocationTracking: _isLocationTracking,
       isFollowing: _isFollowingCurrentPosition,
     )) {
       Future.microtask(() => _centerOnPosition(position));
@@ -10121,14 +10119,7 @@ out center tags;
     await _accelerometerSubscription?.cancel();
     _accelerometerSubscription = null;
     final startedAt = _driveStartedAt;
-    final durationSeconds = startedAt == null
-        ? 0
-        : DateTime.now().difference(startedAt).inSeconds;
     final distance = double.parse(_driveDistanceKm.toStringAsFixed(2));
-    final averageSpeed = navoraAverageSpeedKmh(
-      distanceKm: distance,
-      durationSeconds: durationSeconds,
-    );
     final durationMinutes = startedAt == null
         ? 0
         : DateTime.now().difference(startedAt).inMinutes;
@@ -10137,8 +10128,6 @@ out center tags;
       await _saveCompletedDrive(
         distance: distance,
         durationMinutes: durationMinutes,
-        averageSpeed: averageSpeed,
-        score: _driveScore,
       );
     }
 
@@ -10148,11 +10137,9 @@ out center tags;
       _clearRouteState();
       _vehicleKm = _formatVehicleKm(_vehicleStartKm + distance);
     });
+    await _resetNavigationCamera();
     unawaited(_persistVehicleProfile());
     await _tts.stop();
-    _showTrackingMessage(
-      '${distance.toStringAsFixed(2)} km sürüş tamamlandı. Skor: $_driveScore/100',
-    );
   }
 
   void _announceUpcomingNavigationStep(geo.Position position) {
@@ -10297,43 +10284,17 @@ out center tags;
   Future<void> _saveCompletedDrive({
     required double distance,
     required int durationMinutes,
-    required double averageSpeed,
-    required int score,
   }) async {
     final user = FirebaseAuth.instance.currentUser!;
     final userReference = FirebaseFirestore.instance
         .collection('users')
         .doc(user.uid);
-    final analytics = <String, dynamic>{};
-
-    await FirebaseFirestore.instance.runTransaction((transaction) async {
-      final snapshot = await transaction.get(userReference);
-      final data = snapshot.data() ?? <String, dynamic>{};
-      final oldAnalytics = data['monthly_driving_analytics'];
-      if (oldAnalytics is Map) {
-        analytics.addAll(Map<String, dynamic>.from(oldAnalytics));
-      }
-      final oldDistance =
-          (analytics['total_distance_km'] as num?)?.toDouble() ?? 0;
-      analytics['total_distance_km'] = oldDistance + distance;
-      analytics['average_speed_kmh'] = averageSpeed;
-      analytics['driving_score'] = score;
-      analytics['saved_co2_kg'] =
-          ((analytics['saved_co2_kg'] as num?)?.toDouble() ?? 0) +
-          distance * 0.12;
-      transaction.set(userReference, {
-        'monthly_driving_analytics': analytics,
-        'updated_at': FieldValue.serverTimestamp(),
-      }, SetOptions(merge: true));
-    });
 
     await userReference.collection('driving_history').add({
       'route': 'GPS sürüşü',
       'date': DateTime.now().toIso8601String(),
       'duration_minutes': durationMinutes,
       'distance_km': distance,
-      'average_speed_kmh': averageSpeed,
-      'score': score,
       'completed_at': FieldValue.serverTimestamp(),
       'expires_at': Timestamp.fromDate(
         DateTime.now().add(const Duration(days: 30)),
@@ -10345,35 +10306,12 @@ out center tags;
         'destination': _activeNavigationDestination,
         'distance_km': distance,
         'duration_minutes': durationMinutes,
-        'score': score,
         'completed_at': FieldValue.serverTimestamp(),
         'expires_at': Timestamp.fromDate(
           DateTime.now().add(const Duration(days: 30)),
         ),
       });
     }
-    if (!mounted) return;
-    final previousAnalytics = _monthlyDrivingAnalytics;
-    final previousCount = _monthlyDriveCount;
-    final previousDistance =
-        (previousAnalytics?['total_distance_km'] as num?)?.toDouble() ?? 0;
-    final previousAverageSpeed =
-        (previousAnalytics?['average_speed_kmh'] as num?)?.toDouble() ?? 0;
-    final previousScore =
-        (previousAnalytics?['driving_score'] as num?)?.toDouble() ?? 0;
-    final driveCount = previousCount + 1;
-    final totalDistance = previousDistance + distance;
-    setState(() {
-      _monthlyDriveCount = driveCount;
-      _monthlyDrivingAnalytics = {
-        'total_distance_km': totalDistance,
-        'average_speed_kmh':
-            ((previousAverageSpeed * previousCount) + averageSpeed) /
-            driveCount,
-        'driving_score': ((previousScore * previousCount) + score) / driveCount,
-        'saved_co2_kg': totalDistance * 0.12,
-      };
-    });
   }
 
   Future<void> _centerOnPosition(geo.Position position) async {
@@ -10418,6 +10356,28 @@ out center tags;
     _isProgrammaticCameraMove = true;
     try {
       await _moveMapTo(LatLng(position.latitude, position.longitude), 16);
+    } finally {
+      _isProgrammaticCameraMove = false;
+    }
+  }
+
+  Future<void> _resetNavigationCamera() async {
+    final controller = _mapController;
+    final position = _currentPosition;
+    if (controller == null || position == null) return;
+
+    _isProgrammaticCameraMove = true;
+    try {
+      await controller.animateCamera(
+        CameraUpdate.newCameraPosition(
+          CameraPosition(
+            target: LatLng(position.latitude, position.longitude),
+            zoom: 16,
+            bearing: 0,
+            tilt: 0,
+          ),
+        ),
+      );
     } finally {
       _isProgrammaticCameraMove = false;
     }
@@ -10725,7 +10685,6 @@ out center tags;
     final nameController = TextEditingController(text: _userName);
     final emailController = TextEditingController(text: _userEmail);
     final phoneController = TextEditingController(text: _userPhone);
-    final bioController = TextEditingController(text: _userBio);
     String selectedGender = _userGender;
 
     showModalBottomSheet(
@@ -10923,39 +10882,6 @@ out center tags;
                   ),
                 ),
               ),
-              const SizedBox(height: 14),
-              TextField(
-                controller: bioController,
-                maxLines: 3,
-                style: const TextStyle(color: Colors.white),
-                decoration: InputDecoration(
-                  labelText: 'Hakkımda / Biyografi',
-                  labelStyle: const TextStyle(color: Color(0xFFFFB066)),
-                  prefixIcon: const Icon(
-                    Icons.info_outline,
-                    color: Color(0xFFFFB066),
-                  ),
-                  filled: true,
-                  fillColor: const Color(0xFF1D1D1D),
-                  border: OutlineInputBorder(
-                    borderRadius: BorderRadius.circular(14),
-                    borderSide: const BorderSide(color: Color(0xFFFF8A3D)),
-                  ),
-                  enabledBorder: OutlineInputBorder(
-                    borderRadius: BorderRadius.circular(14),
-                    borderSide: BorderSide(
-                      color: const Color(0xFFFF8A3D).withValues(alpha: 0.5),
-                    ),
-                  ),
-                  focusedBorder: OutlineInputBorder(
-                    borderRadius: BorderRadius.circular(14),
-                    borderSide: const BorderSide(
-                      color: Color(0xFFFF8A3D),
-                      width: 1.5,
-                    ),
-                  ),
-                ),
-              ),
               const SizedBox(height: 20),
               SizedBox(
                 width: double.infinity,
@@ -11014,7 +10940,6 @@ out center tags;
                               'email': email,
                               'photo_url': user.photoURL,
                               'phone': phoneController.text.trim(),
-                              'bio': bioController.text.trim(),
                               'gender_preference': selectedGender,
                               'updated_at': FieldValue.serverTimestamp(),
                             }, SetOptions(merge: true));
@@ -11025,7 +10950,6 @@ out center tags;
                         _userName = name;
                         _userEmail = email;
                         _userPhone = phoneController.text.trim();
-                        _userBio = bioController.text.trim();
                         _userGender = selectedGender;
                       });
 
@@ -11056,6 +10980,30 @@ out center tags;
                   ),
                 ),
               ),
+              const SizedBox(height: 12),
+              SizedBox(
+                width: double.infinity,
+                height: 46,
+                child: OutlinedButton.icon(
+                  onPressed: _isDeletingAccount
+                      ? null
+                      : () {
+                          Navigator.of(dialogContext).pop();
+                          unawaited(_deleteAccount());
+                        },
+                  icon: const Icon(Icons.delete_forever_rounded),
+                  label: Text(
+                    _isDeletingAccount ? 'Hesap siliniyor...' : 'Hesabımı sil',
+                  ),
+                  style: OutlinedButton.styleFrom(
+                    foregroundColor: const Color(0xFFE57373),
+                    side: const BorderSide(color: Color(0xFFE57373)),
+                    shape: RoundedRectangleBorder(
+                      borderRadius: BorderRadius.circular(14),
+                    ),
+                  ),
+                ),
+              ),
             ],
           ),
         ),
@@ -11072,268 +11020,6 @@ out center tags;
       'vehicle_km': _vehicleKm,
       'updated_at': FieldValue.serverTimestamp(),
     }, SetOptions(merge: true));
-  }
-
-  Widget _buildEmptyAnalyticsCard() {
-    return Container(
-      width: double.infinity,
-      padding: const EdgeInsets.symmetric(vertical: 22, horizontal: 18),
-      decoration: BoxDecoration(
-        color: const Color(0xFF111111),
-        borderRadius: BorderRadius.circular(22),
-        border: Border.all(color: const Color(0xFF2A2A2A)),
-        boxShadow: [
-          BoxShadow(
-            color: Colors.black.withValues(alpha: 0.15),
-            blurRadius: 12,
-            offset: const Offset(0, 8),
-          ),
-        ],
-      ),
-      child: const Text(
-        'Henüz sürüş analizi bulunmuyor.',
-        textAlign: TextAlign.center,
-        style: TextStyle(
-          color: Colors.white70,
-          fontSize: 12,
-          fontWeight: FontWeight.w600,
-        ),
-      ),
-    );
-  }
-
-  Widget _buildMonthlyAnalyticsCard() {
-    final analytics = _monthlyDrivingAnalytics!;
-    String value(String key, String suffix) {
-      final rawValue = analytics[key];
-      if (rawValue is num) {
-        return '${rawValue % 1 == 0 ? rawValue.toInt() : rawValue.toStringAsFixed(1)}$suffix';
-      }
-      return '-';
-    }
-
-    return Container(
-      padding: const EdgeInsets.all(16),
-      decoration: BoxDecoration(
-        color: const Color(0xFF111111),
-        borderRadius: BorderRadius.circular(22),
-        border: Border.all(color: const Color(0xFF2A2A2A)),
-        boxShadow: [
-          BoxShadow(
-            color: Colors.black.withValues(alpha: 0.15),
-            blurRadius: 12,
-            offset: const Offset(0, 8),
-          ),
-        ],
-      ),
-      child: Row(
-        children: [
-          Expanded(
-            child: _buildAnalyticsItem(
-              Icons.verified,
-              value('driving_score', ' / 100'),
-              'Sürüş Skoru',
-              Colors.green,
-            ),
-          ),
-          Container(height: 35, width: 1, color: Colors.grey.shade200),
-          Expanded(
-            child: _buildAnalyticsItem(
-              Icons.speed_rounded,
-              value('average_speed_kmh', ' km/h'),
-              'Ort. Hız',
-              Colors.orange,
-            ),
-          ),
-          Container(height: 35, width: 1, color: Colors.grey.shade200),
-          Expanded(
-            child: _buildAnalyticsItem(
-              Icons.eco,
-              value('saved_co2_kg', ' kg'),
-              'Tasarruf',
-              Colors.teal,
-            ),
-          ),
-          Container(height: 35, width: 1, color: Colors.grey.shade200),
-          Expanded(
-            child: _buildAnalyticsItem(
-              Icons.route,
-              value('total_distance_km', ' km'),
-              'Toplam Yol',
-              const Color(0xFFFF6B00),
-            ),
-          ),
-        ],
-      ),
-    );
-  }
-
-  Widget _buildAnalyticsItem(
-    IconData icon,
-    String value,
-    String label,
-    Color color,
-  ) {
-    return Column(
-      children: [
-        Icon(icon, color: color, size: 20),
-        const SizedBox(height: 4),
-        Text(
-          value,
-          style: const TextStyle(
-            fontWeight: FontWeight.bold,
-            fontSize: 12,
-            color: Colors.white,
-          ),
-          textAlign: TextAlign.center,
-        ),
-        Text(
-          label,
-          style: TextStyle(color: Colors.white70, fontSize: 10),
-          textAlign: TextAlign.center,
-        ),
-      ],
-    );
-  }
-
-  Widget _buildBadgeItem(
-    IconData icon,
-    String title,
-    String subtitle,
-    Color color,
-  ) {
-    return Container(
-      width: 110,
-      margin: const EdgeInsets.only(right: 10),
-      padding: const EdgeInsets.all(10),
-      decoration: BoxDecoration(
-        color: const Color(0xFF111111),
-        borderRadius: BorderRadius.circular(18),
-        border: Border.all(color: const Color(0xFF2A2A2A)),
-        boxShadow: [
-          BoxShadow(
-            color: Colors.black.withValues(alpha: 0.15),
-            blurRadius: 8,
-            offset: const Offset(0, 5),
-          ),
-        ],
-      ),
-      child: Column(
-        mainAxisAlignment: MainAxisAlignment.center,
-        children: [
-          CircleAvatar(
-            radius: 18,
-            backgroundColor: color.withValues(alpha: 0.18),
-            child: Icon(icon, color: color, size: 20),
-          ),
-          const SizedBox(height: 6),
-          Text(
-            title,
-            style: const TextStyle(
-              fontWeight: FontWeight.bold,
-              fontSize: 11,
-              color: Colors.white,
-            ),
-            overflow: TextOverflow.ellipsis,
-          ),
-          Text(
-            subtitle,
-            style: TextStyle(color: Colors.white70, fontSize: 9),
-            overflow: TextOverflow.ellipsis,
-          ),
-        ],
-      ),
-    );
-  }
-
-  Widget _buildVehicleSelectionCard() {
-    final currentVehicle = _vehicleDisplayName(_selectedVehicle);
-    final isWalkingVehicle = _selectedVehicle == 'Yürüyüş';
-    final vehicleMetricLabel = switch (_selectedVehicle) {
-      'Motosiklet' => 'Motor KM',
-      'Bisiklet' => 'Bisiklet KM',
-      'Araba' => 'Araba KM',
-      _ => '',
-    };
-
-    return GestureDetector(
-      onTap: () async {
-        final selectedVehicle = await _showVehiclePicker();
-        if (selectedVehicle != null && mounted) {
-          setState(() {});
-        }
-      },
-      child: Container(
-        padding: const EdgeInsets.all(16),
-        decoration: BoxDecoration(
-          color: const Color(0xFF111111),
-          borderRadius: BorderRadius.circular(20),
-          border: Border.all(color: const Color(0xFF2A2A2A)),
-          boxShadow: [
-            BoxShadow(
-              color: Colors.black.withValues(alpha: 0.18),
-              blurRadius: 12,
-              offset: const Offset(0, 6),
-            ),
-          ],
-        ),
-        child: Row(
-          children: [
-            Container(
-              width: 52,
-              height: 52,
-              decoration: BoxDecoration(
-                color: const Color(0xFFFF6B00).withValues(alpha: 0.14),
-                borderRadius: BorderRadius.circular(16),
-              ),
-              child: Icon(
-                _vehicleIcon(_selectedVehicle),
-                color: const Color(0xFFFF6B00),
-                size: 27,
-              ),
-            ),
-            const SizedBox(width: 12),
-            Expanded(
-              child: Align(
-                alignment: Alignment.centerLeft,
-                child: Text(
-                  currentVehicle,
-                  style: const TextStyle(
-                    color: Colors.white,
-                    fontSize: 16,
-                    fontWeight: FontWeight.w800,
-                  ),
-                ),
-              ),
-            ),
-            if (!isWalkingVehicle) ...[
-              const SizedBox(width: 8),
-              Column(
-                crossAxisAlignment: CrossAxisAlignment.end,
-                children: [
-                  Text(
-                    vehicleMetricLabel,
-                    style: const TextStyle(
-                      color: Colors.white70,
-                      fontSize: 10,
-                      fontWeight: FontWeight.w700,
-                    ),
-                  ),
-                  Text(
-                    '$_vehicleKm km',
-                    style: const TextStyle(
-                      color: Color(0xFFFFB066),
-                      fontSize: 13,
-                      fontWeight: FontWeight.w800,
-                    ),
-                  ),
-                ],
-              ),
-            ],
-          ],
-        ),
-      ),
-    );
   }
 
   Future<void> _loadVehicleMarkerIcons() async {
@@ -11431,20 +11117,6 @@ out center tags;
     );
   }
 
-  IconData _vehicleIcon(String vehicle) {
-    switch (vehicle) {
-      case 'Motosiklet':
-        return Icons.two_wheeler;
-      case 'Bisiklet':
-        return Icons.pedal_bike;
-      case 'Yürüyüş':
-        return Icons.directions_walk;
-      case 'Araba':
-      default:
-        return Icons.directions_car_filled;
-    }
-  }
-
   String _vehicleDisplayName(String vehicle) {
     switch (vehicle) {
       case 'Motosiklet':
@@ -11475,8 +11147,6 @@ out center tags;
       if (_selectedDestinationName != null)
         'Seçili hedef: $_selectedDestinationName',
       'Ulaşım tipi: ${_vehicleDisplayName(_selectedVehicle)}',
-      if (_monthlyDrivingAnalytics != null)
-        'Bu ay sürüş analizi: $_monthlyDrivingAnalytics',
     ].join('\n');
 
     setState(() {
@@ -11486,8 +11156,11 @@ out center tags;
     });
 
     try {
-      final ai = FirebaseAI.googleAI(auth: FirebaseAuth.instance);
-      final model = ai.generativeModel(model: 'gemini-2.5-flash');
+      final ai = FirebaseAI.googleAI(
+        appCheck: FirebaseAppCheck.instance,
+        auth: FirebaseAuth.instance,
+      );
+      final model = ai.generativeModel(model: 'gemini-3.5-flash');
       final prompt =
           '''Sen Navora uygulamasının Türkçe yolculuk asistanısın.
 Kısa, anlaşılır ve güvenli cevap ver. Trafik veya rota hakkında kesin bilgi yoksa bunu açıkça belirt.
@@ -11526,11 +11199,16 @@ $text''';
     } catch (error) {
       debugPrint('Navora AI yanıtı alınamadı: $error');
       if (!mounted) return;
+      final aiLogicNotEnabled =
+          error is FirebaseAIException &&
+          error.message.contains('firebasevertexai.googleapis.com');
       setState(() {
         _aiMessages.removeLast();
         _aiMessages.add({
           'sender': 'ai',
-          'text': 'Şu anda yanıt veremiyorum. AI Logic kurulumunu ve bağlantıyı kontrol edin.',
+          'text': aiLogicNotEnabled
+              ? 'Firebase projesinde AI Logic etkin değil. Firebase Console’da navoramapa projesinin AI Logic kurulumunu tamamlayın.'
+              : 'Şu anda yanıt veremiyorum. İnternet bağlantısını kontrol edip tekrar deneyin.',
         });
       });
     }
@@ -11566,6 +11244,7 @@ $text''';
     showModalBottomSheet(
       context: context,
       isScrollControlled: true,
+      showDragHandle: false,
       backgroundColor: const Color(0xFF191919),
       builder: (context) {
         return StatefulBuilder(
@@ -11576,11 +11255,7 @@ $text''';
               monthSpent: _monthSpent,
               bonusChatRooms: _bonusChatRooms,
               bonusAiQueries: _bonusAiQueries,
-              hasProfileFrame: _hasProfileFrame,
-              hasAuroraTheme: _hasAuroraTheme,
               hasProDiscount: _proDiscountUnlocked,
-              citiesVisited: _citiesVisited,
-              communityReports: _communityReports,
               ledger: _pointLedger,
               onChanged: () {
                 setState(() {});
@@ -11595,8 +11270,6 @@ $text''';
   }
 
   bool _redeemNavoraReward(NavoraReward reward) {
-    if (reward.id == 'frame' && _hasProfileFrame) return false;
-    if (reward.id == 'theme' && _hasAuroraTheme) return false;
     if (reward.id == 'pro_discount' && _proDiscountUnlocked) return false;
 
     if (_navoraPoints < reward.cost) {
@@ -11614,12 +11287,6 @@ $text''';
           break;
         case 'ai':
           _bonusAiQueries++;
-          break;
-        case 'frame':
-          _hasProfileFrame = true;
-          break;
-        case 'theme':
-          _hasAuroraTheme = true;
           break;
         case 'pro_discount':
           _proDiscountUnlocked = true;
@@ -11639,212 +11306,6 @@ $text''';
       SnackBar(content: Text('${reward.title} hesabına eklendi.')),
     );
     return true;
-  }
-
-  void _showAllBadgesSheet() {
-    final nightDriveCount = _drivingHistory.where((history) {
-      final date = DateTime.tryParse(history['date'] ?? '');
-      return date != null && (date.hour >= 22 || date.hour < 6);
-    }).length;
-    final totalDistance =
-        (_monthlyDrivingAnalytics?['total_distance_km'] as num?)?.toDouble() ??
-        0;
-    final drivingScore =
-        (_monthlyDrivingAnalytics?['driving_score'] as num?)?.toDouble() ?? 0;
-    final badges = [
-      {
-        'title': 'Şehir Kaşifi',
-        'detail': '10 şehir keşfet',
-        'unlocked': _citiesVisited >= 10,
-        'progress': '$_citiesVisited / 10',
-        'icon': Icons.explore,
-        'color': Colors.amber,
-      },
-      {
-        'title': 'Gece Sürücüsü',
-        'detail': '10 gece sürüşü',
-        'unlocked': nightDriveCount >= 10,
-        'progress': '$nightDriveCount / 10',
-        'icon': Icons.nightlight_round,
-        'color': Colors.deepOrange,
-      },
-      {
-        'title': 'Çevre Dostu',
-        'detail': '100 km sürüş tamamla',
-        'unlocked': totalDistance >= 100,
-        'progress': '${totalDistance.toStringAsFixed(0)} / 100 km',
-        'icon': Icons.ev_station,
-        'color': Colors.green,
-      },
-      {
-        'title': 'Topluluk Lideri',
-        'detail': '20 topluluk bildirimi',
-        'unlocked': _communityReports >= 20,
-        'progress': '$_communityReports / 20',
-        'icon': Icons.verified_user,
-        'color': const Color(0xFFFF6B00),
-      },
-      {
-        'title': 'Kıta Gezgini',
-        'detail': '20 şehir keşfet',
-        'unlocked': _citiesVisited >= 20,
-        'progress': '$_citiesVisited / 20',
-        'icon': Icons.public,
-        'color': Colors.orange,
-      },
-      {
-        'title': 'Kaptan',
-        'detail': 'Kaptan seviyesine ulaş',
-        'unlocked': NavoraRank.current(_navoraPoints).name == 'Kaptan',
-        'progress': NavoraRank.current(_navoraPoints).name,
-        'icon': Icons.military_tech,
-        'color': Colors.deepOrange,
-      },
-      {
-        'title': 'Rota Ustası',
-        'detail': '5 kayıtlı rota oluştur',
-        'unlocked': _savedRoutes.length >= 5,
-        'progress': '${_savedRoutes.length} / 5',
-        'icon': Icons.alt_route,
-        'color': Colors.cyan,
-      },
-      {
-        'title': 'Güvenli Sürücü',
-        'detail': '90 ve üzeri sürüş skoru',
-        'unlocked': drivingScore >= 90,
-        'progress': '${drivingScore.toStringAsFixed(0)} / 90',
-        'icon': Icons.shield_outlined,
-        'color': Colors.green,
-      },
-      {
-        'title': 'Uzun Yolcu',
-        'detail': '500 km yol tamamla',
-        'unlocked': totalDistance >= 500,
-        'progress': '${totalDistance.toStringAsFixed(0)} / 500 km',
-        'icon': Icons.directions_car_filled_outlined,
-        'color': Colors.orange,
-      },
-    ];
-
-    showModalBottomSheet(
-      context: context,
-      isScrollControlled: true,
-      backgroundColor: const Color(0xFF191919),
-      showDragHandle: true,
-      shape: const RoundedRectangleBorder(
-        borderRadius: BorderRadius.vertical(top: Radius.circular(24)),
-      ),
-      builder: (context) => ConstrainedBox(
-        constraints: BoxConstraints(
-          maxHeight: MediaQuery.of(context).size.height * 0.82,
-        ),
-        child: Padding(
-          padding: const EdgeInsets.fromLTRB(20, 8, 20, 14),
-          child: Column(
-            mainAxisSize: MainAxisSize.min,
-            crossAxisAlignment: CrossAxisAlignment.start,
-            children: [
-              const Text(
-                '9 Keşif Rozeti & Başarımlar',
-                style: TextStyle(
-                  fontSize: 18,
-                  fontWeight: FontWeight.bold,
-                  color: Colors.white,
-                ),
-              ),
-              const SizedBox(height: 14),
-              Flexible(
-                child: ListView.separated(
-                  shrinkWrap: true,
-                  itemCount: badges.length,
-                  separatorBuilder: (context, index) =>
-                      const SizedBox(height: 10),
-                  itemBuilder: (context, index) {
-                    final badge = badges[index];
-                    final unlocked = badge['unlocked'] as bool;
-                    final color = badge['color'] as Color;
-
-                    return TweenAnimationBuilder<double>(
-                      tween: Tween(
-                        begin: unlocked ? 0.35 : 0.0,
-                        end: unlocked ? 1.0 : 0.0,
-                      ),
-                      duration: const Duration(milliseconds: 900),
-                      curve: Curves.easeInOut,
-                      builder: (context, glow, _) => Container(
-                        padding: const EdgeInsets.all(10),
-                        decoration: BoxDecoration(
-                          color: const Color(0xFF171717),
-                          borderRadius: BorderRadius.circular(18),
-                          border: Border.all(
-                            color: unlocked
-                                ? const Color(0xFFFF8C42).withValues(alpha: 0.7)
-                                : Colors.white.withValues(alpha: 0.08),
-                          ),
-                          boxShadow: null,
-                        ),
-                        child: ListTile(
-                          contentPadding: EdgeInsets.zero,
-                          leading: Container(
-                            decoration: BoxDecoration(
-                              shape: BoxShape.circle,
-                              boxShadow: unlocked
-                                  ? [
-                                      BoxShadow(
-                                        color: color.withValues(
-                                          alpha: 0.42 * glow,
-                                        ),
-                                        blurRadius: 14 * glow,
-                                        spreadRadius: 3 * glow,
-                                      ),
-                                    ]
-                                  : null,
-                            ),
-                            child: CircleAvatar(
-                              radius: 20,
-                              backgroundColor: color.withValues(
-                                alpha: unlocked ? 0.2 : 0.08,
-                              ),
-                              child: Icon(
-                                badge['icon'] as IconData,
-                                color: unlocked ? color : Colors.grey,
-                              ),
-                            ),
-                          ),
-                          title: Text(
-                            badge['title'] as String,
-                            style: TextStyle(
-                              fontWeight: FontWeight.bold,
-                              color: unlocked
-                                  ? Colors.white
-                                  : Colors.grey.shade400,
-                            ),
-                          ),
-                          subtitle: Text(
-                            '${badge['detail']} • ${badge['progress']}',
-                            style: TextStyle(
-                              fontSize: 12,
-                              color: unlocked
-                                  ? Colors.white70
-                                  : Colors.grey.shade500,
-                            ),
-                          ),
-                          trailing: Icon(
-                            unlocked ? Icons.check_circle : Icons.lock_outline,
-                            color: unlocked ? Colors.orange : Colors.grey,
-                            size: 20,
-                          ),
-                        ),
-                      ),
-                    );
-                  },
-                ),
-              ),
-            ],
-          ),
-        ),
-      ),
-    );
   }
 
   Widget _buildProfileStat(String value, String label, {VoidCallback? onTap}) {

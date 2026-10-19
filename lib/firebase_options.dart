@@ -38,14 +38,14 @@ class DefaultFirebaseOptions {
     projectId: 'navoramapa',
     storageBucket: 'navoramapa.firebasestorage.app',
   );
-
   static const FirebaseOptions ios = FirebaseOptions(
     apiKey: 'AIzaSyAwRxETyhfj-pPTFzCkm15fgUXFLF6qA5w',
-    appId: '1:348191564859:ios:93702b7970299e9a02281e',
+    appId: '1:348191564859:ios:e1ca5830217fdb4c02281e',
     messagingSenderId: '348191564859',
     projectId: 'navoramapa',
     storageBucket: 'navoramapa.firebasestorage.app',
+    androidClientId: '348191564859-ambn6qo6fv3o2j8lgnjuia9ho8g8cdnh.apps.googleusercontent.com',
+    iosClientId: '348191564859-i2pima45jgtovfaa8jkee9tj3lmtlae8.apps.googleusercontent.com',
     iosBundleId: 'com.navora.app',
   );
 }
-

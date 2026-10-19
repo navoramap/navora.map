@@ -7,7 +7,7 @@ const {
   initializeTestEnvironment,
 } = require('@firebase/rules-unit-testing');
 const { doc, setDoc, updateDoc } = require('firebase/firestore');
-const { getMetadata, ref, uploadBytes } = require('firebase/storage');
+const { deleteObject, getMetadata, ref, uploadBytes } = require('firebase/storage');
 
 const projectId = 'demo-navora';
 let testEnvironment;
@@ -185,6 +185,7 @@ test('listing owner uploads limited image files to pending listing slots', async
   await assertSucceeds(
     uploadBytes(photo, new Uint8Array([1, 2, 3]), { contentType: 'image/jpeg' }),
   );
+  await assertSucceeds(deleteObject(photo));
 
   await assertFails(
     uploadBytes(
@@ -229,6 +230,7 @@ test('active listing images are readable by signed-in users only', async () => {
 
   const visitorStorage = testEnvironment.authenticatedContext('visitor').storage();
   await assertSucceeds(getMetadata(ref(visitorStorage, photo.fullPath)));
+  await assertFails(deleteObject(photo));
   const signedOutStorage = testEnvironment.unauthenticatedContext().storage();
   await assertFails(getMetadata(ref(signedOutStorage, photo.fullPath)));
 });

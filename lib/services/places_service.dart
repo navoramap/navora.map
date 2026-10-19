@@ -59,6 +59,9 @@ class NavoraPlacesService {
   static final Future<Map<String, String>> _clientIdentityHeaders =
       _loadClientIdentityHeaders();
 
+  static Future<Map<String, String>> get clientIdentityHeaders =>
+      _clientIdentityHeaders;
+
   static Future<Map<String, String>> _loadClientIdentityHeaders() async {
     if (kIsWeb) {
       return const {};

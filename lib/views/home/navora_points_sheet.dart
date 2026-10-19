@@ -84,22 +84,6 @@ const List<NavoraReward> navoraRewards = [
     icon: Icons.auto_awesome,
   ),
   NavoraReward(
-    id: 'frame',
-    title: 'Profil çerçevesi',
-    subtitle: 'Avatarına altın keşif çerçevesi',
-    cost: 400,
-    icon: Icons.workspace_premium_outlined,
-    oneTime: true,
-  ),
-  NavoraReward(
-    id: 'theme',
-    title: 'Aurora harita teması',
-    subtitle: 'Profildeki harita stiline eklenir',
-    cost: 350,
-    icon: Icons.palette_outlined,
-    oneTime: true,
-  ),
-  NavoraReward(
     id: 'pro_discount',
     title: 'Navora Pro indirimi',
     subtitle: 'Yükseltmede %20 puan indirimi (tam Pro satılmaz)',
@@ -111,11 +95,6 @@ const List<NavoraReward> navoraRewards = [
 
 const List<Map<String, String>> navoraEarnRules = [
   {'title': 'Rota tamamla', 'detail': 'Her biten yolculuk', 'points': '+20–50'},
-  {
-    'title': '90+ sürüş skoru',
-    'detail': 'Güvenli ve akıcı sürüş',
-    'points': '+15',
-  },
   {
     'title': 'Yeni şehir',
     'detail': 'İlk kez ziyaret edilen şehir',
@@ -131,11 +110,6 @@ const List<Map<String, String>> navoraEarnRules = [
     'detail': '22:00 sonrası tamamlanan rota',
     'points': '+20',
   },
-  {
-    'title': 'E-şarj durağı',
-    'detail': 'Şarj noktası kullanımı',
-    'points': '+10',
-  },
 ];
 
 class NavoraPointsSheet extends StatelessWidget {
@@ -144,11 +118,7 @@ class NavoraPointsSheet extends StatelessWidget {
   final int monthSpent;
   final int bonusChatRooms;
   final int bonusAiQueries;
-  final bool hasProfileFrame;
-  final bool hasAuroraTheme;
   final bool hasProDiscount;
-  final int citiesVisited;
-  final int communityReports;
   final List<Map<String, dynamic>> ledger;
   final VoidCallback onChanged;
   final bool Function(NavoraReward reward) onRedeem;
@@ -160,28 +130,11 @@ class NavoraPointsSheet extends StatelessWidget {
     required this.monthSpent,
     required this.bonusChatRooms,
     required this.bonusAiQueries,
-    required this.hasProfileFrame,
-    required this.hasAuroraTheme,
     required this.hasProDiscount,
-    required this.citiesVisited,
-    required this.communityReports,
     required this.ledger,
     required this.onChanged,
     required this.onRedeem,
   });
-
-  bool _owned(String id) {
-    switch (id) {
-      case 'frame':
-        return hasProfileFrame;
-      case 'theme':
-        return hasAuroraTheme;
-      case 'pro_discount':
-        return hasProDiscount;
-      default:
-        return false;
-    }
-  }
 
   @override
   Widget build(BuildContext context) {
@@ -189,9 +142,6 @@ class NavoraPointsSheet extends StatelessWidget {
     final nextRank = NavoraRank.next(points);
     final progress = NavoraRank.progress(points);
     final toNext = nextRank == null ? 0 : nextRank.minPoints - points;
-    const nextBadgeGoal = 20;
-    final badgeProgress = (communityReports / nextBadgeGoal).clamp(0.0, 1.0);
-
     return DraggableScrollableSheet(
       expand: false,
       initialChildSize: 0.92,
@@ -205,15 +155,15 @@ class NavoraPointsSheet extends StatelessWidget {
           ),
           child: ListView(
             controller: scrollController,
-            padding: const EdgeInsets.fromLTRB(20, 10, 20, 28),
+            padding: const EdgeInsets.fromLTRB(20, 18, 20, 28),
             children: [
               Center(
                 child: Container(
-                  width: 42,
+                  width: 40,
                   height: 4,
-                  margin: const EdgeInsets.only(bottom: 14),
+                  margin: const EdgeInsets.only(bottom: 8),
                   decoration: BoxDecoration(
-                    color: Colors.grey.shade300,
+                    color: Colors.white38,
                     borderRadius: BorderRadius.circular(8),
                   ),
                 ),
@@ -372,62 +322,6 @@ class NavoraPointsSheet extends StatelessWidget {
               ),
               const SizedBox(height: 22),
               const Text(
-                'Sıradaki rozet',
-                style: TextStyle(
-                  fontWeight: FontWeight.bold,
-                  fontSize: 15,
-                  color: Colors.white,
-                ),
-              ),
-              const SizedBox(height: 8),
-              Container(
-                padding: const EdgeInsets.all(14),
-                decoration: BoxDecoration(
-                  color: const Color(0xFF1B1B1B),
-                  borderRadius: BorderRadius.circular(16),
-                  boxShadow: [
-                    const BoxShadow(
-                      color: Color(0xFF2B2B2B),
-                      blurRadius: 8,
-                      offset: Offset(-3, -3),
-                    ),
-                    BoxShadow(
-                      color: Colors.black.withValues(alpha: 0.5),
-                      blurRadius: 8,
-                      offset: const Offset(3, 3),
-                    ),
-                  ],
-                ),
-                child: Column(
-                  crossAxisAlignment: CrossAxisAlignment.start,
-                  children: [
-                    const Text(
-                      'Topluluk Lideri',
-                      style: TextStyle(fontWeight: FontWeight.bold),
-                    ),
-                    const SizedBox(height: 2),
-                    Text(
-                      '$communityReports / $nextBadgeGoal bildirim  •  $citiesVisited şehir keşfedildi',
-                      style: TextStyle(
-                        fontSize: 12,
-                        color: Colors.grey.shade400,
-                      ),
-                    ),
-                    const SizedBox(height: 8),
-                    ClipRRect(
-                      borderRadius: BorderRadius.circular(8),
-                      child: LinearProgressIndicator(
-                        value: badgeProgress,
-                        minHeight: 7,
-                        backgroundColor: const Color(0xFF3A3A3A),
-                        color: const Color(0xFFFF6B00),
-                      ),
-                    ),
-                  ],
-                ),
-              ),
-              const SizedBox(height: 22),
-              const Text(
                 'Nasıl kazanılır?',
                 style: TextStyle(
                   fontWeight: FontWeight.bold,
@@ -447,18 +341,6 @@ class NavoraPointsSheet extends StatelessWidget {
                     decoration: BoxDecoration(
                       color: const Color(0xFF1B1B1B),
                       borderRadius: BorderRadius.circular(14),
-                      boxShadow: const [
-                        BoxShadow(
-                          color: Color(0xFF2B2B2B),
-                          blurRadius: 7,
-                          offset: Offset(-3, -3),
-                        ),
-                        BoxShadow(
-                          color: Colors.black54,
-                          blurRadius: 7,
-                          offset: Offset(3, 3),
-                        ),
-                      ],
                     ),
                     child: Row(
                       children: [
@@ -512,7 +394,8 @@ class NavoraPointsSheet extends StatelessWidget {
               ),
               const SizedBox(height: 8),
               ...navoraRewards.map((reward) {
-                final owned = _owned(reward.id);
+                final owned =
+                  reward.id == 'pro_discount' && hasProDiscount;
                 final canAfford = points >= reward.cost;
                 return Container(
                   margin: const EdgeInsets.only(bottom: 10),
@@ -521,18 +404,6 @@ class NavoraPointsSheet extends StatelessWidget {
                     color: const Color(0xFF1B1B1B),
                     borderRadius: BorderRadius.circular(16),
                     border: Border.all(color: const Color(0xFF363636)),
-                    boxShadow: const [
-                      BoxShadow(
-                        color: Color(0xFF2B2B2B),
-                        blurRadius: 8,
-                        offset: Offset(-3, -3),
-                      ),
-                      BoxShadow(
-                        color: Colors.black54,
-                        blurRadius: 8,
-                        offset: Offset(3, 3),
-                      ),
-                    ],
                   ),
                   child: Row(
                     children: [
@@ -618,18 +489,6 @@ class NavoraPointsSheet extends StatelessWidget {
                   decoration: BoxDecoration(
                     color: const Color(0xFF1B1B1B),
                     borderRadius: BorderRadius.circular(14),
-                    boxShadow: const [
-                      BoxShadow(
-                        color: Color(0xFF2B2B2B),
-                        blurRadius: 7,
-                        offset: Offset(-3, -3),
-                      ),
-                      BoxShadow(
-                        color: Colors.black54,
-                        blurRadius: 7,
-                        offset: Offset(3, 3),
-                      ),
-                    ],
                   ),
                   child: Row(
                     children: [
@@ -689,13 +548,6 @@ class NavoraPointsSheet extends StatelessWidget {
         border: Border.all(
           color: const Color(0xFFFF8A3D).withValues(alpha: 0.35),
         ),
-        boxShadow: [
-          BoxShadow(
-            color: const Color(0xFFFF8A3D).withValues(alpha: 0.08),
-            blurRadius: 10,
-            offset: const Offset(0, 4),
-          ),
-        ],
       ),
       child: Column(
         crossAxisAlignment: CrossAxisAlignment.start,

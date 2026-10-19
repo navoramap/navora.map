@@ -61,8 +61,7 @@ class _ProfilePageState extends State<ProfilePage> {
           'title': data['route']?.toString() ?? 'Rota',
           'detail':
               '${data['distance_km'] ?? 0} km • '
-              '${data['duration_minutes'] ?? 0} dk • '
-              'Skor ${data['score'] ?? 0}',
+            '${data['duration_minutes'] ?? 0} dk',
         };
       }).toList();
       final locations = locationSnapshot.docs.map((document) {
@@ -295,7 +294,6 @@ class _ProfilePageState extends State<ProfilePage> {
           const SizedBox(height: 12),
           Text(
             '• Kayıtlı rota ve adres yönetimi\n'
-            '• Temel sürüş analizi\n'
             '• Acil durum kişileri\n'
             '• Premium özellikler satın alma doğrulaması bekliyor',
             style: textTheme.bodyMedium?.copyWith(

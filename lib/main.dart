@@ -41,6 +41,12 @@ void main() async {
           ? AndroidProvider.debug
           : AndroidProvider.playIntegrity,
     );
+  } else if (defaultTargetPlatform == TargetPlatform.iOS) {
+    await FirebaseAppCheck.instance.activate(
+      appleProvider: kDebugMode
+          ? AppleProvider.debug
+          : AppleProvider.appAttestWithDeviceCheckFallback,
+    );
   }
 
   runApp(const NavoraMapApp());

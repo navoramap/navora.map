@@ -139,18 +139,6 @@ void main() {
     expect(remaining.last, const LatLng(41.015, 28.985));
   });
 
-  test('calculates drive analytics from real distance and elapsed time', () {
-    final distanceKm = 45.2;
-    final durationSeconds = 3600;
-
-    expect(
-      navoraAverageSpeedKmh(
-        distanceKm: distanceKm,
-        durationSeconds: durationSeconds,
-      ),
-      closeTo(45.2 / 1, 0.01),
-    );
-  });
 }
 
 class _FirebaseCoreHostApi implements TestFirebaseCoreHostApi {

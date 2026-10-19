@@ -213,6 +213,76 @@ exports.deleteAccount = onCall(
     },
 );
 
+exports.recordPropertyListingView = onCall(async (request) => {
+  if (!request.auth) {
+    throw new HttpsError('unauthenticated', 'Oturum açmanız gerekiyor.');
+  }
+
+  const listingId = request.data?.listingId;
+  if (typeof listingId !== 'string' || listingId.length === 0 ||
+      listingId.length > 128 || listingId.includes('/')) {
+    throw new HttpsError('invalid-argument', 'Geçersiz ilan kimliği.');
+  }
+
+  const listingReference = getFirestore()
+      .collection('property_listings')
+      .doc(listingId);
+  const viewerReference = listingReference
+      .collection('_views')
+      .doc(request.auth.uid);
+  let viewCount = 0;
+
+  await getFirestore().runTransaction(async (transaction) => {
+    const listing = await transaction.get(listingReference);
+    if (!listing.exists || listing.data().status !== 'active') {
+      throw new HttpsError('not-found', 'Yayındaki ilan bulunamadı.');
+    }
+
+    const currentCount = listing.data().view_count;
+    viewCount = Number.isSafeInteger(currentCount) && currentCount >= 0
+        ? currentCount
+        : 0;
+    if (listing.data().owner_uid === request.auth.uid) return;
+
+    const existingView = await transaction.get(viewerReference);
+    if (existingView.exists) return;
+
+    viewCount++;
+    transaction.create(viewerReference, {
+      created_at: FieldValue.serverTimestamp(),
+    });
+    transaction.set(listingReference, { view_count: viewCount }, { merge: true });
+  });
+
+  return { viewCount };
+});
+
+exports.deletePropertyListing = onCall(async (request) => {
+  if (!request.auth) {
+    throw new HttpsError('unauthenticated', 'Oturum açmanız gerekiyor.');
+  }
+
+  const listingId = request.data?.listingId;
+  if (typeof listingId !== 'string' || listingId.length === 0 ||
+      listingId.length > 128 || listingId.includes('/')) {
+    throw new HttpsError('invalid-argument', 'Geçersiz ilan kimliği.');
+  }
+
+  const db = getFirestore();
+  const listingReference = db.collection('property_listings').doc(listingId);
+  const listing = await listingReference.get();
+  if (!listing.exists) return { deleted: true };
+  if (listing.data().owner_uid !== request.auth.uid) {
+    throw new HttpsError('permission-denied', 'Bu ilanı silme yetkiniz yok.');
+  }
+
+  await getStorage().bucket().deleteFiles({
+    prefix: `property_listings/${request.auth.uid}/${listingId}/`,
+  });
+  await db.recursiveDelete(listingReference);
+  return { deleted: true };
+});
+
 async function deleteExpiredRooms(db, cutoff) {
   let deleted = 0;
   while (true) {

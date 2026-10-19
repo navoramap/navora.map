@@ -8,7 +8,11 @@ import 'package:image_picker/image_picker.dart';
 import '../../../services/property_listing_service.dart';
 
 class CreatePropertyListingSheet extends StatefulWidget {
-  const CreatePropertyListingSheet({super.key});
+  final Map<String, dynamic>? listing;
+
+  const CreatePropertyListingSheet({super.key, this.listing});
+
+  bool get isEditing => listing != null;
 
   @override
   State<CreatePropertyListingSheet> createState() =>
@@ -32,6 +36,7 @@ class _CreatePropertyListingSheetState
   final _listingService = PropertyListingService();
   final List<XFile> _photos = [];
   final List<Uint8List> _photoBytes = [];
+  final List<String> _existingPhotoUrls = [];
 
   String _listingType = 'kiralik';
   String _rooms = '2+1';
@@ -40,6 +45,32 @@ class _CreatePropertyListingSheetState
   bool _isLocatingAddress = false;
   bool _isSubmitting = false;
   String? _errorMessage;
+
+  @override
+  void initState() {
+    super.initState();
+    final listing = widget.listing;
+    if (listing == null) return;
+
+    _listingType = listing['listing_type']?.toString() ?? 'kiralik';
+    _rooms = listing['rooms']?.toString() ?? '2+1';
+    _titleController.text = listing['title']?.toString() ?? '';
+    _priceController.text = listing['price']?.toString() ?? '';
+    _cityController.text = listing['city']?.toString() ?? '';
+    _districtController.text = listing['district']?.toString() ?? '';
+    _addressController.text = listing['address']?.toString() ?? '';
+    _areaController.text = listing['area_sqm']?.toString() ?? '';
+    _descriptionController.text = listing['description']?.toString() ?? '';
+    final latitude = (listing['latitude'] as num?)?.toDouble();
+    final longitude = (listing['longitude'] as num?)?.toDouble();
+    if (latitude != null && longitude != null) {
+      _selectedLocation = LatLng(latitude, longitude);
+    }
+    _shareExactAddress = true;
+    _existingPhotoUrls.addAll(
+      (listing['photo_urls'] as List<dynamic>? ?? const []).whereType<String>(),
+    );
+  }
 
   @override
   void dispose() {
@@ -81,7 +112,10 @@ class _CreatePropertyListingSheetState
   }
 
   Future<void> _pickPhotos() async {
-    final remaining = PropertyListingService.maxPhotos - _photos.length;
+    final remaining =
+        PropertyListingService.maxPhotos -
+        _existingPhotoUrls.length -
+        _photos.length;
     if (remaining <= 0) return;
     try {
       final files = await _picker.pickMultiImage(
@@ -146,7 +180,7 @@ class _CreatePropertyListingSheetState
       });
       return;
     }
-    if (_photos.isEmpty) {
+    if (_photos.isEmpty && _existingPhotoUrls.isEmpty) {
       setState(() => _errorMessage = 'En az bir fotoğraf eklemelisin.');
       return;
     }
@@ -158,20 +192,39 @@ class _CreatePropertyListingSheetState
 
     try {
       final areaSquareMeters = int.parse(_areaController.text.trim());
-      await _listingService.submit(
-        listingType: _listingType,
-        title: _titleController.text,
-        price: int.parse(_priceController.text),
-        city: _cityController.text,
-        district: _districtController.text,
-        address: _addressController.text,
-        areaSquareMeters: areaSquareMeters,
-        rooms: _rooms,
-        description: _descriptionController.text,
-        latitude: selectedLocation.latitude,
-        longitude: selectedLocation.longitude,
-        photos: _photos,
-      );
+      final listing = widget.listing;
+      if (listing == null) {
+        await _listingService.submit(
+          listingType: _listingType,
+          title: _titleController.text,
+          price: int.parse(_priceController.text),
+          city: _cityController.text,
+          district: _districtController.text,
+          address: _addressController.text,
+          areaSquareMeters: areaSquareMeters,
+          rooms: _rooms,
+          description: _descriptionController.text,
+          latitude: selectedLocation.latitude,
+          longitude: selectedLocation.longitude,
+          photos: _photos,
+        );
+      } else {
+        await _listingService.updateListing(
+          listingId: listing['id'].toString(),
+          listingType: _listingType,
+          title: _titleController.text,
+          price: int.parse(_priceController.text),
+          city: _cityController.text,
+          district: _districtController.text,
+          address: _addressController.text,
+          areaSquareMeters: areaSquareMeters,
+          rooms: _rooms,
+          description: _descriptionController.text,
+          latitude: selectedLocation.latitude,
+          longitude: selectedLocation.longitude,
+          photos: _photos,
+        );
+      }
       if (mounted) {
         Navigator.of(context).pop(true);
       }
@@ -189,19 +242,17 @@ class _CreatePropertyListingSheetState
           message = switch (error.code) {
             'unauthenticated' =>
               'Oturumun sona ermiş. Tekrar giriş yapıp dene.',
-            'unauthorized' || 'permission-denied' =>
-              'Fotoğraf yükleme izni yok. Storage kurallarının yayınlandığını kontrol et.',
-            'bucket-not-found' || 'no-default-bucket' || 'unknown' =>
-              'Firebase Storage alanı henüz kurulmamış. Firebase Console’da Storage > Get Started adımını tamamla.',
+            'unauthorized' || 'permission-denied' => 'Fotoğraf yükleme izni yok. Storage kurallarının yayınlandığını kontrol et.',
+            'bucket-not-found' || 'no-default-bucket' || 'unknown' => 'Firebase Storage alanı henüz kurulmamış. Firebase Console’da Storage > Get Started adımını tamamla.',
             _ => 'Fotoğraf yüklenemedi (Storage/${error.code}).',
           };
         } else {
           message = switch (error.code) {
-            'permission-denied' =>
-              'Firebase güvenlik kuralları ilan göndermeye izin vermiyor. Firestore kurallarının yayınlandığını kontrol et.',
+            'permission-denied' => 'Firebase güvenlik kuralları ilan göndermeye izin vermiyor. Firestore kurallarının yayınlandığını kontrol et.',
             'unauthenticated' =>
               'Oturumun sona ermiş. Tekrar giriş yapıp dene.',
-            _ => 'Firebase hatası (${error.plugin}/${error.code}). Biraz sonra tekrar dene.',
+            _ =>
+              'Firebase hatası (${error.plugin}/${error.code}). Biraz sonra tekrar dene.',
           };
         }
       } else if (error is StateError) {
@@ -323,9 +374,9 @@ class _CreatePropertyListingSheetState
                         const SizedBox(height: 20),
                         Row(
                           children: [
-                            const Expanded(
+                            Expanded(
                               child: Text(
-                                'İlan ver',
+                                widget.isEditing ? 'İlanı düzenle' : 'İlan ver',
                                 style: TextStyle(
                                   color: _textColor,
                                   fontSize: 23,
@@ -559,6 +610,8 @@ class _CreatePropertyListingSheetState
                             label: Text(
                               _isSubmitting
                                   ? 'Gönderiliyor'
+                                  : widget.isEditing
+                                  ? 'Değişiklikleri incelemeye gönder'
                                   : 'İncelemeye gönder',
                               style: const TextStyle(
                                 fontSize: 15,
@@ -617,6 +670,7 @@ class _CreatePropertyListingSheetState
   }
 
   Widget _buildPhotoPicker() {
+    final totalPhotos = _existingPhotoUrls.length + _photos.length;
     return Column(
       crossAxisAlignment: CrossAxisAlignment.start,
       children: [
@@ -633,7 +687,7 @@ class _CreatePropertyListingSheetState
               ),
             ),
             Text(
-              '${_photos.length}/${PropertyListingService.maxPhotos}',
+              '$totalPhotos/${PropertyListingService.maxPhotos}',
               style: const TextStyle(color: _mutedColor, fontSize: 12),
             ),
           ],
@@ -644,11 +698,11 @@ class _CreatePropertyListingSheetState
           child: ListView.separated(
             scrollDirection: Axis.horizontal,
             itemCount:
-                _photos.length +
-                (_photos.length < PropertyListingService.maxPhotos ? 1 : 0),
+                totalPhotos +
+                (totalPhotos < PropertyListingService.maxPhotos ? 1 : 0),
             separatorBuilder: (context, index) => const SizedBox(width: 9),
             itemBuilder: (context, index) {
-              if (index == _photos.length) {
+              if (index == totalPhotos) {
                 return Material(
                   color: const Color(0xFF252624),
                   borderRadius: BorderRadius.circular(12),
@@ -680,12 +734,33 @@ class _CreatePropertyListingSheetState
                   ),
                 );
               }
+              if (index < _existingPhotoUrls.length) {
+                return ClipRRect(
+                  borderRadius: BorderRadius.circular(12),
+                  child: Image.network(
+                    _existingPhotoUrls[index],
+                    width: 96,
+                    height: 96,
+                    fit: BoxFit.cover,
+                    errorBuilder: (context, error, stackTrace) =>
+                        const SizedBox(
+                          width: 96,
+                          height: 96,
+                          child: Icon(
+                            Icons.broken_image_outlined,
+                            color: _mutedColor,
+                          ),
+                        ),
+                  ),
+                );
+              }
+              final photoIndex = index - _existingPhotoUrls.length;
               return Stack(
                 children: [
                   ClipRRect(
                     borderRadius: BorderRadius.circular(12),
                     child: Image.memory(
-                      _photoBytes[index],
+                      _photoBytes[photoIndex],
                       width: 96,
                       height: 96,
                       fit: BoxFit.cover,
@@ -702,8 +777,8 @@ class _CreatePropertyListingSheetState
                         onPressed: _isSubmitting
                             ? null
                             : () => setState(() {
-                                _photos.removeAt(index);
-                                _photoBytes.removeAt(index);
+                                _photos.removeAt(photoIndex);
+                                _photoBytes.removeAt(photoIndex);
                               }),
                         icon: const Icon(Icons.close_rounded, size: 17),
                         color: Colors.white,

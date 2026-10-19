@@ -7,12 +7,16 @@ service firebase.storage {
         return /databases/(default)/documents/property_listings/$(listingId);
       }
 
-      function ownsPendingListing() {
+      function ownsListing() {
         return request.auth != null
             && request.auth.uid == uid
             && firestore.exists(listingPath())
-            && firestore.get(listingPath()).data.owner_uid == uid
-            && firestore.get(listingPath()).data.status == 'pending_review';
+        && firestore.get(listingPath()).data.owner_uid == uid;
+      }
+
+      function ownsPendingListing() {
+        return ownsListing()
+        && firestore.get(listingPath()).data.status == 'pending_review';
       }
 
       function activeListingExists() {
@@ -29,8 +33,8 @@ service firebase.storage {
           && request.resource.size > 0
           && request.resource.size <= 5 * 1024 * 1024
           && request.resource.contentType.matches('image/(jpeg|png|webp)');
-      allow update: if false;
-      allow delete: if ownsPendingListing()
+        allow update: if false;
+        allow delete: if ownsPendingListing()
           && photoIndex.matches('^[0-4]$');
     }
 

@@ -2,7 +2,8 @@
 
 This document records the client-side Firestore paths used by Navora Map.
 
-- `property_listings/{listingId}`: user-owned rental/sale submissions with full public address, exact geocoded coordinates, and up to five photo URLs. Owners create `pending_review` documents; only trusted admins/server processes can publish them by changing status to `active`.
+- `property_listings/{listingId}`: user-owned rental/sale submissions with full public address, exact geocoded coordinates, up to five photo URLs, and a server-maintained unique `view_count`. Owners create `pending_review` documents; only trusted admins/server processes can publish them by changing status to `active`. Owner edits return the listing to review and owner deletion runs through a cleanup callable.
+- `property_listings/{listingId}/_views/{viewerUid}`: private unique-view records written by the `recordPropertyListingView` callable; clients cannot read or write this subcollection.
 - `property_listings/{uid}/{listingId}/{photoIndex}` in Cloud Storage: listing photos, with five fixed slots per pending listing; only the listing owner can upload, and active photos are readable by authenticated users.
 - `lost_pet_reports/{reportId}`: authenticated lost/found pet reports with last-seen address/coordinates, time, an explicitly shared contact phone, and zero to three optional photo URLs. The owner can resolve or delete their own report; active reports appear on the community map.
 - `pet_adoption_listings/{listingId}`: authenticated pet adoption listings with location, an explicitly shared contact phone, and zero to three optional photo URLs. Active listings appear on the community map; the owner can close or delete their own listing.

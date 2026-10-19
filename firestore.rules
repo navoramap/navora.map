@@ -78,30 +78,6 @@ service cloud.firestore {
       ]);
     }
 
-    function validDrivingAnalytics(analytics) {
-      return analytics is map
-          && analytics.keys().hasOnly([
-            'total_distance_km', 'average_speed_kmh',
-            'driving_score', 'saved_co2_kg'
-          ])
-          && (!('total_distance_km' in analytics) ||
-              (analytics.total_distance_km is number &&
-               analytics.total_distance_km >= 0 &&
-               analytics.total_distance_km <= 10000000))
-          && (!('average_speed_kmh' in analytics) ||
-              (analytics.average_speed_kmh is number &&
-               analytics.average_speed_kmh >= 0 &&
-               analytics.average_speed_kmh <= 300))
-          && (!('driving_score' in analytics) ||
-              (analytics.driving_score is number &&
-               analytics.driving_score >= 0 &&
-               analytics.driving_score <= 100))
-          && (!('saved_co2_kg' in analytics) ||
-              (analytics.saved_co2_kg is number &&
-               analytics.saved_co2_kg >= 0 &&
-               analytics.saved_co2_kg <= 10000000));
-    }
-
     function validPreferenceAt(preferences, index) {
       return preferences.size() <= index
           || preferences[index] in [
@@ -129,7 +105,7 @@ service cloud.firestore {
               && stops[index].size() <= 120);
     }
 
-    function validUserProfile(data) {
+    function validUserProfile(data, allowLegacyAnalytics) {
       return hasOnly([
           'display_name', 'email', 'phone', 'terms_accepted',
           'privacy_accepted', 'email_marketing_accepted',
@@ -172,7 +148,7 @@ service cloud.firestore {
         && optionalString(data, 'vehicle_brand_model', 100)
         && optionalString(data, 'vehicle_km', 32)
         && (!('monthly_driving_analytics' in data) ||
-          validDrivingAnalytics(data.monthly_driving_analytics))
+          (allowLegacyAnalytics && unchanged('monthly_driving_analytics')))
         && (!('explore_preferences' in data) ||
           validExplorePreferences(data.explore_preferences))
         && (!('is_pro' in data) || data.is_pro is bool)
@@ -384,10 +360,10 @@ service cloud.firestore {
     match /users/{uid} {
       allow read: if isUser(uid);
         allow create: if isUser(uid)
-          && validUserProfile(request.resource.data)
+          && validUserProfile(request.resource.data, false)
           && noClientManagedProfileFields(request.resource.data);
       allow update: if isUser(uid)
-          && validUserProfile(request.resource.data)
+          && validUserProfile(request.resource.data, true)
           && unchanged('created_at')
           && serverManagedProfileFieldsUnchanged();
       allow delete: if isUser(uid);
@@ -425,7 +401,7 @@ service cloud.firestore {
               'owner_uid', 'listing_type', 'title', 'price', 'currency',
               'city', 'district', 'address', 'latitude', 'longitude', 'area_sqm',
               'rooms', 'description', 'photo_urls', 'cover_image_url',
-              'status', 'created_at', 'updated_at'
+              'status', 'created_at', 'updated_at', 'view_count'
             ])
             && data.keys().hasAll([
               'owner_uid', 'listing_type', 'title', 'price', 'currency',
@@ -469,6 +445,8 @@ service cloud.firestore {
             && data.cover_image_url is string
             && data.cover_image_url.size() <= 2048
             && validPhotoUrls(data)
+            && (!('view_count' in data)
+              || (data.view_count is int && data.view_count >= 0))
             && data.status == 'pending_review'
             && data.created_at is timestamp
             && data.updated_at is timestamp
@@ -480,18 +458,23 @@ service cloud.firestore {
               || resource.data.owner_uid == request.auth.uid);
       allow create: if signedIn()
           && validPropertyListing(request.resource.data, request.auth.uid)
+          && (!('view_count' in request.resource.data)
+              || request.resource.data.view_count == 0)
           && request.resource.data.created_at == request.time;
       allow update: if signedIn()
           && resource.data.owner_uid == request.auth.uid
-          && resource.data.status == 'pending_review'
           && request.resource.data.diff(resource.data).affectedKeys().hasOnly([
-            'photo_urls', 'cover_image_url', 'updated_at'
+            'listing_type', 'title', 'price', 'city', 'district', 'address',
+            'latitude', 'longitude', 'area_sqm', 'rooms', 'description',
+            'photo_urls', 'cover_image_url', 'status', 'updated_at'
           ])
           && validPropertyListing(request.resource.data, request.auth.uid)
           && request.resource.data.created_at == resource.data.created_at;
-      allow delete: if signedIn()
-          && resource.data.owner_uid == request.auth.uid
-          && resource.data.status == 'pending_review';
+        allow delete: if false;
+
+      match /_views/{viewerUid} {
+        allow read, write: if false;
+      }
     }
 
     match /pet_adoption_listings/{listingId} {
