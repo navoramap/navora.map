@@ -2,6 +2,20 @@ rules_version = '2';
 
 service firebase.storage {
   match /b/{bucket}/o {
+    match /profile_photos/{uid}/avatar {
+      function isValidProfilePhoto() {
+        return request.auth != null
+            && request.auth.uid == uid
+            && request.resource.size > 0
+            && request.resource.size <= 5 * 1024 * 1024
+            && request.resource.contentType.matches('image/(jpeg|png|webp)');
+      }
+
+      allow read: if request.auth != null;
+      allow create, update: if isValidProfilePhoto();
+      allow delete: if request.auth != null && request.auth.uid == uid;
+    }
+
     match /property_listings/{uid}/{listingId}/{photoIndex} {
       function listingPath() {
         return /databases/(default)/documents/property_listings/$(listingId);
@@ -27,6 +41,9 @@ service firebase.storage {
       allow read: if request.auth != null
           && photoIndex.matches('^[0-4]$')
           && ((request.auth.uid == uid && ownsPendingListing())
+              || (request.auth.token.admin == true
+                  && firestore.exists(listingPath())
+                  && firestore.get(listingPath()).data.status == 'pending_review')
               || activeListingExists());
       allow create: if ownsPendingListing()
           && photoIndex.matches('^[0-4]$')

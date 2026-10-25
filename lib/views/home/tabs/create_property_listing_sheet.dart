@@ -111,11 +111,53 @@ class _CreatePropertyListingSheetState
     );
   }
 
+  Future<void> _showPhotoSourceOptions() async {
+    final source = await showModalBottomSheet<ImageSource>(
+      context: context,
+      backgroundColor: const Color(0xFF1B1C1A),
+      builder: (context) => SafeArea(
+        child: Column(
+          mainAxisSize: MainAxisSize.min,
+          children: [
+            ListTile(
+              leading: const Icon(Icons.camera_alt_outlined, color: _textColor),
+              title: const Text(
+                'Kamerayla fotoğraf çek',
+                style: TextStyle(color: _textColor),
+              ),
+              onTap: () => Navigator.pop(context, ImageSource.camera),
+            ),
+            ListTile(
+              leading: const Icon(
+                Icons.photo_library_outlined,
+                color: _textColor,
+              ),
+              title: const Text(
+                'Galeriden seç',
+                style: TextStyle(color: _textColor),
+              ),
+              onTap: () => Navigator.pop(context, ImageSource.gallery),
+            ),
+            const SizedBox(height: 8),
+          ],
+        ),
+      ),
+    );
+    if (!mounted || source == null) return;
+    if (source == ImageSource.camera) {
+      await _takePhoto();
+    } else {
+      await _pickPhotos();
+    }
+  }
+
+  int get _remainingPhotoCount =>
+      PropertyListingService.maxPhotos -
+      _existingPhotoUrls.length -
+      _photos.length;
+
   Future<void> _pickPhotos() async {
-    final remaining =
-        PropertyListingService.maxPhotos -
-        _existingPhotoUrls.length -
-        _photos.length;
+    final remaining = _remainingPhotoCount;
     if (remaining <= 0) return;
     try {
       final files = await _picker.pickMultiImage(
@@ -123,44 +165,64 @@ class _CreatePropertyListingSheetState
         maxWidth: 1600,
         limit: remaining,
       );
-      final addedPhotos = <XFile>[];
-      final addedBytes = <Uint8List>[];
-      for (final file in files) {
-        final extension = file.name.split('.').last.toLowerCase();
-        if (!{'jpg', 'jpeg', 'png', 'webp'}.contains(extension)) {
-          continue;
-        }
-        final bytes = await file.readAsBytes();
-        if (bytes.isEmpty ||
-            bytes.length > PropertyListingService.maxPhotoBytes) {
-          continue;
-        }
-        addedPhotos.add(file);
-        addedBytes.add(bytes);
-      }
-      if (!mounted) {
-        return;
-      }
-      setState(() {
-        _photos.addAll(addedPhotos);
-        _photoBytes.addAll(addedBytes);
-        _errorMessage = null;
-      });
-      if (addedPhotos.length != files.length) {
-        ScaffoldMessenger.of(context).showSnackBar(
-          const SnackBar(
-            content: Text(
-              'Yalnızca JPG, PNG veya WebP ve 5 MB altı fotoğraflar eklenebilir.',
-            ),
-          ),
-        );
-      }
-    } catch (_) {
-      if (!mounted) {
-        return;
-      }
-      setState(() => _errorMessage = 'Fotoğraflar seçilemedi. Tekrar dene.');
+      await _addPhotos(files);
+    } catch (error) {
+      _showPhotoError(error);
     }
+  }
+
+  Future<void> _takePhoto() async {
+    if (_remainingPhotoCount <= 0) return;
+    try {
+      final file = await _picker.pickImage(
+        source: ImageSource.camera,
+        imageQuality: 82,
+        maxWidth: 1600,
+      );
+      if (file != null) await _addPhotos([file]);
+    } catch (error) {
+      _showPhotoError(error);
+    }
+  }
+
+  Future<void> _addPhotos(List<XFile> files) async {
+    final addedPhotos = <XFile>[];
+    final addedBytes = <Uint8List>[];
+    for (final file in files) {
+      final extension = file.name.split('.').last.toLowerCase();
+      if (!{'jpg', 'jpeg', 'png', 'webp'}.contains(extension)) continue;
+      final bytes = await file.readAsBytes();
+      if (bytes.isEmpty ||
+          bytes.length > PropertyListingService.maxPhotoBytes) {
+        continue;
+      }
+      addedPhotos.add(file);
+      addedBytes.add(bytes);
+    }
+    if (!mounted) return;
+    setState(() {
+      _photos.addAll(addedPhotos);
+      _photoBytes.addAll(addedBytes);
+      _errorMessage = null;
+    });
+    if (addedPhotos.length != files.length) {
+      ScaffoldMessenger.of(context).showSnackBar(
+        const SnackBar(
+          content: Text(
+            'Yalnızca JPG, PNG veya WebP ve 5 MB altı fotoğraflar eklenebilir.',
+          ),
+        ),
+      );
+    }
+  }
+
+  void _showPhotoError(Object error) {
+    debugPrint('İlan fotoğrafı alınamadı: $error');
+    if (!mounted) return;
+    setState(
+      () => _errorMessage =
+          'Fotoğraf alınamadı. Kamera veya galeriyi tekrar dene.',
+    );
   }
 
   Future<void> _submit() async {
@@ -242,9 +304,11 @@ class _CreatePropertyListingSheetState
           message = switch (error.code) {
             'unauthenticated' =>
               'Oturumun sona ermiş. Tekrar giriş yapıp dene.',
-            'unauthorized' || 'permission-denied' => 'Fotoğraf yükleme izni yok. Storage kurallarının yayınlandığını kontrol et.',
+            'unauthorized' => 'Storage erişimi reddedildi (unauthorized). App Check doğrulamasını ve ilan sahibinin fotoğraf yükleme kurallarını kontrol et.',
+            'permission-denied' => 'Storage erişimi reddedildi (permission-denied). İlanın hesabına ait ve inceleme bekliyor durumda olmalı.',
             'bucket-not-found' || 'no-default-bucket' || 'unknown' => 'Firebase Storage alanı henüz kurulmamış. Firebase Console’da Storage > Get Started adımını tamamla.',
-            _ => 'Fotoğraf yüklenemedi (Storage/${error.code}).',
+            _ =>
+              'Fotoğraf yüklenemedi (Storage/${error.code}). Bu hata kodunu destek ekibine ilet.',
           };
         } else {
           message = switch (error.code) {
@@ -707,7 +771,7 @@ class _CreatePropertyListingSheetState
                   color: const Color(0xFF252624),
                   borderRadius: BorderRadius.circular(12),
                   child: InkWell(
-                    onTap: _isSubmitting ? null : _pickPhotos,
+                    onTap: _isSubmitting ? null : _showPhotoSourceOptions,
                     borderRadius: BorderRadius.circular(12),
                     child: Container(
                       width: 96,

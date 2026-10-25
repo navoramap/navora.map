@@ -170,18 +170,35 @@ class _RoomChatPageState extends State<RoomChatPage> {
   }
 
   Future<void> _reportMessage(Map<String, dynamic> message) async {
-    await FirebaseFirestore.instance.collection('chat_message_reports').add({
-      'room_id': widget.roomId,
-      'reported_by': widget.userId,
-      'sender_id': message['sender_id'],
-      'text': message['text']?.toString() ?? '',
-      'created_at': FieldValue.serverTimestamp(),
-      'status': 'open',
-    });
-    if (mounted) {
-      ScaffoldMessenger.of(context).showSnackBar(
-        const SnackBar(content: Text('Mesaj moderasyona bildirildi.')),
-      );
+    try {
+      final messageId = message['_document_id']?.toString();
+      if (messageId == null || messageId.isEmpty) {
+        throw StateError('Mesajın kimliği bulunamadı.');
+      }
+      await FirebaseFirestore.instance.collection('chat_message_reports').add({
+        'message_type': 'room',
+        'room_id': widget.roomId,
+        'message_id': messageId,
+        'reported_by': widget.userId,
+        'sender_id': message['sender_id']?.toString() ?? '',
+        'text': message['text']?.toString() ?? '',
+        'created_at': FieldValue.serverTimestamp(),
+        'status': 'open',
+      });
+      if (mounted) {
+        ScaffoldMessenger.of(context).showSnackBar(
+          const SnackBar(content: Text('Mesaj moderasyona bildirildi.')),
+        );
+      }
+    } catch (error) {
+      debugPrint('Mesaj şikayeti gönderilemedi: $error');
+      if (mounted) {
+        ScaffoldMessenger.of(context).showSnackBar(
+          const SnackBar(
+            content: Text('Şikayet gönderilemedi. Tekrar deneyin.'),
+          ),
+        );
+      }
     }
   }
 
@@ -288,24 +305,27 @@ class _RoomChatPageState extends State<RoomChatPage> {
                     borderRadius: BorderRadius.circular(14),
                     border: Border.all(color: const Color(0xFF2D2D2D)),
                   ),
-                  child: SwitchListTile.adaptive(
-                    contentPadding: EdgeInsets.zero,
-                    title: const Text(
-                      'Şifreli oda',
-                      style: TextStyle(
-                        color: Colors.white,
-                        fontWeight: FontWeight.w600,
+                  child: Material(
+                    color: Colors.transparent,
+                    child: SwitchListTile.adaptive(
+                      contentPadding: EdgeInsets.zero,
+                      title: const Text(
+                        'Şifreli oda',
+                        style: TextStyle(
+                          color: Colors.white,
+                          fontWeight: FontWeight.w600,
+                        ),
                       ),
+                      subtitle: const Text(
+                        'Katılım için şifre iste',
+                        style: TextStyle(color: Color(0xFFBDBDBD)),
+                      ),
+                      value: protected,
+                      activeTrackColor: const Color(0xFFFF6B00),
+                      activeThumbColor: Colors.white,
+                      onChanged: (value) =>
+                          setSheetState(() => protected = value),
                     ),
-                    subtitle: const Text(
-                      'Katılım için şifre iste',
-                      style: TextStyle(color: Color(0xFFBDBDBD)),
-                    ),
-                    value: protected,
-                    activeTrackColor: const Color(0xFFFF6B00),
-                    activeThumbColor: Colors.white,
-                    onChanged: (value) =>
-                        setSheetState(() => protected = value),
                   ),
                 ),
                 if (protected) ...[

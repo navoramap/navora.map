@@ -1,6 +1,8 @@
 # Navora Map
 
-Flutter app for maps, route planning, live room chat, road reports, driving history, and Navora AI.
+Flutter app for maps, route planning, live room chat, driving history, and Navora AI.
+
+Map search supports category and distance filters. Up to five recent searches can sync to the signed-in account; search-history saving can be disabled and stored entries can be deleted from the search privacy controls. Voice guidance can be switched on or off during navigation, and the setting is remembered on the device.
 
 ## Local Development
 
@@ -60,18 +62,18 @@ Room documents and listing documents expire after 24 hours. The scheduled `clean
 
 The profile's **Hesabımı sil** action calls the `deleteAccount` Firebase callable. It requires recent authentication, recursively removes the user's private profile data, owned listings/reports/chat content, room memberships, and user-scoped Storage files, then deletes the Firebase Auth account. The operation is retryable if cleanup fails partway through.
 
-Before enabling this flow for users, install and test the backend, deploy it to the production project, and confirm the Functions runtime service account can access Firestore and Storage. Cloud Functions deployment requires the Firebase project to use the Blaze billing plan.
+The backend is deployed in `europe-west1`. The Firebase project uses the Blaze billing plan; monitor Functions, Scheduler, Firestore and Storage usage in Google Cloud Billing.
 
 ```powershell
 npm ci --prefix functions
 npm test --prefix functions
-firebase deploy --only functions:deleteAccount --project navoramapa
+firebase deploy --only functions --project navoramapa
 ```
 
 ## Important Limitations
 
 - Pro purchase and cancellation are intentionally unavailable until app-store billing and trusted server-side receipt verification are implemented. Client writes cannot grant Pro.
-- Daily AI/room quotas and Navora points are currently device-local convenience state. They are not authoritative, do not sync across devices, and must not be used for billing, rewards with monetary value, or abuse prevention. Enforce quotas and point rewards in a trusted backend before launch.
+- Authenticated room and AI requests reserve quotas through Cloud Functions; room creation also requires a server-issued reservation in Firestore rules. Guest AI usage remains device-local. Pro purchases are unavailable; only a trusted `pro` custom claim can raise server limits.
+- Point balances and redemptions are server-managed. Completed GPS drive records award idempotent points, capped at 100 per Istanbul calendar day. Legacy local balances and unversioned ledger entries are intentionally not trusted or migrated. City-visit awards are not active because the app has no server-verifiable location proof.
 - Protected-room password checks use salted PBKDF2 verifiers, but joining has no server-side attempt throttling. Add a trusted join endpoint/rate limiter before exposing password-protected rooms to abuse.
-- Firestore security rules are prototypes. Run the emulator suite, migrate existing data, review the rules, and deploy only after confirming the migration and cleanup jobs in the target project.
-- Account deletion is implemented as a callable function, but it is unavailable until the function is deployed and verified against the production project's Firestore and Storage data model.
+- Firestore security rules are prototypes. The emulator suite could not run with the installed Java 8 runtime; use a supported JDK and complete emulator testing before production release.

@@ -2,6 +2,7 @@ import 'dart:convert';
 
 import 'package:flutter/foundation.dart';
 import 'package:flutter/services.dart';
+import 'package:geolocator/geolocator.dart';
 import 'package:google_maps_flutter/google_maps_flutter.dart';
 import 'package:http/http.dart' as http;
 
@@ -147,7 +148,7 @@ class NavoraPlacesService {
 
     final data = jsonDecode(response.body) as Map<String, dynamic>;
     final places = data['places'] as List<dynamic>? ?? const [];
-    return places
+    final results = places
         .map((rawPlace) {
           final place = rawPlace as Map<String, dynamic>;
           final displayName =
@@ -176,7 +177,6 @@ class NavoraPlacesService {
             'query': '$trimmedQuery, $subtitle',
             'placeId': place['id']?.toString(),
             'type': primaryType ?? (types.isEmpty ? 'place' : types.first),
-            'category': 'Google işletmesi',
             'coordinate': LatLng(latitude, longitude),
             'ratingText': ratingText,
             'source': 'google_places',
@@ -184,6 +184,157 @@ class NavoraPlacesService {
         })
         .where((place) => place.isNotEmpty)
         .toList();
+
+    if (location == null) return results;
+
+    for (final result in results) {
+      final coordinate = result['coordinate'] as LatLng;
+      final distanceMeters = Geolocator.distanceBetween(
+        location.latitude,
+        location.longitude,
+        coordinate.latitude,
+        coordinate.longitude,
+      );
+      result['distanceMeters'] = distanceMeters;
+      result['distanceText'] = _formatDistance(distanceMeters);
+    }
+    results.sort(
+      (first, second) => (first['distanceMeters'] as double).compareTo(
+        second['distanceMeters'] as double,
+      ),
+    );
+    return results;
+  }
+
+  static String _formatDistance(double meters) {
+    return '${(meters / 1000).toStringAsFixed(1)} km';
+  }
+
+  static String _translateOpeningHours(String hours) {
+    const dayNames = {
+      'Monday': 'Pazartesi',
+      'Tuesday': 'Salı',
+      'Wednesday': 'Çarşamba',
+      'Thursday': 'Perşembe',
+      'Friday': 'Cuma',
+      'Saturday': 'Cumartesi',
+      'Sunday': 'Pazar',
+    };
+    var translated = hours;
+    for (final entry in dayNames.entries) {
+      translated = translated.replaceFirst(
+        RegExp(entry.key, caseSensitive: false),
+        entry.value,
+      );
+    }
+    return translated
+        .replaceAll('Closed', 'Kapalı')
+        .replaceAll('closed', 'Kapalı')
+        .replaceAll('Open 24 hours', '24 saat açık');
+  }
+
+  static Future<Map<String, dynamic>?> findNearestPlace(
+    LatLng location, {
+    double radiusMeters = 50,
+  }) async {
+    if (apiKey.isEmpty) return null;
+
+    final clientIdentityHeaders = await _clientIdentityHeaders;
+    final response = await http
+        .post(
+          Uri.parse('https://places.googleapis.com/v1/places:searchNearby'),
+          headers: {
+            ...clientIdentityHeaders,
+            'Content-Type': 'application/json',
+            'X-Goog-Api-Key': apiKey,
+            'X-Goog-FieldMask': [
+              'places.id',
+              'places.displayName',
+              'places.formattedAddress',
+              'places.location',
+              'places.types',
+              'places.primaryType',
+              'places.rating',
+              'places.userRatingCount',
+            ].join(','),
+          },
+          body: jsonEncode({
+            'includedTypes': [
+              'store',
+              'restaurant',
+              'cafe',
+              'gas_station',
+              'hospital',
+              'pharmacy',
+              'park',
+              'tourist_attraction',
+              'shopping_mall',
+              'bank',
+              'school',
+              'lodging',
+              'museum',
+              'bakery',
+              'bar',
+              'bus_station',
+              'supermarket',
+              'convenience_store',
+            ],
+            'maxResultCount': 10,
+            'rankPreference': 'DISTANCE',
+            'languageCode': 'tr',
+            'regionCode': 'TR',
+            'locationRestriction': {
+              'circle': {
+                'center': {
+                  'latitude': location.latitude,
+                  'longitude': location.longitude,
+                },
+                'radius': radiusMeters,
+              },
+            },
+          }),
+        )
+        .timeout(const Duration(seconds: 8));
+
+    if (response.statusCode != 200) {
+      throw Exception(
+        'Places nearby search HTTP ${response.statusCode}: ${response.body}',
+      );
+    }
+
+    final data = jsonDecode(response.body) as Map<String, dynamic>;
+    final places = data['places'] as List<dynamic>? ?? const [];
+    for (final rawPlace in places) {
+      final place = rawPlace as Map<String, dynamic>;
+      final displayName = place['displayName'] as Map<String, dynamic>? ?? {};
+      final rawLocation = place['location'] as Map<String, dynamic>? ?? {};
+      final latitude = (rawLocation['latitude'] as num?)?.toDouble();
+      final longitude = (rawLocation['longitude'] as num?)?.toDouble();
+      if (latitude == null || longitude == null) continue;
+
+      final name = displayName['text']?.toString() ?? 'İşletme';
+      final address = place['formattedAddress']?.toString() ?? 'Konum';
+      final types = (place['types'] as List<dynamic>? ?? const [])
+          .map((type) => type.toString())
+          .toList();
+      final rating = (place['rating'] as num?)?.toDouble();
+      final ratingCount = (place['userRatingCount'] as num?)?.toInt();
+      return <String, dynamic>{
+        'name': name,
+        'subtitle': address,
+        'query': '$name, $address',
+        'placeId': place['id']?.toString(),
+        'type':
+            place['primaryType']?.toString() ??
+            (types.isEmpty ? 'place' : types.first),
+        'coordinate': LatLng(latitude, longitude),
+        'ratingText': rating == null
+            ? null
+            : '${rating.toStringAsFixed(1)}${ratingCount == null ? '' : ' ($ratingCount)'}',
+        'source': 'google_places',
+      };
+    }
+    return null;
   }
 
   static Future<List<Map<String, dynamic>>> autocomplete(
@@ -208,6 +359,10 @@ class NavoraPlacesService {
           'radius': 25000.0,
         },
       };
+      body['origin'] = {
+        'latitude': location.latitude,
+        'longitude': location.longitude,
+      };
     }
     final clientIdentityHeaders = await _clientIdentityHeaders;
 
@@ -222,6 +377,7 @@ class NavoraPlacesService {
               'suggestions.placePrediction.placeId',
               'suggestions.placePrediction.text',
               'suggestions.placePrediction.structuredFormat',
+              'suggestions.placePrediction.distanceMeters',
             ].join(','),
           },
           body: jsonEncode(body),
@@ -250,6 +406,8 @@ class NavoraPlacesService {
           final name = mainText['text']?.toString() ?? text['text']?.toString();
           final subtitle = secondaryText['text']?.toString() ?? '';
           final placeId = prediction['placeId']?.toString();
+          final distanceMeters = (prediction['distanceMeters'] as num?)
+              ?.toDouble();
           if (name == null ||
               name.isEmpty ||
               placeId == null ||
@@ -261,9 +419,13 @@ class NavoraPlacesService {
             'subtitle': subtitle,
             'query': text['text']?.toString() ?? name,
             'type': 'place',
-            'category': 'Google önerisi',
+            'category': 'Konum',
             'placeId': placeId,
             'source': 'google_autocomplete',
+            if (distanceMeters != null) ...{
+              'distanceMeters': distanceMeters,
+              'distanceText': _formatDistance(distanceMeters),
+            },
           };
         })
         .where((item) => item.isNotEmpty)
@@ -275,7 +437,9 @@ class NavoraPlacesService {
     final clientIdentityHeaders = await _clientIdentityHeaders;
     final response = await http
         .get(
-          Uri.parse('https://places.googleapis.com/v1/places/$placeId'),
+          Uri.https('places.googleapis.com', '/v1/places/$placeId', {
+            'languageCode': 'tr',
+          }),
           headers: {
             ...clientIdentityHeaders,
             'X-Goog-Api-Key': apiKey,
@@ -316,7 +480,7 @@ class NavoraPlacesService {
         place['currentOpeningHours'] as Map<String, dynamic>? ?? {};
     final openingHours =
         (regularHours['weekdayDescriptions'] as List<dynamic>? ?? const [])
-            .map((day) => day.toString())
+            .map((day) => _translateOpeningHours(day.toString()))
             .toList(growable: false);
 
     return <String, dynamic>{
@@ -329,7 +493,6 @@ class NavoraPlacesService {
       'type':
           place['primaryType']?.toString() ??
           (types.isEmpty ? 'place' : types.first),
-      'category': 'Google işletmesi',
       'coordinate': LatLng(latitude, longitude),
       'ratingText': rating == null
           ? null

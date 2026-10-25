@@ -1,5 +1,6 @@
 const fs = require('node:fs');
 const path = require('node:path');
+const assert = require('node:assert/strict');
 const { after, before, beforeEach, test } = require('node:test');
 const {
   assertFails,
@@ -21,7 +22,6 @@ const {
   orderBy,
   query,
   where,
-  writeBatch,
 } = require('firebase/firestore');
 
 const projectId = 'demo-navora';
@@ -489,6 +489,68 @@ test('property listing access is authenticated and pending data is owner-only', 
   );
 });
 
+test('property admins can query and review pending listings under strict rules', async () => {
+  const admin = testEnvironment.authenticatedContext('moderator', {
+    admin: true,
+  }).firestore();
+  const visitor = testEnvironment.authenticatedContext('visitor').firestore();
+
+  const pendingQuery = query(
+    collection(admin, 'property_listings'),
+    where('status', '==', 'pending_review'),
+  );
+  const results = await assertSucceeds(getDocs(pendingQuery));
+  if (results.size !== 1 || results.docs[0].id !== 'pending-1') {
+    throw new Error('The admin review query returned an unexpected result');
+  }
+
+  await assertFails(
+    getDocs(
+      query(
+        collection(visitor, 'property_listings'),
+        where('status', '==', 'pending_review'),
+      ),
+    ),
+  );
+  await assertFails(
+    updateDoc(doc(visitor, 'property_listings/pending-1'), {
+      status: 'active',
+      updated_at: serverTimestamp(),
+    }),
+  );
+  await assertSucceeds(
+    updateDoc(doc(admin, 'property_listings/pending-1'), {
+      status: 'active',
+      updated_at: serverTimestamp(),
+    }),
+  );
+  await assertFails(
+    updateDoc(doc(admin, 'property_listings/pending-1'), {
+      status: 'rejected',
+      updated_at: serverTimestamp(),
+    }),
+  );
+  await assertFails(
+    updateDoc(doc(admin, 'property_listings/rent-1'), {
+      status: 'rejected',
+      updated_at: serverTimestamp(),
+    }),
+  );
+
+  await testEnvironment.withSecurityRulesDisabled(async (context) => {
+    await setDoc(doc(context.firestore(), 'property_listings/pending-2'), {
+      ...activePropertyListing,
+      status: 'pending_review',
+    });
+  });
+  await assertSucceeds(
+    updateDoc(doc(admin, 'property_listings/pending-2'), {
+      status: 'rejected',
+      updated_at: serverTimestamp(),
+    }),
+  );
+});
+
 test('owners can submit and edit pending listings but cannot publish them', async () => {
   const firestore = testEnvironment.authenticatedContext('visitor').firestore();
   const listingReference = doc(firestore, 'property_listings/new-listing');
@@ -525,6 +587,25 @@ test('owners can submit and edit pending listings but cannot publish them', asyn
     }),
   );
   await assertFails(deleteDoc(listingReference));
+});
+
+test('owners can submit listings with short non-empty titles and addresses', async () => {
+  const firestore = testEnvironment.authenticatedContext('short-listing-owner')
+    .firestore();
+  await assertSucceeds(
+    setDoc(doc(firestore, 'property_listings/short-listing'), {
+      ...activePropertyListing,
+      owner_uid: 'short-listing-owner',
+      title: 'Ev',
+      address: 'No 1',
+      photo_urls: [],
+      cover_image_url: '',
+      status: 'pending_review',
+      created_at: serverTimestamp(),
+      updated_at: serverTimestamp(),
+      view_count: 0,
+    }),
+  );
 });
 
 test('active listing owners can edit, but edits return to review', async () => {
@@ -614,6 +695,17 @@ test('owner can atomically create a protected room without plaintext password', 
   const firestore = testEnvironment.authenticatedContext('owner').firestore();
   const room = doc(firestore, 'chat_rooms/new-room');
   const listing = doc(firestore, 'chat_room_listings/new-room');
+  await testEnvironment.withSecurityRulesDisabled(async (context) => {
+    await setDoc(
+      doc(context.firestore(), 'users/owner/quota_reservations/new-room'),
+      {
+        uid: 'owner',
+        kind: 'room',
+        status: 'pending',
+        expires_at: Timestamp.fromMillis(now.toMillis() + 10 * 60 * 1000),
+      },
+    );
+  });
   const batch = firestore.batch();
   const expiresAt = Timestamp.fromMillis(now.toMillis() + 60 * 60 * 1000);
   const roomData = {
@@ -661,11 +753,66 @@ test('owner can atomically create a protected room without plaintext password', 
   }
 });
 
-async function joinBatch(firestore, uid, passwordHash) {
+test('users cannot write server-managed quotas, reservations, or point ledger', async () => {
+  const firestore = testEnvironment.authenticatedContext('owner').firestore();
+  await assertFails(
+    setDoc(doc(firestore, 'users/owner/daily_usage/2026-10-23'), {
+      date: '2026-10-23',
+      rooms: 0,
+      ai: 0,
+    }),
+  );
+  await assertFails(
+    setDoc(doc(firestore, 'users/owner/point_ledger/fake-award'), {
+      title: 'Fake points',
+      amount: 100000,
+    }),
+  );
+  await assertFails(
+    setDoc(doc(firestore, 'users/owner/quota_reservations/fake-room'), {
+      uid: 'owner',
+      kind: 'room',
+      status: 'pending',
+    }),
+  );
+});
+
+test('driving history requires bounded values and a server timestamp', async () => {
+  const firestore = testEnvironment.authenticatedContext('owner').firestore();
+  const expiresAt = Timestamp.fromMillis(now.toMillis() + 30 * 24 * 60 * 60 * 1000);
+  await assertSucceeds(
+    setDoc(doc(firestore, 'users/owner/driving_history/valid-drive'), {
+      route: 'GPS sürüşü',
+      date: new Date().toISOString(),
+      duration_minutes: 30,
+      distance_km: 12.5,
+      completed_at: serverTimestamp(),
+      expires_at: expiresAt,
+    }),
+  );
+  await assertFails(
+    setDoc(doc(firestore, 'users/owner/driving_history/fake-drive'), {
+      route: 'GPS sürüşü',
+      date: new Date().toISOString(),
+      duration_minutes: 30,
+      distance_km: 12.5,
+      completed_at: Timestamp.fromMillis(now.toMillis() - 60 * 60 * 1000),
+      expires_at: expiresAt,
+    }),
+  );
+});
+
+async function joinBatch(
+  firestore,
+  uid,
+  passwordHash,
+  existingMembers = ['owner'],
+) {
   const batch = firestore.batch();
   const room = doc(firestore, 'chat_rooms/room-1');
   const listing = doc(firestore, 'chat_room_listings/room-1');
-  const memberIds = ['owner', uid];
+  const memberIds = [...existingMembers, uid];
+  const activeUsers = `${memberIds.length} kişi`;
   batch.set(doc(firestore, `chat_rooms/room-1/members/${uid}`), {
     password_hash: passwordHash,
     joined_at: serverTimestamp(),
@@ -673,12 +820,12 @@ async function joinBatch(firestore, uid, passwordHash) {
   batch.update(room, {
     member_ids: arrayUnion(uid),
     active_users_count: increment(1),
-    active_users: '2 kişi',
+    active_users: activeUsers,
     updated_at: serverTimestamp(),
   });
   batch.update(listing, {
     active_users_count: increment(1),
-    active_users: '2 kişi',
+    active_users: activeUsers,
     updated_at: serverTimestamp(),
   });
   return batch.commit();
@@ -692,6 +839,39 @@ test('a protected-room password hash is required to become a member', async () =
 test('a matching password hash can create a member and update room counts', async () => {
   const firestore = testEnvironment.authenticatedContext('member').firestore();
   await assertSucceeds(joinBatch(firestore, 'member', 'a'.repeat(64)));
+  await assertSucceeds(
+    getDoc(doc(firestore, 'chat_rooms/room-1/messages/message-1')),
+  );
+});
+
+test('admin can join a protected full room without its password', async () => {
+  await testEnvironment.withSecurityRulesDisabled(async (context) => {
+    const firestore = context.firestore();
+    const room = {
+      ...validRoom,
+      member_ids: ['owner', 'member'],
+      active_users_count: 2,
+      active_users: '2 kişi',
+      max_users: 2,
+    };
+    const listing = {
+      ...validListing,
+      active_users_count: 2,
+      active_users: '2 kişi',
+      max_users: 2,
+    };
+    await setDoc(doc(firestore, 'chat_rooms/room-1'), room);
+    await setDoc(doc(firestore, 'chat_room_listings/room-1'), listing);
+    await setDoc(doc(firestore, 'chat_rooms/room-1/members/member'), {
+      password_hash: 'a'.repeat(64),
+      joined_at: now,
+    });
+  });
+
+  const firestore = testEnvironment
+    .authenticatedContext('admin', { admin: true })
+    .firestore();
+  await assertSucceeds(joinBatch(firestore, 'admin', '', ['owner', 'member']));
   await assertSucceeds(
     getDoc(doc(firestore, 'chat_rooms/room-1/messages/message-1')),
   );
@@ -742,6 +922,179 @@ test('public chat does not accept a client-authored Pro badge', async () => {
   );
 });
 
+test('chat admins can reset general chat and delete every part of any room', async () => {
+  await testEnvironment.withSecurityRulesDisabled(async (context) => {
+    await setDoc(doc(context.firestore(), 'public_chat_messages/public-1'), {
+      senderId: 'owner',
+      senderName: 'Owner',
+      text: 'General message',
+      createdAt: now,
+    });
+  });
+
+  const admin = testEnvironment.authenticatedContext('moderator', {
+    admin: true,
+  }).firestore();
+  const user = testEnvironment.authenticatedContext('visitor').firestore();
+
+  await assertFails(
+    deleteDoc(doc(user, 'public_chat_messages/public-1')),
+  );
+  await assertSucceeds(
+    deleteDoc(doc(admin, 'public_chat_messages/public-1')),
+  );
+
+  await assertFails(
+    deleteDoc(doc(user, 'chat_rooms/room-1')),
+  );
+  await assertFails(
+    deleteDoc(doc(user, 'chat_rooms/room-1/messages/message-1')),
+  );
+
+  await assertSucceeds(
+    getDoc(doc(admin, 'chat_rooms/room-1/private/access')),
+  );
+  await assertSucceeds(
+    getDocs(collection(admin, 'chat_rooms/room-1/private')),
+  );
+  await assertSucceeds(
+    getDocs(collection(admin, 'chat_rooms/room-1/members')),
+  );
+  await assertSucceeds(
+    deleteDoc(doc(admin, 'chat_rooms/room-1/messages/message-1')),
+  );
+  await assertSucceeds(
+    deleteDoc(doc(admin, 'chat_rooms/room-1/members/owner')),
+  );
+  await assertSucceeds(
+    deleteDoc(doc(admin, 'chat_rooms/room-1/private/access')),
+  );
+  await assertSucceeds(
+    deleteDoc(doc(admin, 'chat_rooms/room-1')),
+  );
+  await assertSucceeds(
+    deleteDoc(doc(admin, 'chat_room_listings/room-1')),
+  );
+});
+
+test('chat message reports are validated and manageable only by chat admins', async () => {
+  const reporter = testEnvironment.authenticatedContext('visitor').firestore();
+  const reportReference = doc(
+    reporter,
+    'chat_message_reports/report-1',
+  );
+  await assertSucceeds(
+    setDoc(reportReference, {
+      room_id: 'room-1',
+      message_id: 'message-1',
+      reported_by: 'visitor',
+      sender_id: 'owner',
+      text: 'secret message',
+      created_at: serverTimestamp(),
+      status: 'open',
+    }),
+  );
+  await assertFails(getDoc(reportReference));
+
+  const admin = testEnvironment.authenticatedContext('moderator', {
+    admin: true,
+  }).firestore();
+  const reports = await assertSucceeds(
+    getDocs(
+      query(
+        collection(admin, 'chat_message_reports'),
+        where('status', '==', 'open'),
+        orderBy('created_at'),
+      ),
+    ),
+  );
+  if (reports.size !== 1 || reports.docs[0].id !== 'report-1') {
+    throw new Error('The admin report query returned an unexpected result');
+  }
+
+  await assertFails(
+    updateDoc(doc(reporter, 'chat_message_reports/report-1'), {
+      status: 'resolved',
+      reviewed_by: 'visitor',
+      reviewed_at: serverTimestamp(),
+    }),
+  );
+  await assertSucceeds(
+    updateDoc(doc(admin, 'chat_message_reports/report-1'), {
+      status: 'resolved',
+      reviewed_by: 'moderator',
+      reviewed_at: serverTimestamp(),
+    }),
+  );
+  await assertFails(
+    setDoc(doc(reporter, 'chat_message_reports/invalid'), {
+      room_id: 'room-1',
+      reported_by: 'visitor',
+      sender_id: 'owner',
+      text: '',
+      created_at: serverTimestamp(),
+      status: 'open',
+    }),
+  );
+});
+
+test('general chat messages can be reported only with matching message data', async () => {
+  await testEnvironment.withSecurityRulesDisabled(async (context) => {
+    await setDoc(
+      doc(context.firestore(), 'public_chat_messages/public-message-1'),
+      {
+        senderId: 'author',
+        senderName: 'Author',
+        text: 'General message to report',
+        createdAt: now,
+      },
+    );
+  });
+
+  const firestore = testEnvironment.authenticatedContext('reporter').firestore();
+  await assertSucceeds(
+    setDoc(doc(firestore, 'chat_message_reports/public-report'), {
+      message_type: 'public',
+      room_id: 'public',
+      message_id: 'public-message-1',
+      reported_by: 'reporter',
+      sender_id: 'author',
+      text: 'General message to report',
+      created_at: serverTimestamp(),
+      status: 'open',
+    }),
+  );
+  await assertFails(
+    setDoc(doc(firestore, 'chat_message_reports/forged-public-report'), {
+      message_type: 'public',
+      room_id: 'public',
+      message_id: 'public-message-1',
+      reported_by: 'reporter',
+      sender_id: 'author',
+      text: 'Different fabricated text',
+      created_at: serverTimestamp(),
+      status: 'open',
+    }),
+  );
+});
+
+test('shared list links are disabled for reads and writes', async () => {
+  const owner = testEnvironment.authenticatedContext('owner').firestore();
+  const publicContext = testEnvironment.unauthenticatedContext().firestore();
+  await assertFails(getDoc(doc(publicContext, 'shared_lists/share-1')));
+  await assertFails(getDocs(collection(publicContext, 'shared_lists')));
+  await assertFails(
+    setDoc(doc(owner, 'shared_lists/new-share'), {
+      owner_uid: 'owner',
+      title: 'Paylaşılan listeler',
+      payload: '{"addresses":[],"routes":[]}',
+      created_at: serverTimestamp(),
+      expires_at: Timestamp.fromMillis(Date.now() + 24 * 60 * 60 * 1000),
+    }),
+  );
+  await assertFails(deleteDoc(doc(owner, 'shared_lists/share-1')));
+});
+
 test('user profile cannot self-assign Pro or client-controlled quotas', async () => {
   const firestore = testEnvironment.authenticatedContext('owner').firestore();
   await assertFails(
@@ -766,6 +1119,18 @@ test('user profile cannot self-assign Pro or client-controlled quotas', async ()
   await assertFails(
     updateDoc(doc(firestore, 'users/owner'), {
       navora_points: 1000000,
+      updated_at: serverTimestamp(),
+    }),
+  );
+  await assertFails(
+    updateDoc(doc(firestore, 'users/owner'), {
+      points_version: 1,
+      updated_at: serverTimestamp(),
+    }),
+  );
+  await assertFails(
+    updateDoc(doc(firestore, 'users/owner'), {
+      bonus_ai_queries: 10,
       updated_at: serverTimestamp(),
     }),
   );
@@ -795,6 +1160,63 @@ test('existing legacy entitlements survive editable profile updates unchanged', 
   await assertFails(
     updateDoc(profileReference, {
       is_pro: false,
+      updated_at: serverTimestamp(),
+    }),
+  );
+});
+
+test('profile updates preserve unknown legacy fields without allowing their modification', async () => {
+  await testEnvironment.withSecurityRulesDisabled(async (context) => {
+    await setDoc(doc(context.firestore(), 'users/legacy-extra'), {
+      display_name: 'Legacy user',
+      retired_profile_field: { source: 'older app version' },
+    });
+  });
+
+  const firestore = testEnvironment.authenticatedContext('legacy-extra').firestore();
+  const profileReference = doc(firestore, 'users/legacy-extra');
+  await assertSucceeds(
+    updateDoc(profileReference, {
+      visited_cities: arrayUnion('Ankara'),
+      updated_at: serverTimestamp(),
+    }),
+  );
+  const profile = await getDoc(profileReference);
+  assert.deepEqual(profile.data().retired_profile_field, {
+    source: 'older app version',
+  });
+  await assertFails(
+    updateDoc(profileReference, {
+      retired_profile_field: { source: 'modified' },
+      updated_at: serverTimestamp(),
+    }),
+  );
+});
+
+test('users can save unique visited cities without changing protected entitlements', async () => {
+  const firestore = testEnvironment.authenticatedContext('owner').firestore();
+  await assertSucceeds(
+    updateDoc(doc(firestore, 'users/owner'), {
+      visited_cities: arrayUnion('Ankara'),
+      updated_at: serverTimestamp(),
+    }),
+  );
+  await assertSucceeds(
+    updateDoc(doc(firestore, 'users/owner'), {
+      visited_cities: arrayUnion('İzmir'),
+      updated_at: serverTimestamp(),
+    }),
+  );
+  await assertFails(
+    updateDoc(doc(firestore, 'users/owner'), {
+      visited_cities: Array(501).fill('İstanbul'),
+      updated_at: serverTimestamp(),
+    }),
+  );
+  await assertFails(
+    updateDoc(doc(firestore, 'users/owner'), {
+      navora_points: 1000000,
+      visited_cities: arrayUnion('Bursa'),
       updated_at: serverTimestamp(),
     }),
   );
@@ -879,135 +1301,32 @@ test('shared lists are blocked entirely', async () => {
   );
 });
 
-test('road reports reject oversized text and invalid coordinates', async () => {
+test('road reports and feedback are no longer accessible', async () => {
   const firestore = testEnvironment.authenticatedContext('owner').firestore();
-  const expiresAt = Timestamp.fromMillis(Date.now() + 60 * 60 * 1000);
-  const validReport = {
-    user_id: 'owner',
-    type: 'Radar',
-    description: 'Radar bildirimi',
-    latitude: 41,
-    longitude: 29,
-    created_at: serverTimestamp(),
-    expires_at: expiresAt,
-    confirmation_count: 0,
-    incorrect_count: 0,
-  };
-  await assertSucceeds(setDoc(doc(firestore, 'road_reports/valid'), validReport));
-  await assertFails(
-    setDoc(doc(firestore, 'road_reports/oversized'), {
-      ...validReport,
-      description: 'x'.repeat(501),
-    }),
+  const reportReference = doc(firestore, 'road_reports/legacy-report');
+  const feedbackReference = doc(
+    firestore,
+    'road_reports/legacy-report/feedback/owner',
   );
-  await assertFails(
-    setDoc(doc(firestore, 'road_reports/invalid-coordinate'), {
-      ...validReport,
-      latitude: 120,
-    }),
-  );
-});
 
-test('road report feedback updates one counter atomically and only once per user', async () => {
-  const owner = testEnvironment.authenticatedContext('owner').firestore();
-  const voter = testEnvironment.authenticatedContext('voter').firestore();
-  const unauthenticated = testEnvironment.unauthenticatedContext().firestore();
-  const reportReference = doc(owner, 'road_reports/verified-report');
-  await assertSucceeds(
+  await assertFails(
     setDoc(reportReference, {
       user_id: 'owner',
-      type: 'Trafik',
-      description: 'Yoğunluk var',
+      type: 'Radar',
+      description: 'Eski bildirim',
       latitude: 41,
       longitude: 29,
       created_at: serverTimestamp(),
-      expires_at: Timestamp.fromMillis(Date.now() + 60 * 60 * 1000),
-      confirmation_count: 0,
-      incorrect_count: 0,
     }),
   );
-  await assertFails(getDoc(doc(unauthenticated, 'road_reports/verified-report')));
-  await assertFails(getDocs(collection(unauthenticated, 'road_reports')));
-
-  const voterReport = doc(voter, 'road_reports/verified-report');
-  const voterFeedback = doc(voter, 'road_reports/verified-report/feedback/voter');
-  const counterOnlyBatch = writeBatch(voter);
-  counterOnlyBatch.update(voterReport, { confirmation_count: increment(1) });
-  await assertFails(counterOnlyBatch.commit());
-
-  const orphanFeedbackBatch = writeBatch(voter);
-  orphanFeedbackBatch.set(voterFeedback, {
-    vote: 'confirmed',
-    created_at: serverTimestamp(),
-  });
-  await assertFails(orphanFeedbackBatch.commit());
-
-  const mismatchedFeedbackBatch = writeBatch(voter);
-  mismatchedFeedbackBatch.update(voterReport, { incorrect_count: increment(1) });
-  mismatchedFeedbackBatch.set(voterFeedback, {
-    vote: 'confirmed',
-    created_at: serverTimestamp(),
-  });
-  await assertFails(mismatchedFeedbackBatch.commit());
-
-  const spoofedVoter = testEnvironment.authenticatedContext('spoofed-voter').firestore();
-  const spoofedFeedbackBatch = writeBatch(spoofedVoter);
-  spoofedFeedbackBatch.update(doc(spoofedVoter, 'road_reports/verified-report'), {
-    confirmation_count: increment(1),
-  });
-  spoofedFeedbackBatch.set(
-    doc(spoofedVoter, 'road_reports/verified-report/feedback/voter'),
-    { vote: 'confirmed', created_at: serverTimestamp() },
-  );
-  await assertFails(spoofedFeedbackBatch.commit());
-
-  const confirmationBatch = writeBatch(voter);
-  confirmationBatch.update(voterReport, { confirmation_count: increment(1) });
-  confirmationBatch.set(voterFeedback, {
-    vote: 'confirmed',
-    created_at: serverTimestamp(),
-  });
-  await assertSucceeds(confirmationBatch.commit());
-
-  const duplicateBatch = writeBatch(voter);
-  duplicateBatch.update(voterReport, { incorrect_count: increment(1) });
-  duplicateBatch.set(voterFeedback, {
-    vote: 'incorrect',
-    created_at: serverTimestamp(),
-  });
-  await assertFails(duplicateBatch.commit());
-
-  const ownerFeedbackBatch = writeBatch(owner);
-  ownerFeedbackBatch.update(reportReference, { incorrect_count: increment(1) });
-  ownerFeedbackBatch.set(
-    doc(owner, 'road_reports/verified-report/feedback/owner'),
-    { vote: 'incorrect', created_at: serverTimestamp() },
-  );
-  await assertFails(ownerFeedbackBatch.commit());
-
-  const incorrectReport = doc(owner, 'road_reports/incorrect-report');
-  await assertSucceeds(
-    setDoc(incorrectReport, {
-      user_id: 'owner',
-      type: 'Yol çalışması',
-      description: 'Çalışma tamamlandı',
-      latitude: 41,
-      longitude: 29,
+  await assertFails(getDoc(reportReference));
+  await assertFails(getDocs(collection(firestore, 'road_reports')));
+  await assertFails(
+    setDoc(feedbackReference, {
+      vote: 'confirmed',
       created_at: serverTimestamp(),
-      expires_at: Timestamp.fromMillis(Date.now() + 60 * 60 * 1000),
-      confirmation_count: 0,
-      incorrect_count: 0,
     }),
   );
-  const incorrectVoteBatch = writeBatch(voter);
-  incorrectVoteBatch.update(doc(voter, 'road_reports/incorrect-report'), {
-    incorrect_count: increment(1),
-  });
-  incorrectVoteBatch.set(
-    doc(voter, 'road_reports/incorrect-report/feedback/voter'),
-    { vote: 'incorrect', created_at: serverTimestamp() },
-  );
-  await assertSucceeds(incorrectVoteBatch.commit());
 });
 
 test('community places are authenticated, validated, and owner-managed', async () => {

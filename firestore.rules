@@ -8,10 +8,6 @@ service cloud.firestore {
     // users/{uid}: profile and private account metadata.
     // users/{uid}/{subcollection}/{document}: saved routes, addresses,
     // driving history, route history, SOS contacts, point ledger and AI chats.
-    // road_reports/{reportId}: expiring community reports with bounded
-    // confirmation_count/incorrect_count counters. Each user may create one
-    // immutable feedback/{uid} vote per report; its vote and counter update
-    // must be committed atomically.
     // community_places/{placeId}: authenticated community-submitted places,
     // owned by owner_uid and visible to signed-in users.
     // chat_rooms/{roomId}: shared rooms owned by owner_id and member_ids.
@@ -25,6 +21,10 @@ service cloud.firestore {
 
     function signedIn() {
       return request.auth != null;
+    }
+
+    function isChatAdmin() {
+      return signedIn() && request.auth.token.admin == true;
     }
 
     function isUser(uid) {
@@ -53,14 +53,31 @@ service cloud.firestore {
               && data[field] <= maxValue);
     }
 
+    function validChatMessageReportTarget(data) {
+      return (data.message_type == 'public'
+              && data.room_id == 'public'
+              && exists(/databases/$(database)/documents/public_chat_messages/$(data.message_id))
+              && get(/databases/$(database)/documents/public_chat_messages/$(data.message_id)).data.senderId == data.sender_id
+              && get(/databases/$(database)/documents/public_chat_messages/$(data.message_id)).data.text == data.text)
+          || ((!(('message_type' in data))
+                || data.message_type == 'room')
+              && data.room_id != 'public'
+              && exists(/databases/$(database)/documents/chat_rooms/$(data.room_id)/messages/$(data.message_id))
+              && get(/databases/$(database)/documents/chat_rooms/$(data.room_id)/messages/$(data.message_id)).data.sender_id == data.sender_id
+              && get(/databases/$(database)/documents/chat_rooms/$(data.room_id)/messages/$(data.message_id)).data.text == data.text);
+    }
+
     function serverManagedProfileFieldsUnchanged() {
       return unchangedIfPresent('is_pro')
           && unchangedIfPresent('plan')
           && unchangedIfPresent('navora_points')
+          && unchangedIfPresent('points_version')
+          && unchangedIfPresent('bonus_chat_rooms')
+          && unchangedIfPresent('bonus_ai_queries')
+          && unchangedIfPresent('pro_discount_unlocked')
           && unchangedIfPresent('daily_quota_date')
           && unchangedIfPresent('daily_rooms_created')
-          && unchangedIfPresent('daily_ai_queries_used')
-          && unchangedIfPresent('visited_cities');
+          && unchangedIfPresent('daily_ai_queries_used');
     }
 
     function unchangedIfPresent(field) {
@@ -71,10 +88,27 @@ service cloud.firestore {
           && !(field in request.resource.data));
     }
 
+    function userProfileFields() {
+      return [
+        'display_name', 'email', 'phone', 'terms_accepted',
+        'privacy_accepted', 'email_marketing_accepted',
+        'consent_updated_at', 'photo_url', 'provider', 'gender_preference',
+        'gender', 'bio', 'selected_vehicle', 'vehicle_brand_model',
+        'vehicle_km', 'monthly_driving_analytics', 'explore_preferences',
+        'created_at', 'updated_at',
+        'is_pro', 'plan', 'navora_points', 'daily_quota_date',
+        'daily_rooms_created', 'daily_ai_queries_used', 'visited_cities',
+        'bonus_chat_rooms', 'bonus_ai_queries', 'pro_discount_unlocked',
+        'points_version'
+      ];
+    }
+
     function noClientManagedProfileFields(data) {
       return !data.keys().hasAny([
         'is_pro', 'plan', 'navora_points', 'daily_quota_date',
-        'daily_rooms_created', 'daily_ai_queries_used', 'visited_cities'
+        'daily_rooms_created', 'daily_ai_queries_used',
+        'bonus_chat_rooms', 'bonus_ai_queries', 'pro_discount_unlocked',
+        'points_version'
       ]);
     }
 
@@ -106,17 +140,7 @@ service cloud.firestore {
     }
 
     function validUserProfile(data, allowLegacyAnalytics) {
-      return hasOnly([
-          'display_name', 'email', 'phone', 'terms_accepted',
-          'privacy_accepted', 'email_marketing_accepted',
-          'consent_updated_at', 'photo_url', 'provider', 'gender_preference',
-          'gender', 'bio', 'selected_vehicle', 'vehicle_brand_model',
-          'vehicle_km', 'monthly_driving_analytics', 'explore_preferences',
-          'created_at', 'updated_at',
-          'is_pro', 'plan', 'navora_points', 'daily_quota_date',
-          'daily_rooms_created', 'daily_ai_queries_used', 'visited_cities'
-        ])
-        && (!('display_name' in data) ||
+      return (!('display_name' in data) ||
             (data.display_name is string && data.display_name.size() <= 120))
         && (!('email' in data) ||
             (data.email == null ||
@@ -156,6 +180,15 @@ service cloud.firestore {
         && (!('navora_points' in data) ||
           (data.navora_points is int && data.navora_points >= 0 &&
            data.navora_points <= 10000000))
+        && (!('points_version' in data) || data.points_version == 1)
+        && (!('bonus_chat_rooms' in data) ||
+          (data.bonus_chat_rooms is int && data.bonus_chat_rooms >= 0 &&
+           data.bonus_chat_rooms <= 1000))
+        && (!('bonus_ai_queries' in data) ||
+          (data.bonus_ai_queries is int && data.bonus_ai_queries >= 0 &&
+           data.bonus_ai_queries <= 1000))
+        && (!('pro_discount_unlocked' in data) ||
+          data.pro_discount_unlocked is bool)
         && (!('daily_quota_date' in data) ||
           (data.daily_quota_date is string &&
            data.daily_quota_date.matches('^\\d{4}-\\d{2}-\\d{2}$')))
@@ -178,6 +211,57 @@ service cloud.firestore {
 
     function validOwnedDocument(data) {
       return data.keys().size() <= 40;
+    }
+
+    function validDrivingHistory(data) {
+      return data.keys().hasOnly([
+            'route', 'date', 'duration_minutes', 'distance_km',
+            'completed_at', 'expires_at'
+          ])
+          && data.keys().hasAll([
+            'route', 'date', 'duration_minutes', 'distance_km',
+            'completed_at', 'expires_at'
+          ])
+          && data.route is string
+          && data.route.size() > 0
+          && data.route.size() <= 120
+          && data.date is string
+          && data.date.size() <= 40
+          && data.duration_minutes is int
+          && data.duration_minutes >= 0
+          && data.duration_minutes <= 1440
+          && data.distance_km is number
+          && data.distance_km >= 0
+          && data.distance_km <= 2000
+          && data.completed_at is timestamp
+          && data.completed_at == request.time
+          && data.expires_at is timestamp
+          && data.expires_at > request.time
+          && data.expires_at <= request.time + duration.value(31, 'd');
+    }
+
+    function isServerManagedUserSubcollection(subcollection) {
+      return subcollection in [
+        'daily_usage', 'point_ledger', 'quota_reservations'
+      ];
+    }
+
+    function quotaReservationPath(uid, reservationId) {
+      return /databases/$(database)/documents/users/$(uid)/quota_reservations/$(reservationId);
+    }
+
+    function hasRoomQuotaReservation(roomId) {
+      return exists(quotaReservationPath(request.auth.uid, roomId))
+          && get(quotaReservationPath(request.auth.uid, roomId)).data.uid ==
+              request.auth.uid
+          && get(quotaReservationPath(request.auth.uid, roomId)).data.kind ==
+              'room'
+          && get(quotaReservationPath(request.auth.uid, roomId)).data.status ==
+              'pending'
+          && get(quotaReservationPath(request.auth.uid, roomId)).data.expires_at
+              is timestamp
+          && get(quotaReservationPath(request.auth.uid, roomId)).data.expires_at
+              > request.time;
     }
 
     function unchanged(field) {
@@ -209,17 +293,19 @@ service cloud.firestore {
     function canReadRoom(roomId) {
       let room = get(roomPath(roomId)).data;
       return signedIn()
-          && room.schema_version == 2
-          && (room.owner_id == request.auth.uid
-              || room.is_protected != true
-              || exists(memberPath(roomId, request.auth.uid)));
+          && (isChatAdmin()
+              || (room.schema_version == 2
+                  && (room.owner_id == request.auth.uid
+                      || room.is_protected != true
+                      || exists(memberPath(roomId, request.auth.uid)))));
     }
 
     function canReadRoomAfter(roomId) {
       let room = getAfter(roomPath(roomId)).data;
       return signedIn()
           && room.schema_version == 2
-          && (room.owner_id == request.auth.uid
+          && (isChatAdmin()
+              || room.owner_id == request.auth.uid
               || room.is_protected != true
               || existsAfter(memberPath(roomId, request.auth.uid)));
     }
@@ -250,10 +336,10 @@ service cloud.firestore {
           && data.active_users.size() <= 80
           && data.active_users_count is int
           && data.active_users_count >= 1
-          && data.active_users_count <= 50
+          && data.active_users_count <= 51
           && data.member_ids is list
           && data.member_ids.size() >= 1
-          && data.member_ids.size() <= 50
+          && data.member_ids.size() <= 51
           && data.owner_id in data.member_ids
           && data.moderator_ids is list
           && data.moderator_ids.size() <= 20
@@ -301,7 +387,7 @@ service cloud.firestore {
           && data.active_users.size() <= 80
           && data.active_users_count is int
           && data.active_users_count >= 1
-          && data.active_users_count <= 50
+          && data.active_users_count <= 51
           && data.latitude is number
           && data.latitude >= -90
           && data.latitude <= 90
@@ -360,23 +446,38 @@ service cloud.firestore {
     match /users/{uid} {
       allow read: if isUser(uid);
         allow create: if isUser(uid)
-          && validUserProfile(request.resource.data, false)
-          && noClientManagedProfileFields(request.resource.data);
-      allow update: if isUser(uid)
-          && validUserProfile(request.resource.data, true)
+            && hasOnly(userProfileFields())
+            && validUserProfile(request.resource.data, false)
+            && noClientManagedProfileFields(request.resource.data);
+        allow update: if isUser(uid)
+            && request.resource.data.diff(resource.data).affectedKeys()
+                .hasOnly(userProfileFields())
+            && validUserProfile(request.resource.data, true)
           && unchanged('created_at')
           && serverManagedProfileFieldsUnchanged();
       allow delete: if isUser(uid);
 
       match /{subcollection}/{documentId} {
-        allow read: if isUser(uid);
-        allow create: if isUser(uid) && validOwnedDocument(request.resource.data);
-        allow update: if isUser(uid) && validOwnedDocument(request.resource.data);
-        allow delete: if isUser(uid);
+        allow read: if isUser(uid) && subcollection != 'quota_reservations';
+        allow create: if isUser(uid)
+            && !isServerManagedUserSubcollection(subcollection)
+            && validOwnedDocument(request.resource.data)
+            && (subcollection != 'driving_history'
+                || validDrivingHistory(request.resource.data));
+        allow update: if isUser(uid)
+            && !isServerManagedUserSubcollection(subcollection)
+            && subcollection != 'driving_history'
+            && validOwnedDocument(request.resource.data);
+        allow delete: if isUser(uid)
+            && !isServerManagedUserSubcollection(subcollection);
       }
     }
 
     match /property_listings/{listingId} {
+      function isPropertyAdmin() {
+        return signedIn() && request.auth.token.admin == true;
+      }
+
       function validPhotoUrl(url) {
         return url is string
             && url.size() <= 2048
@@ -414,7 +515,7 @@ service cloud.firestore {
             && data.owner_uid.size() <= 128
             && data.listing_type in ['kiralik', 'satilik']
             && data.title is string
-            && data.title.size() >= 3
+            && data.title.size() > 0
             && data.title.size() <= 100
             && data.price is int
             && data.price >= 1
@@ -427,7 +528,7 @@ service cloud.firestore {
             && data.district.size() > 0
             && data.district.size() <= 80
             && data.address is string
-            && data.address.size() >= 8
+            && data.address.size() > 0
             && data.address.size() <= 250
             && data.latitude is number
             && data.latitude >= -90
@@ -455,21 +556,34 @@ service cloud.firestore {
 
       allow read: if signedIn()
           && (resource.data.status == 'active'
-              || resource.data.owner_uid == request.auth.uid);
+              || resource.data.owner_uid == request.auth.uid
+              || (isPropertyAdmin()
+                  && resource.data.status == 'pending_review'));
       allow create: if signedIn()
           && validPropertyListing(request.resource.data, request.auth.uid)
           && (!('view_count' in request.resource.data)
               || request.resource.data.view_count == 0)
           && request.resource.data.created_at == request.time;
       allow update: if signedIn()
-          && resource.data.owner_uid == request.auth.uid
-          && request.resource.data.diff(resource.data).affectedKeys().hasOnly([
-            'listing_type', 'title', 'price', 'city', 'district', 'address',
-            'latitude', 'longitude', 'area_sqm', 'rooms', 'description',
-            'photo_urls', 'cover_image_url', 'status', 'updated_at'
-          ])
-          && validPropertyListing(request.resource.data, request.auth.uid)
-          && request.resource.data.created_at == resource.data.created_at;
+          && (
+            (resource.data.owner_uid == request.auth.uid
+              && request.resource.data.diff(resource.data).affectedKeys()
+                  .hasOnly([
+                    'listing_type', 'title', 'price', 'city', 'district',
+                    'address', 'latitude', 'longitude', 'area_sqm', 'rooms',
+                    'description', 'photo_urls', 'cover_image_url', 'status',
+                    'updated_at'
+                  ])
+              && validPropertyListing(request.resource.data, request.auth.uid)
+              && request.resource.data.created_at == resource.data.created_at)
+            ||
+            (isPropertyAdmin()
+              && resource.data.status == 'pending_review'
+              && request.resource.data.diff(resource.data).affectedKeys()
+                  .hasOnly(['status', 'updated_at'])
+              && request.resource.data.status in ['active', 'rejected']
+              && request.resource.data.updated_at == request.time)
+          );
         allow delete: if false;
 
       match /_views/{viewerUid} {
@@ -669,100 +783,6 @@ service cloud.firestore {
           && resource.data.owner_uid == request.auth.uid;
     }
 
-    match /road_reports/{reportId} {
-      allow read: if signedIn();
-      allow create: if signedIn()
-          && request.resource.data.user_id == request.auth.uid
-          && request.resource.data.keys().hasOnly([
-            'user_id', 'type', 'description', 'latitude', 'longitude',
-            'created_at', 'expires_at', 'confirmation_count', 'incorrect_count'
-          ])
-          && request.resource.data.keys().hasAll([
-            'user_id', 'type', 'description', 'latitude', 'longitude',
-            'created_at', 'expires_at', 'confirmation_count', 'incorrect_count'
-          ])
-          && request.resource.data.user_id is string
-          && request.resource.data.type in [
-            'Radar', 'Trafik', 'Yol çalışması', 'Kaza'
-          ]
-          && request.resource.data.description is string
-          && request.resource.data.description.size() > 0
-          && request.resource.data.description.size() <= 500
-          && request.resource.data.latitude is number
-          && request.resource.data.latitude >= -90
-          && request.resource.data.latitude <= 90
-          && request.resource.data.longitude is number
-          && request.resource.data.longitude >= -180
-          && request.resource.data.longitude <= 180
-          && request.resource.data.created_at is timestamp
-          && request.resource.data.created_at == request.time
-          && request.resource.data.expires_at is timestamp
-          && request.resource.data.expires_at > request.time
-          && request.resource.data.expires_at <=
-              request.time + duration.value(24, 'h')
-          && request.resource.data.confirmation_count is int
-          && request.resource.data.confirmation_count == 0
-          && request.resource.data.incorrect_count is int
-          && request.resource.data.incorrect_count == 0;
-
-      function validFeedbackCounterUpdate(field, vote) {
-        let feedbackPath = /databases/$(database)/documents/road_reports/$(reportId)/feedback/$(request.auth.uid);
-        let currentCount = field in resource.data
-            ? resource.data[field]
-            : 0;
-        return signedIn()
-            && resource.data.user_id != request.auth.uid
-            && resource.data.expires_at > request.time
-            && request.resource.data.diff(resource.data).affectedKeys().hasOnly([field])
-            && request.resource.data[field] is int
-            && request.resource.data[field] == currentCount + 1
-            && request.resource.data[field] <= 1000000
-            && !exists(feedbackPath)
-            && existsAfter(feedbackPath)
-            && getAfter(feedbackPath).data.vote == vote
-            && getAfter(feedbackPath).data.created_at == request.time;
-      }
-
-      allow update: if validFeedbackCounterUpdate(
-            'confirmation_count', 'confirmed'
-          )
-          || validFeedbackCounterUpdate('incorrect_count', 'incorrect');
-      allow delete: if signedIn() && resource.data.user_id == request.auth.uid;
-
-      match /feedback/{userId} {
-        function validFeedbackCreate() {
-          let reportPath = /databases/$(database)/documents/road_reports/$(reportId);
-          let report = get(reportPath).data;
-          let reportAfter = getAfter(reportPath).data;
-          let vote = request.resource.data.vote;
-          let countField = vote == 'confirmed'
-              ? 'confirmation_count'
-              : 'incorrect_count';
-          let currentCount = countField in report
-              ? report[countField]
-              : 0;
-
-          return isUser(userId)
-              && exists(reportPath)
-              && report.user_id != request.auth.uid
-              && report.expires_at > request.time
-              && request.resource.data.keys().hasOnly(['vote', 'created_at'])
-              && request.resource.data.keys().hasAll(['vote', 'created_at'])
-              && vote in ['confirmed', 'incorrect']
-              && request.resource.data.created_at is timestamp
-              && request.resource.data.created_at == request.time
-              && reportAfter.diff(report).affectedKeys().hasOnly([countField])
-              && reportAfter[countField] == currentCount + 1
-              && reportAfter[countField] <= 1000000;
-        }
-
-        allow get: if isUser(userId);
-        allow list: if false;
-        allow create: if validFeedbackCreate();
-        allow update, delete: if false;
-      }
-    }
-
     match /community_places/{placeId} {
       function validCommunityPlace(data, ownerUid) {
         return data.keys().hasOnly([
@@ -812,11 +832,13 @@ service cloud.firestore {
 
     match /chat_rooms/{roomId} {
       allow get: if signedIn()
-          && (resource.data.owner_id == request.auth.uid
+          && (isChatAdmin()
+              || resource.data.owner_id == request.auth.uid
               || resource.data.is_protected != true
               || exists(memberPath(roomId, request.auth.uid)));
       allow list: if false;
       allow create: if signedIn()
+          && hasRoomQuotaReservation(roomId)
           && request.resource.data.owner_id == request.auth.uid
           && validRoom(request.resource.data)
           && request.resource.data.member_ids.size() == 1
@@ -858,9 +880,11 @@ service cloud.firestore {
               && request.resource.data.member_ids.hasAll(resource.data.member_ids)
               && !(request.auth.uid in resource.data.member_ids)
               && request.auth.uid in request.resource.data.member_ids
-              && request.resource.data.member_ids.size() <= resource.data.max_users
+              && (request.resource.data.member_ids.size() <= resource.data.max_users
+                  || isChatAdmin())
               && request.resource.data.active_users_count ==
                   resource.data.active_users_count + 1
+              && request.resource.data.active_users_count <= 51
               && request.resource.data.active_users_count ==
                   request.resource.data.member_ids.size()
               && request.resource.data.updated_at == request.time
@@ -870,12 +894,14 @@ service cloud.firestore {
               )
               && !exists(memberPath(roomId, request.auth.uid))
               && getAfter(memberPath(roomId, request.auth.uid)).data.joined_at == request.time);
-      allow delete: if isRoomOwner(roomId);
+      allow delete: if isRoomOwner(roomId) || isChatAdmin();
 
       match /members/{memberId} {
         allow get: if signedIn()
-            && (request.auth.uid == memberId || isRoomOwner(roomId));
-        allow list: if isRoomOwner(roomId);
+            && (request.auth.uid == memberId
+                || isRoomOwner(roomId)
+                || isChatAdmin());
+        allow list: if isRoomOwner(roomId) || isChatAdmin();
         allow create: if signedIn()
             && memberId == request.auth.uid
             && request.resource.data.keys().hasOnly(['password_hash', 'joined_at'])
@@ -888,18 +914,20 @@ service cloud.firestore {
             && existsAfter(roomPath(roomId))
             && request.auth.uid in getAfter(roomPath(roomId)).data.member_ids
             && existsAfter(listingPath(roomId))
-            && (!getAfter(roomPath(roomId)).data.is_protected ||
+            && (isChatAdmin() ||
+                !getAfter(roomPath(roomId)).data.is_protected ||
                 (request.resource.data.password_hash.size() == 64
                  && existsAfter(accessPath(roomId))
                  && getAfter(accessPath(roomId)).data.password_hash ==
                     request.resource.data.password_hash));
         allow update: if false;
-        allow delete: if isRoomOwner(roomId);
+        allow delete: if isRoomOwner(roomId) || isChatAdmin();
       }
 
       match /private/{documentId} {
-        allow get: if documentId == 'access' && isRoomOwner(roomId);
-        allow list: if false;
+        allow get: if documentId == 'access'
+            && (isRoomOwner(roomId) || isChatAdmin());
+        allow list: if isRoomOwner(roomId) || isChatAdmin();
         allow create, update: if documentId == 'access'
             && signedIn()
             && (isRoomOwner(roomId)
@@ -908,7 +936,8 @@ service cloud.firestore {
             && request.resource.data.password_hash is string
             && request.resource.data.password_hash.matches('^[0-9a-f]{64}$')
             && request.resource.data.updated_at == request.time;
-        allow delete: if documentId == 'access' && isRoomOwner(roomId);
+        allow delete: if documentId == 'access'
+            && (isRoomOwner(roomId) || isChatAdmin());
       }
 
       match /messages/{messageId} {
@@ -919,6 +948,7 @@ service cloud.firestore {
         allow delete: if canReadRoom(roomId)
             && (resource.data.sender_id == request.auth.uid
                 || isRoomOwner(roomId)
+                || isChatAdmin()
                 || request.auth.uid in get(roomPath(roomId)).data.moderator_ids);
       }
     }
@@ -926,6 +956,7 @@ service cloud.firestore {
     match /chat_room_listings/{roomId} {
       allow read: if signedIn();
       allow create: if signedIn()
+          && hasRoomQuotaReservation(roomId)
           && request.resource.data.owner_id == request.auth.uid
           && validRoomListing(request.resource.data)
           && request.resource.data.active_users_count == 1
@@ -957,7 +988,9 @@ service cloud.firestore {
               ])
               && request.resource.data.active_users_count ==
                   resource.data.active_users_count + 1
-              && request.resource.data.active_users_count <= resource.data.max_users
+              && (request.resource.data.active_users_count <= resource.data.max_users
+                  || isChatAdmin())
+              && request.resource.data.active_users_count <= 51
               && request.resource.data.updated_at == request.time
               && roomListingMatchesRoom(
                 request.resource.data,
@@ -965,7 +998,8 @@ service cloud.firestore {
               )
               && request.auth.uid in getAfter(roomPath(roomId)).data.member_ids
               && getAfter(memberPath(roomId, request.auth.uid)).data.joined_at == request.time);
-      allow delete: if signedIn() && resource.data.owner_id == request.auth.uid;
+      allow delete: if signedIn()
+          && (resource.data.owner_id == request.auth.uid || isChatAdmin());
     }
 
     match /public_chat_messages/{messageId} {
@@ -988,18 +1022,47 @@ service cloud.firestore {
           && request.resource.data.createdAt is timestamp
           && request.resource.data.createdAt == request.time;
       allow update: if false;
-      allow delete: if signedIn() && resource.data.senderId == request.auth.uid;
+      allow delete: if signedIn()
+          && (resource.data.senderId == request.auth.uid || isChatAdmin());
     }
 
     match /chat_message_reports/{reportId} {
       allow create: if signedIn()
           && request.resource.data.reported_by == request.auth.uid
           && request.resource.data.keys().hasOnly([
-            'room_id', 'reported_by', 'sender_id', 'text', 'created_at', 'status'
+            'message_type', 'room_id', 'message_id', 'reported_by',
+            'sender_id', 'text', 'created_at', 'status'
           ])
+          && request.resource.data.keys().hasAll([
+            'room_id', 'message_id', 'reported_by', 'sender_id', 'text',
+            'created_at', 'status'
+          ])
+          && request.resource.data.room_id is string
+          && request.resource.data.room_id.size() > 0
+          && request.resource.data.room_id.size() <= 128
+          && request.resource.data.message_id is string
+          && request.resource.data.message_id.size() > 0
+          && request.resource.data.message_id.size() <= 128
+          && request.resource.data.sender_id is string
+          && request.resource.data.sender_id.size() > 0
+          && request.resource.data.sender_id.size() <= 128
+          && request.resource.data.text is string
+          && request.resource.data.text.size() > 0
+          && request.resource.data.text.size() <= 2000
           && request.resource.data.created_at is timestamp
-          && request.resource.data.status == 'open';
-      allow read, update, delete: if false;
+          && request.resource.data.created_at == request.time
+          && request.resource.data.status == 'open'
+          && validChatMessageReportTarget(request.resource.data);
+      allow read: if isChatAdmin();
+      allow update: if isChatAdmin()
+          && resource.data.status == 'open'
+          && request.resource.data.diff(resource.data).affectedKeys().hasOnly([
+            'status', 'reviewed_by', 'reviewed_at'
+          ])
+          && request.resource.data.status in ['resolved', 'dismissed']
+          && request.resource.data.reviewed_by == request.auth.uid
+          && request.resource.data.reviewed_at == request.time;
+      allow delete: if false;
     }
 
     match /explore_highlights/{highlightId} {
@@ -1055,7 +1118,7 @@ service cloud.firestore {
     }
 
     match /shared_lists/{listId} {
-      allow read, create, update, delete: if false;
+      allow read, write: if false;
     }
 
     match /{document=**} {

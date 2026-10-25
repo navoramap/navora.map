@@ -3,22 +3,72 @@ import 'dart:convert';
 
 import 'package:flutter/material.dart';
 import 'package:geocoding/geocoding.dart' as geo_coding;
+import 'package:geolocator/geolocator.dart' as geo;
 import 'package:google_maps_flutter/google_maps_flutter.dart';
 import 'package:http/http.dart' as http;
 import 'package:speech_to_text/speech_to_text.dart';
 
 import '../../services/places_service.dart';
 
+List<Map<String, dynamic>> navoraFilterMapSearchResults(
+  Iterable<Map<String, dynamic>> results, {
+  required String category,
+  required int? radiusKm,
+}) {
+  final categoryKeywords = switch (category) {
+    'Kafe' => ['cafe', 'coffee'],
+    'Restoran' => ['restaurant', 'fast_food', 'meal_takeaway', 'meal_delivery'],
+    'Market' => ['supermarket', 'grocery', 'convenience', 'market'],
+    'Benzinlik' => ['gas_station', 'fuel'],
+    'Park' => ['park', 'garden'],
+    'Hastane' => ['hospital', 'clinic', 'doctor', 'medical'],
+    'Ulaşım' => [
+      'bus_station',
+      'bus_stop',
+      'transit_station',
+      'train_station',
+      'subway_station',
+    ],
+    _ => const <String>[],
+  };
+  final radiusMeters = radiusKm == null ? null : radiusKm * 1000;
+
+  return results.where((result) {
+    if (categoryKeywords.isNotEmpty) {
+      final values = [
+        result['category']?.toString().toLowerCase() ?? '',
+        result['type']?.toString().toLowerCase() ?? '',
+      ];
+      if (!values.any(
+        (value) =>
+            value.contains(category.toLowerCase()) ||
+            categoryKeywords.any(value.contains),
+      )) {
+        return false;
+      }
+    }
+
+    final distance = (result['distanceMeters'] as num?)?.toDouble();
+    return radiusMeters == null || distance == null || distance <= radiusMeters;
+  }).toList();
+}
+
 class MapSearchPage extends StatefulWidget {
   final String initialQuery;
   final List<Map<String, dynamic>> initialHistory;
   final LatLng? initialLocation;
+  final bool isHistoryEnabled;
+  final Future<bool> Function()? onClearHistory;
+  final Future<void> Function(bool enabled)? onHistoryEnabledChanged;
 
   const MapSearchPage({
     super.key,
     this.initialQuery = '',
     required this.initialHistory,
     this.initialLocation,
+    this.isHistoryEnabled = true,
+    this.onClearHistory,
+    this.onHistoryEnabledChanged,
   });
 
   @override
@@ -32,18 +82,65 @@ class _MapSearchPageState extends State<MapSearchPage> {
   int _requestId = 0;
   bool _isSearching = false;
   bool _isListening = false;
+  Future<LatLng?>? _searchOriginFuture;
+  late LatLng? _searchOrigin;
   final SpeechToText _speech = SpeechToText();
   List<Map<String, dynamic>> _history = [];
   List<Map<String, dynamic>> _suggestions = [];
+  String _selectedCategory = 'Tümü';
+  int _selectedRadiusKm = 15;
 
   @override
   void initState() {
     super.initState();
     _controller.text = widget.initialQuery;
+    _searchOrigin = widget.initialLocation;
     _history = List<Map<String, dynamic>>.from(widget.initialHistory);
     WidgetsBinding.instance.addPostFrameCallback((_) {
       _focusNode.requestFocus();
     });
+  }
+
+  Future<LatLng?> _getSearchOrigin() async {
+    if (_searchOrigin != null) return _searchOrigin;
+    final pending = _searchOriginFuture;
+    if (pending != null) return pending;
+
+    final future = _loadSearchOrigin();
+    _searchOriginFuture = future;
+    try {
+      return await future;
+    } finally {
+      if (identical(_searchOriginFuture, future)) {
+        _searchOriginFuture = null;
+      }
+    }
+  }
+
+  Future<LatLng?> _loadSearchOrigin() async {
+    try {
+      var permission = await geo.Geolocator.checkPermission();
+      if (permission == geo.LocationPermission.denied) {
+        permission = await geo.Geolocator.requestPermission();
+      }
+      if (permission == geo.LocationPermission.denied ||
+          permission == geo.LocationPermission.deniedForever ||
+          !await geo.Geolocator.isLocationServiceEnabled()) {
+        return null;
+      }
+
+      final position = await geo.Geolocator.getCurrentPosition(
+        locationSettings: const geo.LocationSettings(
+          accuracy: geo.LocationAccuracy.medium,
+        ),
+      ).timeout(const Duration(seconds: 12));
+      final origin = LatLng(position.latitude, position.longitude);
+      if (mounted) setState(() => _searchOrigin = origin);
+      return origin;
+    } catch (error) {
+      debugPrint('Search result distance location unavailable: $error');
+      return _searchOrigin;
+    }
   }
 
   @override
@@ -58,8 +155,13 @@ class _MapSearchPageState extends State<MapSearchPage> {
     final query = value.trim();
     if (query.isEmpty) return;
 
-    if (_suggestions.isNotEmpty) {
-      await _selectSuggestion(_suggestions.first);
+    final visibleSuggestions = navoraFilterMapSearchResults(
+      _suggestions,
+      category: _selectedCategory,
+      radiusKm: _selectedRadiusKm == 0 ? null : _selectedRadiusKm,
+    );
+    if (visibleSuggestions.isNotEmpty) {
+      await _selectSuggestion(visibleSuggestions.first);
       return;
     }
 
@@ -103,11 +205,13 @@ class _MapSearchPageState extends State<MapSearchPage> {
   Future<void> _loadSuggestions(String query) async {
     final requestId = ++_requestId;
     try {
+      final searchOrigin = await _getSearchOrigin();
+      if (!mounted || requestId != _requestId) return;
       if (NavoraPlacesService.isBusinessQuery(query)) {
         try {
           final businesses = await NavoraPlacesService.searchText(
             query,
-            location: widget.initialLocation,
+            location: searchOrigin,
           );
           if (businesses.isNotEmpty) {
             if (!mounted || requestId != _requestId) return;
@@ -119,10 +223,26 @@ class _MapSearchPageState extends State<MapSearchPage> {
         }
       } else {
         try {
-          final googleResults = await NavoraPlacesService.autocomplete(query);
+          final googleResults = await NavoraPlacesService.searchText(
+            query,
+            location: searchOrigin,
+          );
           if (googleResults.isNotEmpty) {
             if (!mounted || requestId != _requestId) return;
             setState(() => _suggestions = googleResults);
+            return;
+          }
+        } catch (error) {
+          debugPrint('Google Places text search failed: $error');
+        }
+        try {
+          final googleSuggestions = await NavoraPlacesService.autocomplete(
+            query,
+            location: searchOrigin,
+          );
+          if (googleSuggestions.isNotEmpty) {
+            if (!mounted || requestId != _requestId) return;
+            setState(() => _suggestions = googleSuggestions);
             return;
           }
         } catch (error) {
@@ -130,20 +250,16 @@ class _MapSearchPageState extends State<MapSearchPage> {
         }
       }
 
-      final uri = Uri.https(
-        'nominatim.openstreetmap.org',
-        '/search',
-        {
-          'q': query,
-          'format': 'jsonv2',
-          'addressdetails': '1',
-          'namedetails': '1',
-          'extratags': '1',
-          'dedupe': '1',
-          'limit': '8',
-          'countrycodes': 'tr',
-        },
-      );
+      final uri = Uri.https('nominatim.openstreetmap.org', '/search', {
+        'q': query,
+        'format': 'jsonv2',
+        'addressdetails': '1',
+        'namedetails': '1',
+        'extratags': '1',
+        'dedupe': '1',
+        'limit': '8',
+        'countrycodes': 'tr',
+      });
 
       final response = await http.get(
         uri,
@@ -166,10 +282,10 @@ class _MapSearchPageState extends State<MapSearchPage> {
         final name = item['name']?.toString().trim();
         final namedetails = item['namedetails'] as Map<String, dynamic>?;
         final title = (name != null && name.isNotEmpty)
-          ? name
-          : (namedetails?['name']?.toString().trim().isNotEmpty == true
-            ? namedetails!['name'].toString().trim()
-            : parts.first.trim());
+            ? name
+            : (namedetails?['name']?.toString().trim().isNotEmpty == true
+                  ? namedetails!['name'].toString().trim()
+                  : parts.first.trim());
 
         final subtitleParts = <String>[];
         for (final part in [
@@ -181,26 +297,53 @@ class _MapSearchPageState extends State<MapSearchPage> {
           address['state'],
         ]) {
           final value = part?.toString().trim();
-          if (value != null && value.isNotEmpty && !subtitleParts.contains(value)) {
+          if (value != null &&
+              value.isNotEmpty &&
+              !subtitleParts.contains(value)) {
             subtitleParts.add(value);
           }
         }
 
+        final coordinate = LatLng(
+          double.parse(item['lat'].toString()),
+          double.parse(item['lon'].toString()),
+        );
+        final currentLocation = searchOrigin;
+        final distanceMeters = currentLocation == null
+            ? null
+            : geo.Geolocator.distanceBetween(
+                currentLocation.latitude,
+                currentLocation.longitude,
+                coordinate.latitude,
+                coordinate.longitude,
+              );
         return <String, dynamic>{
           'name': title,
           'subtitle': subtitleParts.isEmpty
               ? parts.skip(1).join(', ').trim()
               : subtitleParts.join(', '),
           'type': item['type']?.toString() ?? 'place',
-          'category': item['type']?.toString() == 'amenity' ? 'İşletme' : 'Konum',
+          'category': item['type']?.toString() == 'amenity'
+              ? 'İşletme'
+              : 'Konum',
           'query': displayName,
-          'coordinate': LatLng(
-            double.parse(item['lat'].toString()),
-            double.parse(item['lon'].toString()),
-          ),
+          'coordinate': coordinate,
+          'distanceMeters': distanceMeters,
+          'distanceText': distanceMeters == null
+              ? null
+              : _formatDistance(distanceMeters),
         };
       }).toList();
 
+      if (searchOrigin != null) {
+        suggestions.sort(
+          (first, second) =>
+              ((first['distanceMeters'] as double?) ?? double.infinity)
+                  .compareTo(
+                    (second['distanceMeters'] as double?) ?? double.infinity,
+                  ),
+        );
+      }
       if (!mounted || requestId != _requestId) return;
       setState(() {
         _suggestions = suggestions;
@@ -209,6 +352,10 @@ class _MapSearchPageState extends State<MapSearchPage> {
       debugPrint('Search suggestions failed: $error');
       if (mounted) setState(() => _suggestions = []);
     }
+  }
+
+  String _formatDistance(double meters) {
+    return '${(meters / 1000).toStringAsFixed(1)} km';
   }
 
   void _cancelSearch() {
@@ -230,11 +377,95 @@ class _MapSearchPageState extends State<MapSearchPage> {
     }
   }
 
-  void _clearHistory() {
+  Future<void> _clearHistory() async {
+    final confirmed = await showDialog<bool>(
+      context: context,
+      builder: (dialogContext) => AlertDialog(
+        title: const Text('Arama geçmişi silinsin mi?'),
+        content: const Text(
+          'Bu işlem hesabınızda kayıtlı arama geçmişini de siler.',
+        ),
+        actions: [
+          TextButton(
+            onPressed: () => Navigator.pop(dialogContext, false),
+            child: const Text('Vazgeç'),
+          ),
+          FilledButton(
+            onPressed: () => Navigator.pop(dialogContext, true),
+            child: const Text('Geçmişi sil'),
+          ),
+        ],
+      ),
+    );
+    if (!mounted || confirmed != true) return;
+    final cleared = await widget.onClearHistory?.call() ?? true;
+    if (!cleared || !mounted) return;
     setState(() {
       _history.clear();
       _suggestions = [];
     });
+  }
+
+  Future<void> _showHistoryPrivacySheet() async {
+    var isEnabled = widget.isHistoryEnabled;
+    await showModalBottomSheet<void>(
+      context: context,
+      backgroundColor: const Color(0xFF191919),
+      shape: const RoundedRectangleBorder(
+        borderRadius: BorderRadius.vertical(top: Radius.circular(24)),
+      ),
+      builder: (sheetContext) => StatefulBuilder(
+        builder: (context, setSheetState) => SafeArea(
+          child: Padding(
+            padding: const EdgeInsets.fromLTRB(20, 20, 20, 28),
+            child: Column(
+              mainAxisSize: MainAxisSize.min,
+              crossAxisAlignment: CrossAxisAlignment.start,
+              children: [
+                const Text(
+                  'Arama gizliliği',
+                  style: TextStyle(
+                    color: Colors.white,
+                    fontSize: 18,
+                    fontWeight: FontWeight.bold,
+                  ),
+                ),
+                const SizedBox(height: 8),
+                const Text(
+                  'Arama geçmişiniz hesabınızla eşitlenir. Kaydı kapatırsanız yeni aramalar saklanmaz; mevcut geçmişi ayrıca silebilirsiniz.',
+                  style: TextStyle(color: Colors.white70, height: 1.4),
+                ),
+                SwitchListTile.adaptive(
+                  contentPadding: EdgeInsets.zero,
+                  title: const Text(
+                    'Arama geçmişini kaydet',
+                    style: TextStyle(color: Colors.white),
+                  ),
+                  value: isEnabled,
+                  onChanged: (enabled) async {
+                    setSheetState(() => isEnabled = enabled);
+                    await widget.onHistoryEnabledChanged?.call(enabled);
+                  },
+                ),
+                Align(
+                  alignment: Alignment.centerLeft,
+                  child: TextButton.icon(
+                    onPressed: _history.isEmpty
+                        ? null
+                        : () async {
+                            Navigator.pop(sheetContext);
+                            await _clearHistory();
+                          },
+                    icon: const Icon(Icons.delete_outline_rounded),
+                    label: const Text('Kayıtlı geçmişi sil'),
+                  ),
+                ),
+              ],
+            ),
+          ),
+        ),
+      ),
+    );
   }
 
   Future<void> _toggleVoiceSearch() async {
@@ -280,7 +511,7 @@ class _MapSearchPageState extends State<MapSearchPage> {
       },
     );
   }
-  
+
   Future<void> _selectSuggestion(Map<String, dynamic> item) async {
     var resolvedItem = item;
     final placeId = item['placeId']?.toString();
@@ -298,7 +529,24 @@ class _MapSearchPageState extends State<MapSearchPage> {
 
   @override
   Widget build(BuildContext context) {
-    final results = _suggestions.isNotEmpty ? _suggestions : _history;
+    final isShowingSuggestions = _suggestions.isNotEmpty;
+    final results = isShowingSuggestions
+        ? navoraFilterMapSearchResults(
+            _suggestions,
+            category: _selectedCategory,
+            radiusKm: _selectedRadiusKm == 0 ? null : _selectedRadiusKm,
+          )
+        : _history;
+    final filters = const [
+      'Tümü',
+      'Kafe',
+      'Restoran',
+      'Market',
+      'Benzinlik',
+      'Park',
+      'Hastane',
+      'Ulaşım',
+    ];
 
     return Scaffold(
       backgroundColor: const Color(0xFF191919),
@@ -346,7 +594,9 @@ class _MapSearchPageState extends State<MapSearchPage> {
                                 border: InputBorder.none,
                                 enabledBorder: InputBorder.none,
                                 focusedBorder: InputBorder.none,
-                                contentPadding: EdgeInsets.symmetric(vertical: 13),
+                                contentPadding: EdgeInsets.symmetric(
+                                  vertical: 13,
+                                ),
                               ),
                             ),
                           ),
@@ -383,12 +633,15 @@ class _MapSearchPageState extends State<MapSearchPage> {
                               child: SizedBox(
                                 width: 18,
                                 height: 18,
-                                child: CircularProgressIndicator(strokeWidth: 2),
+                                child: CircularProgressIndicator(
+                                  strokeWidth: 2,
+                                ),
                               ),
                             )
                           else
                             IconButton(
-                              onPressed: () => _handleSubmitted(_controller.text),
+                              onPressed: () =>
+                                  _handleSubmitted(_controller.text),
                               icon: const Icon(Icons.search_rounded),
                               color: const Color(0xFFFF6B00),
                               splashRadius: 18,
@@ -400,43 +653,187 @@ class _MapSearchPageState extends State<MapSearchPage> {
                 ],
               ),
             ),
+            if (_history.isNotEmpty && !isShowingSuggestions)
+              Padding(
+                padding: const EdgeInsets.fromLTRB(14, 4, 14, 2),
+                child: Row(
+                  children: [
+                    const Expanded(
+                      child: Text(
+                        'Son aramalar',
+                        style: TextStyle(
+                          color: Colors.white,
+                          fontWeight: FontWeight.w600,
+                        ),
+                      ),
+                    ),
+                    TextButton.icon(
+                      onPressed: _showHistoryPrivacySheet,
+                      icon: const Icon(Icons.privacy_tip_outlined, size: 17),
+                      label: const Text('Gizlilik'),
+                    ),
+                  ],
+                ),
+              ),
+            if (isShowingSuggestions)
+              Padding(
+                padding: const EdgeInsets.fromLTRB(14, 2, 14, 6),
+                child: Column(
+                  crossAxisAlignment: CrossAxisAlignment.start,
+                  children: [
+                    SizedBox(
+                      height: 38,
+                      child: ListView(
+                        scrollDirection: Axis.horizontal,
+                        children: [
+                          for (final category in filters)
+                            Padding(
+                              padding: const EdgeInsets.only(right: 7),
+                              child: ChoiceChip(
+                                label: Text(category),
+                                selected: _selectedCategory == category,
+                                onSelected: (_) => setState(
+                                  () => _selectedCategory = category,
+                                ),
+                              ),
+                            ),
+                        ],
+                      ),
+                    ),
+                    Row(
+                      children: [
+                        Text(
+                          '${results.length} sonuç',
+                          style: const TextStyle(color: Colors.white70),
+                        ),
+                        const Spacer(),
+                        const Icon(
+                          Icons.tune_rounded,
+                          color: Colors.white70,
+                          size: 18,
+                        ),
+                        const SizedBox(width: 6),
+                        DropdownButton<int>(
+                          value: _selectedRadiusKm,
+                          dropdownColor: const Color(0xFF242424),
+                          underline: const SizedBox.shrink(),
+                          style: const TextStyle(color: Colors.white),
+                          items: const [
+                            DropdownMenuItem(value: 2, child: Text('2 km')),
+                            DropdownMenuItem(value: 5, child: Text('5 km')),
+                            DropdownMenuItem(value: 10, child: Text('10 km')),
+                            DropdownMenuItem(value: 15, child: Text('15 km')),
+                            DropdownMenuItem(value: 0, child: Text('Sınırsız')),
+                          ],
+                          onChanged: (radius) {
+                            if (radius != null) {
+                              setState(() => _selectedRadiusKm = radius);
+                            }
+                          },
+                        ),
+                      ],
+                    ),
+                    if (_searchOrigin == null && _selectedRadiusKm != 0)
+                      const Padding(
+                        padding: EdgeInsets.only(top: 2),
+                        child: Text(
+                          'Uzaklık filtresi için konum izni gerekli.',
+                          style: TextStyle(
+                            color: Color(0xFFFFB36B),
+                            fontSize: 12,
+                          ),
+                        ),
+                      ),
+                  ],
+                ),
+              ),
             Expanded(
               child: ListView.separated(
                 padding: const EdgeInsets.fromLTRB(10, 4, 10, 20),
-                itemCount: results.length + (_suggestions.isEmpty && results.isNotEmpty ? 1 : 0),
+                itemCount:
+                    results.length +
+                    (isShowingSuggestions && results.isEmpty ? 1 : 0) +
+                    (!isShowingSuggestions && results.isNotEmpty ? 1 : 0),
                 separatorBuilder: (_, _) => const Divider(height: 1),
                 itemBuilder: (context, index) {
-                  if (_suggestions.isEmpty && index == results.length) {
+                  if (isShowingSuggestions && results.isEmpty) {
+                    return const Padding(
+                      padding: EdgeInsets.all(24),
+                      child: Center(
+                        child: Text(
+                          'Bu filtrelerle eşleşen sonuç bulunamadı.',
+                          textAlign: TextAlign.center,
+                          style: TextStyle(color: Colors.white70),
+                        ),
+                      ),
+                    );
+                  }
+                  if (!isShowingSuggestions && index == results.length) {
                     return Container(
                       alignment: Alignment.center,
                       padding: const EdgeInsets.symmetric(vertical: 12),
-                      child: TextButton.icon(
-                        onPressed: _clearHistory,
-                        icon: const Icon(Icons.delete_outline_rounded),
-                        label: const Text('Geçmişi temizle'),
+                      child: Row(
+                        mainAxisAlignment: MainAxisAlignment.center,
+                        children: [
+                          TextButton.icon(
+                            onPressed: _showHistoryPrivacySheet,
+                            icon: const Icon(Icons.privacy_tip_outlined),
+                            label: const Text('Gizlilik'),
+                          ),
+                          TextButton.icon(
+                            onPressed: _clearHistory,
+                            icon: const Icon(Icons.delete_outline_rounded),
+                            label: const Text('Geçmişi temizle'),
+                          ),
+                        ],
                       ),
                     );
                   }
 
                   final item = results[index];
-                  final isHistory = _suggestions.isEmpty;
+                  final isHistory = !isShowingSuggestions;
                   return ListTile(
                     dense: true,
                     contentPadding: const EdgeInsets.symmetric(
                       horizontal: 12,
                       vertical: 2,
                     ),
-                    leading: Container(
-                      width: 36,
-                      height: 36,
-                      decoration: BoxDecoration(
-                        color: const Color(0xFF2A180D),
-                        borderRadius: BorderRadius.circular(10),
-                      ),
-                      child: Icon(
-                        isHistory ? Icons.history_rounded : _resultIcon(item['type'] as String?),
-                        color: const Color(0xFFFF6B00),
-                        size: 18,
+                    leading: SizedBox(
+                      width: 52,
+                      child: Column(
+                        mainAxisSize: MainAxisSize.min,
+                        children: [
+                          Container(
+                            width: 32,
+                            height: 32,
+                            decoration: BoxDecoration(
+                              color: const Color(0xFF2A180D),
+                              borderRadius: BorderRadius.circular(10),
+                            ),
+                            child: Icon(
+                              isHistory
+                                  ? Icons.history_rounded
+                                  : _resultIcon(item['type'] as String?),
+                              color: const Color(0xFFFF6B00),
+                              size: 18,
+                            ),
+                          ),
+                          if (!isHistory) ...[
+                            const SizedBox(height: 2),
+                            Text(
+                              item['distanceText'] as String? ??
+                                  'Konum gerekli',
+                              maxLines: 1,
+                              overflow: TextOverflow.ellipsis,
+                              textAlign: TextAlign.center,
+                              style: const TextStyle(
+                                color: Color(0xFFFFB36B),
+                                fontSize: 8,
+                                fontWeight: FontWeight.w700,
+                              ),
+                            ),
+                          ],
+                        ],
                       ),
                     ),
                     title: Text(
@@ -452,7 +849,7 @@ class _MapSearchPageState extends State<MapSearchPage> {
                     subtitle: Text(
                       isHistory
                           ? item['query'] as String
-                          : '${item['category'] ?? 'Konum'} • ${item['subtitle'] as String? ?? 'Konum önerisi'}',
+                          : item['subtitle'] as String? ?? 'Konum önerisi',
                       maxLines: 2,
                       overflow: TextOverflow.ellipsis,
                       style: TextStyle(
@@ -466,7 +863,10 @@ class _MapSearchPageState extends State<MapSearchPage> {
                     ),
                     onTap: () {
                       if (isHistory) {
-                        final historyQuery = item['query']?.toString() ?? item['name']?.toString() ?? '';
+                        final historyQuery =
+                            item['query']?.toString() ??
+                            item['name']?.toString() ??
+                            '';
                         _controller.text = historyQuery;
                         _controller.selection = TextSelection.collapsed(
                           offset: historyQuery.length,
@@ -486,4 +886,3 @@ class _MapSearchPageState extends State<MapSearchPage> {
     );
   }
 }
-

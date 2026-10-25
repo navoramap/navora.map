@@ -5,7 +5,6 @@ import 'package:flutter/foundation.dart';
 import 'dart:async';
 import 'dart:convert';
 
-import 'package:app_links/app_links.dart';
 import 'package:cloud_firestore/cloud_firestore.dart';
 import 'package:crypto/crypto.dart';
 import 'package:firebase_app_check/firebase_app_check.dart';
@@ -52,40 +51,10 @@ void main() async {
   runApp(const NavoraMapApp());
 }
 
-class NavoraMapApp extends StatefulWidget {
+class NavoraMapApp extends StatelessWidget {
   const NavoraMapApp({super.key});
 
-  @override
-  State<NavoraMapApp> createState() => _NavoraMapAppState();
-}
-
-class _NavoraMapAppState extends State<NavoraMapApp> {
-  final _navigatorKey = GlobalKey<NavigatorState>();
-  final _appLinks = AppLinks();
-  StreamSubscription<Uri>? _linkSubscription;
-
-  @override
-  void initState() {
-    super.initState();
-    _linkSubscription = _appLinks.uriLinkStream.listen(_openSharedListUri);
-    unawaited(
-      _appLinks
-          .getInitialLink()
-          .then(_openSharedListUri)
-          .catchError((Object _) {}),
-    );
-  }
-
-  @override
-  void dispose() {
-    _linkSubscription?.cancel();
-    super.dispose();
-  }
-
-  void _openSharedListUri(Uri? uri) {
-    // Shared list deep links are disabled.
-    return;
-  }
+  static final _navigatorKey = GlobalKey<NavigatorState>();
 
   @override
   Widget build(BuildContext context) {

@@ -209,6 +209,10 @@ test('listing owner uploads limited image files to pending listing slots', async
     ),
   );
 
+  const adminStorage = testEnvironment
+    .authenticatedContext('moderator', { admin: true })
+    .storage();
+  await assertSucceeds(getMetadata(ref(adminStorage, photo.fullPath)));
   const otherStorage = testEnvironment.authenticatedContext('other').storage();
   await assertFails(getMetadata(ref(otherStorage, photo.fullPath)));
 });
@@ -262,4 +266,44 @@ test('community place owners upload photos and signed-in users can read them', a
   await assertSucceeds(getMetadata(ref(visitorStorage, photo.fullPath)));
   const signedOutStorage = testEnvironment.unauthenticatedContext().storage();
   await assertFails(getMetadata(ref(signedOutStorage, photo.fullPath)));
+});
+
+test('users manage their own profile photos with image limits', async () => {
+  const ownerStorage = testEnvironment.authenticatedContext('owner').storage();
+  const photo = ref(ownerStorage, 'profile_photos/owner/avatar');
+  await assertSucceeds(
+    uploadBytes(photo, new Uint8Array([1, 2, 3]), {
+      contentType: 'image/jpeg',
+    }),
+  );
+  await assertSucceeds(
+    uploadBytes(photo, new Uint8Array([4, 5, 6]), {
+      contentType: 'image/png',
+    }),
+  );
+
+  const otherStorage = testEnvironment.authenticatedContext('other').storage();
+  await assertFails(
+    uploadBytes(
+      ref(otherStorage, 'profile_photos/owner/avatar'),
+      new Uint8Array([1, 2, 3]),
+      { contentType: 'image/jpeg' },
+    ),
+  );
+  await assertFails(
+    uploadBytes(
+      ref(ownerStorage, 'profile_photos/owner/avatar'),
+      new Uint8Array([1, 2, 3]),
+      { contentType: 'image/gif' },
+    ),
+  );
+  await assertSucceeds(getMetadata(ref(otherStorage, photo.fullPath)));
+  await assertFails(
+    getMetadata(
+      ref(
+        testEnvironment.unauthenticatedContext().storage(),
+        photo.fullPath,
+      ),
+    ),
+  );
 });

@@ -226,13 +226,13 @@ class PropertyListingService {
   Future<void> deleteListing(String listingId) async {
     final user = FirebaseAuth.instance.currentUser;
     if (user == null) throw StateError('İlan silmek için giriş yapmalısın.');
-    await FirebaseFunctions.instance
+    await FirebaseFunctions.instanceFor(region: 'europe-west1')
         .httpsCallable('deletePropertyListing')
         .call({'listingId': listingId});
   }
 
   Future<int> recordView(String listingId) async {
-    final result = await FirebaseFunctions.instance
+    final result = await FirebaseFunctions.instanceFor(region: 'europe-west1')
         .httpsCallable('recordPropertyListingView')
         .call({'listingId': listingId});
     final data = result.data;

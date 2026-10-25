@@ -94,21 +94,25 @@ const List<NavoraReward> navoraRewards = [
 ];
 
 const List<Map<String, String>> navoraEarnRules = [
-  {'title': 'Rota tamamla', 'detail': 'Her biten yolculuk', 'points': '+20–50'},
   {
-    'title': 'Yeni şehir',
-    'detail': 'İlk kez ziyaret edilen şehir',
-    'points': '+50',
+    'title': 'Rota tamamla',
+    'detail': 'Günlük puan sınırına kadar',
+    'points': '+20–30',
   },
   {
-    'title': 'Topluluk bildirimi',
-    'detail': 'Trafik, kaza veya radar',
+    'title': 'Doğrulanan topluluk bildirimi',
+    'detail': 'En az 3 kişi bildirimi onaylayınca',
     'points': '+25',
   },
   {
     'title': 'Gece sürüşü',
-    'detail': '22:00 sonrası tamamlanan rota',
+    'detail': '22:00–05:00 arasında tamamlanan rota',
     'points': '+20',
+  },
+  {
+    'title': 'Şehir ziyareti',
+    'detail': 'Sunucuda doğrulanabilir konum kanıtı henüz yok',
+    'points': 'Etkin değil',
   },
 ];
 
@@ -121,7 +125,7 @@ class NavoraPointsSheet extends StatelessWidget {
   final bool hasProDiscount;
   final List<Map<String, dynamic>> ledger;
   final VoidCallback onChanged;
-  final bool Function(NavoraReward reward) onRedeem;
+  final Future<bool> Function(NavoraReward reward) onRedeem;
 
   const NavoraPointsSheet({
     super.key,
@@ -191,13 +195,13 @@ class NavoraPointsSheet extends StatelessWidget {
                 child: Row(
                   children: [
                     Icon(
-                      Icons.phone_android_rounded,
+                      Icons.cloud_done_outlined,
                       color: Color(0xFFB8B8B8),
                       size: 14,
                     ),
                     SizedBox(width: 6),
                     Text(
-                      'Puanlar bu cihazda saklanır',
+                      'Puanlar hesabına güvenli biçimde kaydedilir',
                       style: TextStyle(color: Color(0xFFB8B8B8), fontSize: 11),
                     ),
                   ],
@@ -330,6 +334,11 @@ class NavoraPointsSheet extends StatelessWidget {
                 ),
               ),
               const SizedBox(height: 8),
+              Text(
+                'Sürüş ve doğrulanmış bildirimlerden günde toplam en fazla 100 puan kazanılabilir.',
+                style: TextStyle(fontSize: 11, color: Colors.grey.shade400),
+              ),
+              const SizedBox(height: 8),
               ...navoraEarnRules.map(
                 (rule) => Padding(
                   padding: const EdgeInsets.only(bottom: 8),
@@ -394,8 +403,7 @@ class NavoraPointsSheet extends StatelessWidget {
               ),
               const SizedBox(height: 8),
               ...navoraRewards.map((reward) {
-                final owned =
-                  reward.id == 'pro_discount' && hasProDiscount;
+                final owned = reward.id == 'pro_discount' && hasProDiscount;
                 final canAfford = points >= reward.cost;
                 return Container(
                   margin: const EdgeInsets.only(bottom: 10),
@@ -449,8 +457,8 @@ class NavoraPointsSheet extends StatelessWidget {
                       TextButton(
                         onPressed: owned
                             ? null
-                            : () {
-                                final ok = onRedeem(reward);
+                            : () async {
+                                final ok = await onRedeem(reward);
                                 if (ok) onChanged();
                               },
                         child: Text(

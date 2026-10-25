@@ -20,6 +20,7 @@ import 'package:cloud_firestore/cloud_firestore.dart';
 import 'package:firebase_storage/firebase_storage.dart';
 import 'package:geolocator/geolocator.dart' as geo;
 import 'package:geocoding/geocoding.dart' as geo_coding;
+import 'package:image_picker/image_picker.dart';
 import 'package:google_maps_flutter/google_maps_flutter.dart';
 import 'package:sensors_plus/sensors_plus.dart' as sensors;
 import 'package:shared_preferences/shared_preferences.dart';
@@ -34,6 +35,8 @@ import 'tabs/create_lost_pet_report_sheet.dart';
 import 'tabs/create_community_place_sheet.dart';
 import 'tabs/explore_page.dart';
 import 'my_property_listings_page.dart';
+import 'property_listing_moderation_page.dart';
+import 'chat_message_moderation_page.dart';
 import '../../services/places_service.dart';
 import '../../services/chat_room_service.dart';
 import '../../services/property_listing_service.dart';
@@ -116,13 +119,35 @@ double navoraSafeDistanceKm(geo.Position previous, geo.Position current) {
   return deltaMeters / 1000;
 }
 
-String navoraFormatNavigationDuration(int? durationMinutes) {
-  if (durationMinutes == null) return '-';
-  if (durationMinutes < 60) return '$durationMinutes dk';
+int navoraWalkingDurationMinutes({
+  required double distanceKm,
+  required int routeDurationMinutes,
+}) {
+  if (!distanceKm.isFinite || distanceKm <= 0) return routeDurationMinutes;
+  final walkingMinutes = (distanceKm / 4 * 60).ceil();
+  return math.max(routeDurationMinutes, walkingMinutes);
+}
 
-  final hours = durationMinutes ~/ 60;
-  final remainingMinutes = durationMinutes % 60;
-  return remainingMinutes == 0 ? '$hours sa' : '$hours sa $remainingMinutes dk';
+String navoraFormatNavigationDuration(
+  int? durationMinutes, {
+  bool isWalking = false,
+}) {
+  if (durationMinutes == null) return '-';
+  final walkingDays = isWalking ? durationMinutes ~/ (8 * 60) : 0;
+  final remainingMinutes = isWalking
+      ? durationMinutes % (8 * 60)
+      : durationMinutes;
+  final hours = remainingMinutes ~/ 60;
+  final minutes = remainingMinutes % 60;
+
+  if (walkingDays > 0) {
+    final dayLabel = '$walkingDays gün';
+    if (hours == 0 && minutes == 0) return dayLabel;
+    if (minutes == 0) return '$dayLabel $hours sa';
+    return '$dayLabel $hours sa $minutes dk';
+  }
+  if (hours == 0) return '$minutes dk';
+  return minutes == 0 ? '$hours sa' : '$hours sa $minutes dk';
 }
 
 bool navoraShouldFollowCurrentPosition({
@@ -135,6 +160,12 @@ bool navoraShouldFollowCurrentPosition({
       isFollowing;
 }
 
+bool navoraHasReliableNavigationPosition(double accuracyMeters) =>
+    accuracyMeters.isFinite && accuracyMeters >= 0 && accuracyMeters <= 50;
+
+bool navoraIsWithinArrivalRadius(double distanceMeters) =>
+    distanceMeters.isFinite && distanceMeters <= 100;
+
 double navoraSmoothBearing(
   double currentBearing,
   double nextBearing, {
@@ -145,6 +176,49 @@ double navoraSmoothBearing(
   final shortestDelta = (next - current + 540) % 360 - 180;
   final smoothing = factor.clamp(0.0, 1.0).toDouble();
   return (current + shortestDelta * smoothing + 360) % 360;
+}
+
+double? navoraCalculateCompassHeading({
+  required double accelerationX,
+  required double accelerationY,
+  required double accelerationZ,
+  required double magneticX,
+  required double magneticY,
+  required double magneticZ,
+}) {
+  final accelerationMagnitude = math.sqrt(
+    accelerationX * accelerationX +
+        accelerationY * accelerationY +
+        accelerationZ * accelerationZ,
+  );
+  final magneticMagnitude = math.sqrt(
+    magneticX * magneticX + magneticY * magneticY + magneticZ * magneticZ,
+  );
+  if (!accelerationMagnitude.isFinite ||
+      !magneticMagnitude.isFinite ||
+      accelerationMagnitude < 1e-6 ||
+      magneticMagnitude < 1e-6) {
+    return null;
+  }
+
+  final gravityX = accelerationX / accelerationMagnitude;
+  final gravityY = accelerationY / accelerationMagnitude;
+  final gravityZ = accelerationZ / accelerationMagnitude;
+  final fieldX = magneticX / magneticMagnitude;
+  final fieldY = magneticY / magneticMagnitude;
+  final fieldZ = magneticZ / magneticMagnitude;
+
+  final eastX = fieldY * gravityZ - fieldZ * gravityY;
+  final eastY = fieldZ * gravityX - fieldX * gravityZ;
+  final eastZ = fieldX * gravityY - fieldY * gravityX;
+  final eastMagnitude = math.sqrt(
+    eastX * eastX + eastY * eastY + eastZ * eastZ,
+  );
+  if (eastMagnitude < 1e-6) return null;
+
+  final northY = gravityZ * eastX - gravityX * eastZ;
+  final azimuth = math.atan2(eastY, northY);
+  return (azimuth * 180 / math.pi + 360) % 360;
 }
 
 LatLng navoraOffsetCameraTarget(
@@ -395,7 +469,16 @@ class _HomePageState extends State<HomePage> {
   Timer? _searchDebounce;
   List<Marker> _searchMarkers = const [];
   List<Polyline> _routePolylines = const [];
+  List<Polyline> _alternativeRoutePolylines = const [];
   List<Polyline> _navigationTrafficPolylines = const [];
+  bool _avoidTolls = false;
+  final Map<String, bool> _mapLayerVisibility = {
+    'rooms': true,
+    'community': true,
+    'properties': true,
+    'lostPets': true,
+    'adoptions': true,
+  };
   List<Map<String, dynamic>> _navigationSteps = [];
   double? _navigationDistanceKm;
   int? _navigationDurationMinutes;
@@ -404,18 +487,29 @@ class _HomePageState extends State<HomePage> {
   bool _isMapTilted = false;
   bool _isFollowingCurrentPosition = true;
   bool _isProgrammaticCameraMove = false;
+  final Set<int> _activeMapPointers = {};
   bool _isLocationTracking = false;
-  bool _hasNavigationBearing = false;
+  bool _hasMapBearing = false;
   bool _isOffRoute = false;
+  bool _isGpsAccuracyDegraded = false;
+  bool _hasShownRouteUpdateError = false;
   bool _isNavigationVoiceEnabled = true;
+  bool _isSearchHistoryEnabled = true;
+  bool _hasAnnouncedArrival = false;
+  int _offRouteReadings = 0;
   int _navigationStepIndex = 0;
-  double _navigationBearing = 0;
+  double _mapBearing = 0;
+  double? _deviceHeading;
+  double? _gravityX;
+  double? _gravityY;
+  double? _gravityZ;
+  sensors.MagnetometerEvent? _magneticField;
+  Timer? _compassCameraUpdateTimer;
   String? _activeNavigationTitle;
   String? _activeNavigationDestination;
   final FlutterTts _tts = FlutterTts();
   final SpeechToText _speech = SpeechToText();
   bool _isListening = false;
-  final List<Map<String, dynamic>> _roadReports = [];
   final List<Map<String, dynamic>> _liveRooms = [];
   final List<Map<String, dynamic>> _communityPlaces = [];
   final List<Map<String, dynamic>> _propertyListings = [];
@@ -425,10 +519,9 @@ class _HomePageState extends State<HomePage> {
   bool _isPetAdoptionMode = false;
   bool _isPropertyListingsLoading = false;
   String? _propertyListingsError;
-  int _propertyListingsQueryGeneration = 0;
   bool _isLoadingLostPetReports = false;
   String? _lostPetReportsError;
-  int _lostPetQueryGeneration = 0;
+  final Set<String> _loadedPetLayerCollections = {};
   LatLng? _selectedDestinationCoordinate;
   String? _selectedDestinationName;
   Map<String, dynamic>? _selectedPlaceDetails;
@@ -437,6 +530,7 @@ class _HomePageState extends State<HomePage> {
   int _searchRequestId = 0;
   String? _searchResultName;
   bool _isSearching = false;
+  Future<geo.Position?>? _searchPositionFuture;
   bool _isSearchMode = false;
   String? _activeCategory;
   bool _showSearchPanel = false;
@@ -446,18 +540,37 @@ class _HomePageState extends State<HomePage> {
   StreamSubscription<geo.Position>? _positionSubscription;
   StreamSubscription<geo.Position>? _locationPositionSubscription;
   StreamSubscription<sensors.AccelerometerEvent>? _accelerometerSubscription;
-  StreamSubscription<QuerySnapshot<Map<String, dynamic>>>?
-  _roadReportsSubscription;
+  StreamSubscription<sensors.MagnetometerEvent>? _magnetometerSubscription;
   StreamSubscription<QuerySnapshot<Map<String, dynamic>>>?
   _communityPlacesSubscription;
   StreamSubscription<QuerySnapshot<Map<String, dynamic>>>? _roomsSubscription;
   StreamSubscription<QuerySnapshot<Map<String, dynamic>>>?
-  _propertyListingsSubscription;
+  _mapPropertyListingsSubscription;
   StreamSubscription<QuerySnapshot<Map<String, dynamic>>>?
-  _lostPetReportsSubscription;
+  _mapLostPetReportsSubscription;
+  StreamSubscription<QuerySnapshot<Map<String, dynamic>>>?
+  _mapAdoptionListingsSubscription;
   StreamSubscription<QuerySnapshot<Map<String, dynamic>>>?
   _publicChatSubscription;
-  Timer? _roadReportCleanupTimer;
+  StreamSubscription<QuerySnapshot<Map<String, dynamic>>>?
+  _searchHistorySubscription;
+  StreamSubscription<QuerySnapshot<Map<String, dynamic>>>? _aiChatsSubscription;
+  StreamSubscription<QuerySnapshot<Map<String, dynamic>>>?
+  _pointLedgerSubscription;
+  StreamSubscription<DocumentSnapshot<Map<String, dynamic>>>?
+  _dailyQuotaSubscription;
+  StreamSubscription<DocumentSnapshot<Map<String, dynamic>>>?
+  _pointsProfileSubscription;
+  StreamSubscription<QuerySnapshot<Map<String, dynamic>>>?
+  _savedRoutesSubscription;
+  StreamSubscription<QuerySnapshot<Map<String, dynamic>>>?
+  _savedAddressesSubscription;
+  StreamSubscription<QuerySnapshot<Map<String, dynamic>>>?
+  _drivingHistorySubscription;
+  StreamSubscription<QuerySnapshot<Map<String, dynamic>>>?
+  _routeHistorySubscription;
+  StreamSubscription<QuerySnapshot<Map<String, dynamic>>>?
+  _sosContactsSubscription;
   Timer? _roomExpiryTimer;
   geo.Position? _currentPosition;
   String? _currentAddress;
@@ -468,7 +581,6 @@ class _HomePageState extends State<HomePage> {
   DateTime? _driveStartedAt;
   bool _isDriveTracking = false;
   double _driveDistanceKm = 0;
-  double _vehicleStartKm = 0;
   DateTime? _lastCrashAlertAt;
 
   late String _userName;
@@ -481,6 +593,8 @@ class _HomePageState extends State<HomePage> {
   // Pro & Oda Sınırı Değişkenleri
   bool _isProUser = false;
   bool _isDeletingAccount = false;
+  bool _isUploadingProfilePhoto = false;
+  String? _profilePhotoUrl;
   bool _canManageExploreHighlights = false;
   BitmapDescriptor? _chatRoomMarkerIcon;
   bool _locationPermissionGranted = false;
@@ -496,49 +610,19 @@ class _HomePageState extends State<HomePage> {
   int _bonusChatRooms = 0;
   int _bonusAiQueries = 0;
   bool _proDiscountUnlocked = false;
+  bool _isRedeemingReward = false;
   final List<String> _visitedCities = [];
   final List<Map<String, String>> _savedRoutes = [];
 
   final List<Map<String, dynamic>> _pointLedger = [];
 
-  String _vehicleBrandModel = 'Volkswagen Golf 1.5 TSI';
-  String _vehicleKm = '47.550';
-
-  double _parseVehicleKm() {
-    final normalized = _vehicleKm
-        .trim()
-        .replaceAll('.', '')
-        .replaceAll(',', '.');
-    return double.tryParse(normalized) ?? 0;
-  }
-
-  String _formatVehicleKm(double kilometers) {
-    final digits = kilometers.round().toString();
-    final groups = <String>[];
-    for (var end = digits.length; end > 0; end -= 3) {
-      final start = math.max(0, end - 3);
-      groups.insert(0, digits.substring(start, end));
-    }
-    return groups.join('.');
-  }
-
-  final List<Map<String, String>> _savedAddresses = [
-    {'title': 'Ev', 'address': 'Koşuyolu, Kadıköy / İstanbul', 'type': 'home'},
-    {
-      'title': 'İş',
-      'address': 'Maslak Mahallesi, Sarıyer / İstanbul',
-      'type': 'work',
-    },
-    {
-      'title': 'Favori Kafe',
-      'address': 'Alaçatı, Çeşme / İzmir',
-      'type': 'favorite',
-    },
-  ];
+  final List<Map<String, String>> _savedAddresses = [];
 
   final List<Map<String, String>> _sosContacts = [];
 
   final List<Map<String, String>> _drivingHistory = [];
+  final List<Map<String, String>> _liveDrivingHistory = [];
+  final List<Map<String, String>> _liveRouteHistory = [];
 
   final TextEditingController _aiController = TextEditingController();
   final TextEditingController _routeTitleController = TextEditingController();
@@ -563,52 +647,10 @@ class _HomePageState extends State<HomePage> {
   final ScrollController _publicChatScrollController = ScrollController();
   bool _showPublicChatScrollToBottom = false;
   bool _publicChatWasAtBottom = true;
+  bool _isResettingPublicChat = false;
 
   // Yakındaki Herkese Açık Mesajlar
-  final List<Map<String, dynamic>> _publicFeedMessages = [
-    {
-      'sender': 'Ahmet',
-      'text': 'Karaköy sahil tarafında trafik biraz yoğun bilginiz olsun.',
-      'time': '14:20',
-      'distance': '350m uzakta',
-    },
-    {
-      'sender': 'Selin',
-      'text':
-          'Kadıköy tarafında önerebileceğiniz sessiz çalışma kafesi var mı?',
-      'time': '14:22',
-      'distance': '1.2km uzakta',
-    },
-    {
-      'sender': 'Burak',
-      'text': 'Moda Sahil\'de hava inanılmaz keyifli, yürüyüş yapacaklar kaçırmasın.',
-      'time': '14:30',
-      'distance': '800m uzakta',
-    },
-  ];
-
-  // Uygulamadaki Herkesin Katılabileceği Genel Sohbet Odası Verisi
-  final Map<String, dynamic> _generalGlobalRoom = {
-    'name': 'Genel Sohbet Odası (Tüm Kullanıcılar)',
-    'type': 'Genel / Sınırsız Alan',
-    'distance': 'Uygulama Geneli',
-    'activeUsers': '142 kişi aktif',
-    'icon': Icons.public,
-    'isProtected': false,
-    'password': '',
-    'messages': [
-      {
-        'sender': 'Sistem',
-        'text': 'Genel Sohbet Odasına hoş geldiniz! Buradan tüm Navora kullanıcılarıyla konuşabilirsiniz.',
-        'time': '00:00',
-      },
-      {
-        'sender': 'Zeynep',
-        'text': 'Herkese selamlar, İzmir\'den katılıyorum!',
-        'time': '14:35',
-      },
-    ],
-  };
+  final List<Map<String, dynamic>> _publicFeedMessages = [];
 
   @override
   void initState() {
@@ -628,21 +670,23 @@ class _HomePageState extends State<HomePage> {
     }
     _userName = widget.userName;
     _userEmail = widget.userEmail;
+    _profilePhotoUrl = FirebaseAuth.instance.currentUser?.photoURL;
     _initializeVoiceNavigation();
     _loadVehicleMarkerIcons();
     _loadChatRoomMarkerIcon();
     _loadLocationPermissionState();
     _loadProfileData();
+    _loadMapPreferences();
+    final currentUser = FirebaseAuth.instance.currentUser;
+    if (currentUser != null) {
+      _subscribeToAiChats(currentUser.uid);
+    }
+    unawaited(_subscribeToSearchHistory());
     _loadExploreAdminClaim();
-    _listenToRoadReports();
     _listenToCommunityPlaces();
     _subscribeToLiveRooms();
     _subscribeToPublicChat();
     _publicChatScrollController.addListener(_handlePublicChatScroll);
-    _roadReportCleanupTimer = Timer.periodic(
-      const Duration(minutes: 1),
-      (_) => _removeExpiredRoadReports(),
-    );
     _roomExpiryTimer = Timer.periodic(
       const Duration(minutes: 1),
       (_) => _removeExpiredRoomsFromView(),
@@ -667,43 +711,110 @@ class _HomePageState extends State<HomePage> {
   }
 
   Future<void> _openPropertyMap(String listingType) async {
-    final generation = ++_propertyListingsQueryGeneration;
-    await _propertyListingsSubscription?.cancel();
-    if (!mounted || generation != _propertyListingsQueryGeneration) return;
-
     setState(() {
       _selectedIndex = 1;
       _activePropertyListingType = listingType;
-      _propertyListings.clear();
-      _isPropertyListingsLoading = true;
-      _propertyListingsError = null;
+      _isLostPetMapActive = false;
     });
+    final listings = _propertyListings
+        .where((listing) => listing['listing_type'] == listingType)
+        .toList();
+    if (listings.isNotEmpty && _mapController != null) {
+      final firstListing = listings.first;
+      await _moveMapTo(
+        LatLng(
+          (firstListing['latitude'] as num).toDouble(),
+          (firstListing['longitude'] as num).toDouble(),
+        ),
+        13,
+      );
+    }
+  }
 
-    if (FirebaseAuth.instance.currentUser == null) {
+  Future<void> _closePropertyMap() async {
+    if (!mounted) return;
+    setState(() {
+      _selectedIndex = 0;
+      _activePropertyListingType = null;
+    });
+  }
+
+  Future<void> _openLostPetMap({bool adoptionMode = false}) async {
+    setState(() {
+      _selectedIndex = 1;
+      _activePropertyListingType = null;
+      _isLostPetMapActive = true;
+      _isPetAdoptionMode = adoptionMode;
+      if (FirebaseAuth.instance.currentUser == null) {
+        _isLoadingLostPetReports = false;
+        _lostPetReportsError =
+            'Hayvan ilanlarını görmek için giriş yapmalısın.';
+      }
+    });
+    final targetCollection = adoptionMode
+        ? 'pet_adoption_listings'
+        : 'lost_pet_reports';
+    final reports = _lostPetReports
+        .where((report) => report['collection'] == targetCollection)
+        .toList();
+    if (reports.isNotEmpty && _mapController != null) {
+      final firstReport = reports.first;
+      await _moveMapTo(
+        LatLng(
+          (firstReport['latitude'] as num).toDouble(),
+          (firstReport['longitude'] as num).toDouble(),
+        ),
+        13,
+      );
+    }
+  }
+
+  Future<void> _closeLostPetMap() async {
+    if (!mounted) return;
+    setState(() {
+      _selectedIndex = 0;
+      _isLostPetMapActive = false;
+      _isPetAdoptionMode = false;
+    });
+  }
+
+  void _subscribeToMapLayers() {
+    final userId = FirebaseAuth.instance.currentUser?.uid;
+    if (userId == null) {
       setState(() {
-        _isPropertyListingsLoading = false;
         _propertyListingsError = 'İlanları görmek için giriş yapmalısın.';
+        _lostPetReportsError =
+            'Hayvan ilanlarını görmek için giriş yapmalısın.';
       });
       return;
     }
 
-    _propertyListingsSubscription = FirebaseFirestore.instance
+    setState(() {
+      _isPropertyListingsLoading = true;
+      _propertyListingsError = null;
+      _isLoadingLostPetReports = true;
+      _lostPetReportsError = null;
+      _loadedPetLayerCollections.clear();
+    });
+
+    _mapPropertyListingsSubscription = FirebaseFirestore.instance
         .collection('property_listings')
         .where('status', isEqualTo: 'active')
-        .where('listing_type', isEqualTo: listingType)
         .orderBy('created_at', descending: true)
         .limit(100)
         .snapshots()
         .listen(
           (snapshot) {
-            if (!mounted || generation != _propertyListingsQueryGeneration) {
+            if (!mounted || FirebaseAuth.instance.currentUser?.uid != userId) {
               return;
             }
             final listings = snapshot.docs
-                .map((document) {
-                  final data = document.data();
-                  return <String, dynamic>{...data, 'id': document.id};
-                })
+                .map(
+                  (document) => <String, dynamic>{
+                    ...document.data(),
+                    'id': document.id,
+                  },
+                )
                 .where((listing) {
                   final latitude = listing['latitude'];
                   final longitude = listing['longitude'];
@@ -722,26 +833,10 @@ class _HomePageState extends State<HomePage> {
               _isPropertyListingsLoading = false;
               _propertyListingsError = null;
             });
-            if (listings.isNotEmpty && _mapController != null) {
-              final firstListing = listings.first;
-              unawaited(
-                _mapController!.animateCamera(
-                  CameraUpdate.newLatLngZoom(
-                    LatLng(
-                      (firstListing['latitude'] as num).toDouble(),
-                      (firstListing['longitude'] as num).toDouble(),
-                    ),
-                    13,
-                  ),
-                ),
-              );
-            }
           },
           onError: (Object error) {
             debugPrint('Emlak ilanları alınamadı: $error');
-            if (!mounted || generation != _propertyListingsQueryGeneration) {
-              return;
-            }
+            if (!mounted) return;
             setState(() {
               _isPropertyListingsLoading = false;
               _propertyListingsError =
@@ -749,51 +844,15 @@ class _HomePageState extends State<HomePage> {
             });
           },
         );
+
+    _subscribeToPetMapLayer('lost_pet_reports');
+    _subscribeToPetMapLayer('pet_adoption_listings');
   }
 
-  Future<void> _closePropertyMap() async {
-    ++_propertyListingsQueryGeneration;
-    await _propertyListingsSubscription?.cancel();
-    if (!mounted) return;
-    setState(() {
-      _selectedIndex = 0;
-      _activePropertyListingType = null;
-      _propertyListings.clear();
-      _isPropertyListingsLoading = false;
-      _propertyListingsError = null;
-    });
-  }
-
-  Future<void> _openLostPetMap({bool adoptionMode = false}) async {
-    final generation = ++_lostPetQueryGeneration;
-    await _lostPetReportsSubscription?.cancel();
-    await _propertyListingsSubscription?.cancel();
-    if (!mounted || generation != _lostPetQueryGeneration) return;
-
-    setState(() {
-      _selectedIndex = 1;
-      _activePropertyListingType = null;
-      _isLostPetMapActive = true;
-      _isPetAdoptionMode = adoptionMode;
-      _propertyListings.clear();
-      _lostPetReports.clear();
-      _isLoadingLostPetReports = true;
-      _lostPetReportsError = null;
-    });
-
-    if (FirebaseAuth.instance.currentUser == null) {
-      setState(() {
-        _isLoadingLostPetReports = false;
-        _lostPetReportsError =
-            'Hayvan ilanlarını görmek için giriş yapmalısın.';
-      });
-      return;
-    }
-
-    final collectionName = adoptionMode
-        ? 'pet_adoption_listings'
-        : 'lost_pet_reports';
-    _lostPetReportsSubscription = FirebaseFirestore.instance
+  void _subscribeToPetMapLayer(String collectionName) {
+    final userId = FirebaseAuth.instance.currentUser?.uid;
+    if (userId == null) return;
+    final subscription = FirebaseFirestore.instance
         .collection(collectionName)
         .where('status', isEqualTo: 'active')
         .orderBy('created_at', descending: true)
@@ -801,7 +860,9 @@ class _HomePageState extends State<HomePage> {
         .snapshots()
         .listen(
           (snapshot) {
-            if (!mounted || generation != _lostPetQueryGeneration) return;
+            if (!mounted || FirebaseAuth.instance.currentUser?.uid != userId) {
+              return;
+            }
             final reports = snapshot.docs
                 .map(
                   (document) => <String, dynamic>{
@@ -822,52 +883,165 @@ class _HomePageState extends State<HomePage> {
                 })
                 .toList();
             setState(() {
-              _lostPetReports
-                ..clear()
-                ..addAll(reports);
-              _isLoadingLostPetReports = false;
+              _lostPetReports.removeWhere(
+                (report) => report['collection'] == collectionName,
+              );
+              _lostPetReports.addAll(reports);
+              _loadedPetLayerCollections.add(collectionName);
+              _isLoadingLostPetReports = _loadedPetLayerCollections.length < 2;
               _lostPetReportsError = null;
             });
-            if (reports.isNotEmpty && _mapController != null) {
-              final firstReport = reports.first;
-              unawaited(
-                _mapController!.animateCamera(
-                  CameraUpdate.newLatLngZoom(
-                    LatLng(
-                      (firstReport['latitude'] as num).toDouble(),
-                      (firstReport['longitude'] as num).toDouble(),
-                    ),
-                    13,
-                  ),
-                ),
-              );
-            }
           },
           onError: (Object error) {
-            debugPrint('Kayıp dost bildirimleri alınamadı: $error');
-            if (!mounted || generation != _lostPetQueryGeneration) return;
+            debugPrint('$collectionName harita katmanı yüklenemedi: $error');
+            if (!mounted || FirebaseAuth.instance.currentUser?.uid != userId) {
+              return;
+            }
             setState(() {
-              _isLoadingLostPetReports = false;
-              _lostPetReportsError =
-                  'Bildirimler yüklenemedi. Daha sonra tekrar dene.';
+              _loadedPetLayerCollections.add(collectionName);
+              _isLoadingLostPetReports = _loadedPetLayerCollections.length < 2;
+              _lostPetReportsError = 'Hayvan ilanları şu anda yüklenemiyor. Daha sonra tekrar dene.';
             });
           },
         );
+    if (collectionName == 'lost_pet_reports') {
+      _mapLostPetReportsSubscription = subscription;
+    } else {
+      _mapAdoptionListingsSubscription = subscription;
+    }
   }
 
-  Future<void> _closeLostPetMap() async {
-    ++_lostPetQueryGeneration;
-    await _lostPetReportsSubscription?.cancel();
-    if (!mounted) return;
-    setState(() {
-      _selectedIndex = 0;
-      _isLostPetMapActive = false;
-      _isPetAdoptionMode = false;
-      _lostPetReports.clear();
-      _isLoadingLostPetReports = false;
-      _lostPetReportsError = null;
-    });
+  Future<void> _loadMapPreferences() async {
+    try {
+      final preferences = await SharedPreferences.getInstance();
+      if (!mounted) return;
+      setState(() {
+        _avoidTolls = preferences.getBool('map.avoidTolls') ?? false;
+        _isNavigationVoiceEnabled =
+            preferences.getBool('map.navigationVoice') ?? true;
+        _isSearchHistoryEnabled =
+            preferences.getBool('search.history.enabled') ?? true;
+        for (final layer in _mapLayerVisibility.keys.toList()) {
+          _mapLayerVisibility[layer] =
+              preferences.getBool('map.layer.$layer') ?? true;
+        }
+      });
+    } catch (error) {
+      debugPrint('Harita tercihleri yüklenemedi: $error');
+      if (mounted) _showTrackingMessage('Harita tercihleri yüklenemedi.');
+    }
   }
+
+  Future<void> _setMapLayerVisibility(String layer, bool isVisible) async {
+    setState(() => _mapLayerVisibility[layer] = isVisible);
+    try {
+      final preferences = await SharedPreferences.getInstance();
+      await preferences.setBool('map.layer.$layer', isVisible);
+    } catch (error) {
+      debugPrint('Harita katmanı tercihi kaydedilemedi: $error');
+      if (mounted) {
+        _showTrackingMessage('Harita katmanı tercihi kaydedilemedi.');
+      }
+    }
+  }
+
+  Future<void> _setAvoidTolls(bool avoidTolls) async {
+    setState(() => _avoidTolls = avoidTolls);
+    try {
+      final preferences = await SharedPreferences.getInstance();
+      await preferences.setBool('map.avoidTolls', avoidTolls);
+    } catch (error) {
+      debugPrint('Ücretli yol tercihi kaydedilemedi: $error');
+      if (mounted) _showTrackingMessage('Ücretli yol tercihi kaydedilemedi.');
+    }
+  }
+
+  Future<void> _setNavigationVoiceEnabled(bool enabled) async {
+    setState(() => _isNavigationVoiceEnabled = enabled);
+    try {
+      final preferences = await SharedPreferences.getInstance();
+      await preferences.setBool('map.navigationVoice', enabled);
+      if (enabled) {
+        await _speakNavigation('Navigasyon sesi açıldı.');
+      } else {
+        await _tts.stop();
+      }
+    } catch (error) {
+      debugPrint('Navigasyon sesi tercihi kaydedilemedi: $error');
+      if (mounted) {
+        _showTrackingMessage('Navigasyon sesi tercihi kaydedilemedi.');
+      }
+    }
+  }
+
+  Future<void> _setSearchHistoryEnabled(bool enabled) async {
+    setState(() => _isSearchHistoryEnabled = enabled);
+    try {
+      final preferences = await SharedPreferences.getInstance();
+      await preferences.setBool('search.history.enabled', enabled);
+    } catch (error) {
+      debugPrint('Arama geçmişi tercihi kaydedilemedi: $error');
+      if (mounted) {
+        _showTrackingMessage('Arama geçmişi tercihi kaydedilemedi.');
+      }
+    }
+  }
+
+  void _showMapLayersSheet() {
+    const layers = [
+      ('rooms', 'Sohbet odaları', Icons.forum_rounded),
+      ('community', 'Topluluk mekânları', Icons.place_rounded),
+      ('properties', 'Emlak ilanları', Icons.home_work_rounded),
+      ('lostPets', 'Kayıp hayvanlar', Icons.pets_rounded),
+      ('adoptions', 'Sahiplendirme ilanları', Icons.volunteer_activism_rounded),
+    ];
+    final sheetVisibility = Map<String, bool>.from(_mapLayerVisibility);
+    showModalBottomSheet<void>(
+      context: context,
+      backgroundColor: const Color(0xFF191919),
+      shape: const RoundedRectangleBorder(
+        borderRadius: BorderRadius.vertical(top: Radius.circular(24)),
+      ),
+      builder: (sheetContext) => StatefulBuilder(
+        builder: (context, setSheetState) => SafeArea(
+          child: Padding(
+            padding: const EdgeInsets.fromLTRB(20, 18, 20, 20),
+            child: Column(
+              mainAxisSize: MainAxisSize.min,
+              children: [
+                const Text(
+                  'Harita katmanları',
+                  style: TextStyle(
+                    color: Colors.white,
+                    fontSize: 18,
+                    fontWeight: FontWeight.bold,
+                  ),
+                ),
+                const SizedBox(height: 8),
+                for (final (key, title, icon) in layers)
+                  SwitchListTile(
+                    contentPadding: EdgeInsets.zero,
+                    secondary: Icon(icon, color: const Color(0xFFFF9A3D)),
+                    title: Text(
+                      title,
+                      style: const TextStyle(color: Colors.white),
+                    ),
+                    value: sheetVisibility[key] ?? true,
+                    activeThumbColor: const Color(0xFFFF7A00),
+                    onChanged: (visible) {
+                      setSheetState(() => sheetVisibility[key] = visible);
+                      unawaited(_setMapLayerVisibility(key, visible));
+                    },
+                  ),
+              ],
+            ),
+          ),
+        ),
+      ),
+    );
+  }
+
+  bool _isMapLayerVisible(String layer) => _mapLayerVisibility[layer] ?? true;
 
   Future<void> _showCreateLostPetReportSheet({bool isAdoption = false}) async {
     if (FirebaseAuth.instance.currentUser == null) {
@@ -1288,58 +1462,6 @@ class _HomePageState extends State<HomePage> {
     }
   }
 
-  void _listenToRoadReports() {
-    _roadReportsSubscription = FirebaseFirestore.instance
-        .collection('road_reports')
-        .orderBy('created_at', descending: true)
-        .limit(100)
-        .snapshots()
-        .listen(
-          (snapshot) {
-            if (!mounted) return;
-            final reports = snapshot.docs
-                .map((document) {
-                  final data = document.data();
-                  final createdAt = data['created_at'];
-                  final expiresAt = data['expires_at'];
-                  final expiry = expiresAt is Timestamp
-                      ? expiresAt.toDate()
-                      : null;
-                  return <String, dynamic>{
-                    'id': document.id,
-                    'userId': data['user_id']?.toString() ?? '',
-                    'type': data['type']?.toString() ?? 'Trafik',
-                    'description': data['description']?.toString() ?? '',
-                    'latitude': (data['latitude'] as num?)?.toDouble(),
-                    'longitude': (data['longitude'] as num?)?.toDouble(),
-                    'time': createdAt is Timestamp
-                        ? _formatReportTime(createdAt.toDate())
-                        : 'Yeni',
-                    'confirmationCount':
-                        (data['confirmation_count'] as num?)?.toInt() ?? 0,
-                    'incorrectCount':
-                        (data['incorrect_count'] as num?)?.toInt() ?? 0,
-                    'expiresAt': expiry,
-                    'reference': document.reference,
-                  };
-                })
-                .where((report) {
-                  final expiry = report['expiresAt'] as DateTime?;
-                  return report['latitude'] is double &&
-                      report['longitude'] is double &&
-                      (expiry == null || expiry.isAfter(DateTime.now()));
-                })
-                .toList();
-            setState(() {
-              _roadReports
-                ..clear()
-                ..addAll(reports);
-            });
-          },
-          onError: (error) => debugPrint('Yol bildirimleri alınamadı: $error'),
-        );
-  }
-
   void _listenToCommunityPlaces() {
     _communityPlacesSubscription = FirebaseFirestore.instance
         .collection('community_places')
@@ -1473,6 +1595,7 @@ class _HomePageState extends State<HomePage> {
                                 ? storedDistance
                                 : null));
                   return <String, dynamic>{
+                    '_document_id': document.id,
                     'senderId': data['senderId']?.toString() ?? '',
                     'sender': data['senderName']?.toString() ?? 'Kullanıcı',
                     'text': data['text']?.toString() ?? '',
@@ -1594,6 +1717,112 @@ class _HomePageState extends State<HomePage> {
     }
   }
 
+  Future<void> _reportPublicChatMessage(Map<String, dynamic> message) async {
+    final user = FirebaseAuth.instance.currentUser;
+    final messageId = message['_document_id']?.toString() ?? '';
+    final senderId = message['senderId']?.toString() ?? '';
+    final text = message['text']?.toString() ?? '';
+    if (user == null || messageId.isEmpty || senderId.isEmpty || text.isEmpty) {
+      _showTrackingMessage('Mesaj şikayet edilemedi. Tekrar deneyin.');
+      return;
+    }
+    if (senderId == user.uid) return;
+
+    try {
+      await FirebaseFirestore.instance.collection('chat_message_reports').add({
+        'message_type': 'public',
+        'room_id': 'public',
+        'message_id': messageId,
+        'reported_by': user.uid,
+        'sender_id': senderId,
+        'text': text,
+        'created_at': FieldValue.serverTimestamp(),
+        'status': 'open',
+      });
+      if (mounted) {
+        _showTrackingMessage('Mesaj yöneticilere şikayet edildi.');
+      }
+    } catch (error) {
+      debugPrint('Genel sohbet mesajı şikayet edilemedi: $error');
+      if (mounted) {
+        _showTrackingMessage('Şikayet gönderilemedi. Tekrar deneyin.');
+      }
+    }
+  }
+
+  Future<void> _resetPublicChat() async {
+    if (!_canManageExploreHighlights || _isResettingPublicChat) return;
+    final confirmed = await showDialog<bool>(
+      context: context,
+      builder: (dialogContext) => AlertDialog(
+        title: const Text('Genel sohbet sıfırlansın mı?'),
+        content: const Text(
+          'Genel sohbetteki tüm mevcut mesajlar kalıcı olarak silinecek. '
+          'Sohbet odaları ve oda mesajları etkilenmez.',
+        ),
+        actions: [
+          TextButton(
+            onPressed: () => Navigator.pop(dialogContext, false),
+            child: const Text('Vazgeç'),
+          ),
+          FilledButton(
+            style: FilledButton.styleFrom(backgroundColor: Colors.redAccent),
+            onPressed: () => Navigator.pop(dialogContext, true),
+            child: const Text('Mesajları sil'),
+          ),
+        ],
+      ),
+    );
+    if (confirmed != true || !mounted) return;
+
+    setState(() => _isResettingPublicChat = true);
+    var deletedCount = 0;
+    try {
+      final collection = FirebaseFirestore.instance.collection(
+        'public_chat_messages',
+      );
+      final latestSnapshot = await collection
+          .orderBy(FieldPath.documentId, descending: true)
+          .limit(1)
+          .get();
+      if (latestSnapshot.docs.isNotEmpty) {
+        final upperBound = latestSnapshot.docs.single;
+        var query = collection
+            .orderBy(FieldPath.documentId)
+            .endAtDocument(upperBound)
+            .limit(450);
+
+        while (true) {
+          final snapshot = await query.get();
+          if (snapshot.docs.isEmpty) break;
+          final batch = FirebaseFirestore.instance.batch();
+          for (final document in snapshot.docs) {
+            batch.delete(document.reference);
+          }
+          await batch.commit();
+          deletedCount += snapshot.size;
+          query = query.startAfterDocument(snapshot.docs.last);
+        }
+      }
+      if (mounted) {
+        _showTrackingMessage('$deletedCount genel sohbet mesajı silindi.');
+      }
+    } catch (error) {
+      debugPrint(
+        'Genel sohbet sıfırlanamadı ($deletedCount mesaj silindi): $error',
+      );
+      if (mounted) {
+        _showTrackingMessage(
+          deletedCount == 0
+              ? 'Genel sohbet sıfırlanamadı. Yetkini ve bağlantını kontrol et.'
+              : '$deletedCount mesaj silindi, ancak işlem tamamlanamadı. Tekrar dene.',
+        );
+      }
+    } finally {
+      if (mounted) setState(() => _isResettingPublicChat = false);
+    }
+  }
+
   double? _roomDistanceInMeters(Map<String, dynamic> room) {
     final latitude = (room['latitude'] as num?)?.toDouble();
     final longitude = (room['longitude'] as num?)?.toDouble();
@@ -1664,45 +1893,6 @@ class _HomePageState extends State<HomePage> {
       message['distance'] =
           _distanceFromCurrentPosition(latitude, longitude) ??
           message['distance'];
-    }
-  }
-
-  Duration _reportDuration(String type) {
-    switch (type) {
-      case 'Radar':
-        return const Duration(hours: 2);
-      case 'Trafik':
-        return const Duration(hours: 1);
-      case 'Yol çalışması':
-        return const Duration(hours: 24);
-      case 'Kaza':
-        return const Duration(hours: 4);
-      default:
-        return const Duration(hours: 2);
-    }
-  }
-
-  void _removeExpiredRoadReports() {
-    final now = DateTime.now();
-    final expired = _roadReports.where((report) {
-      final expiry = report['expiresAt'] as DateTime?;
-      return expiry != null && !expiry.isAfter(now);
-    }).toList();
-    if (expired.isEmpty) return;
-
-    if (mounted) {
-      setState(() {
-        _roadReports.removeWhere((report) {
-          final expiry = report['expiresAt'] as DateTime?;
-          return expiry != null && !expiry.isAfter(now);
-        });
-      });
-    }
-    for (final report in expired) {
-      final reference = report['reference'];
-      if (reference is DocumentReference<Map<String, dynamic>>) {
-        reference.delete().catchError((_) {});
-      }
     }
   }
 
@@ -1789,15 +1979,15 @@ class _HomePageState extends State<HomePage> {
             onTap: _showSelectedPlaceActionSheet,
           ),
         ];
-        _searchHistory.removeWhere((item) => item['query'] == query);
-        _searchHistory.insert(0, {
-          'query': query,
-          'name': _searchResultName,
-          'coordinate': coordinate,
-        });
-        if (_searchHistory.length > 5) _searchHistory.removeLast();
         _showSearchPanel = showPanel;
       });
+      unawaited(
+        _recordSearchHistory(
+          query: query,
+          name: _searchResultName ?? resultName,
+          coordinate: coordinate,
+        ),
+      );
       await _moveMapTo(coordinate, 15);
       if (mounted) {
         Future.microtask(() async {
@@ -1870,14 +2060,10 @@ class _HomePageState extends State<HomePage> {
           onTap: _showSelectedPlaceActionSheet,
         ),
       ];
-      _searchHistory.removeWhere((history) => history['query'] == query);
-      _searchHistory.insert(0, {
-        'query': query,
-        'name': name,
-        'coordinate': coordinate,
-      });
-      if (_searchHistory.length > 5) _searchHistory.removeLast();
     });
+    unawaited(
+      _recordSearchHistory(query: query, name: name, coordinate: coordinate),
+    );
     await _moveMapTo(coordinate, 17);
     if (mounted) {
       Future.microtask(() async {
@@ -1920,7 +2106,7 @@ class _HomePageState extends State<HomePage> {
     final currentPosition = _currentPosition;
     final distanceText = currentPosition == null
         ? null
-        : _formatNearbyDistance(
+        : _formatSearchDistance(
             geo.Geolocator.distanceBetween(
               currentPosition.latitude,
               currentPosition.longitude,
@@ -1995,9 +2181,7 @@ class _HomePageState extends State<HomePage> {
                                 borderRadius: BorderRadius.circular(10),
                               ),
                               child: Text(
-                                placeDetails['category']?.toString() ??
-                                    _activeCategory ??
-                                    'Konum',
+                                distanceText ?? 'Uzaklık bilinmiyor',
                                 style: const TextStyle(
                                   color: Color(0xFFFF6B00),
                                   fontSize: 11,
@@ -2005,17 +2189,6 @@ class _HomePageState extends State<HomePage> {
                                 ),
                               ),
                             ),
-                            if (distanceText != null) ...[
-                              const SizedBox(width: 8),
-                              Text(
-                                distanceText,
-                                style: TextStyle(
-                                  fontSize: 12,
-                                  color: Colors.white70,
-                                  fontWeight: FontWeight.w600,
-                                ),
-                              ),
-                            ],
                           ],
                         ),
                       ],
@@ -2125,13 +2298,6 @@ class _HomePageState extends State<HomePage> {
                   style: const TextStyle(color: Colors.white70, height: 1.4),
                 ),
               ],
-              if (placeDetails['source'] == 'google_places') ...[
-                const SizedBox(height: 8),
-                const Text(
-                  'Google Places',
-                  style: TextStyle(color: Colors.white54, fontSize: 10),
-                ),
-              ],
               const SizedBox(height: 16),
               Row(
                 children: [
@@ -2204,6 +2370,19 @@ class _HomePageState extends State<HomePage> {
   Future<void> _selectMapLocation(LatLng coordinate) async {
     if (!mounted) return;
 
+    try {
+      final nearbyPlace = await NavoraPlacesService.findNearestPlace(
+        coordinate,
+      );
+      if (!mounted) return;
+      if (nearbyPlace != null) {
+        await _selectSearchSuggestion(nearbyPlace);
+        return;
+      }
+    } catch (error) {
+      debugPrint('Basılı tutulan konumdaki işletme bulunamadı: $error');
+    }
+
     var label = 'Haritada seçilen konum';
     try {
       final placemarks = await geo_coding.placemarkFromCoordinates(
@@ -2275,18 +2454,57 @@ class _HomePageState extends State<HomePage> {
         position.latitude,
         position.longitude,
       );
-      final address = _formatPlacemark(
-        placemarks.isEmpty ? null : placemarks.first,
-      );
-      if (!mounted || address == null) return;
-      setState(() => _currentAddress = address);
+      final placemark = placemarks.isEmpty ? null : placemarks.first;
+      final address = _formatPlacemark(placemark);
+      if (!mounted) return;
+      if (address != null) setState(() => _currentAddress = address);
+      await _recordVisitedCity(placemark);
     } catch (error) {
       debugPrint('Anlık adres alınamadı: $error');
     }
   }
 
+  Future<void> _recordVisitedCity(geo_coding.Placemark? placemark) async {
+    final city = placemark?.administrativeArea?.trim().isNotEmpty == true
+        ? placemark!.administrativeArea!.trim()
+        : placemark?.locality?.trim();
+    final user = FirebaseAuth.instance.currentUser;
+    if (city == null || city.isEmpty || user == null) return;
+    if (_visitedCities.any(
+      (visitedCity) => visitedCity.toLowerCase() == city.toLowerCase(),
+    )) {
+      return;
+    }
+
+    try {
+      await FirebaseFirestore.instance.collection('users').doc(user.uid).set({
+        'visited_cities': FieldValue.arrayUnion([city]),
+        'updated_at': FieldValue.serverTimestamp(),
+      }, SetOptions(merge: true));
+      if (!mounted || FirebaseAuth.instance.currentUser?.uid != user.uid) {
+        return;
+      }
+      setState(() {
+        if (!_visitedCities.any(
+          (visitedCity) => visitedCity.toLowerCase() == city.toLowerCase(),
+        )) {
+          _visitedCities.add(city);
+        }
+      });
+    } catch (error) {
+      debugPrint('Ziyaret edilen şehir kaydedilemedi: $error');
+      if (mounted) {
+        _showTrackingMessage('Ziyaret edilen şehir kaydedilemedi.');
+      }
+    }
+  }
+
   Future<void> _refreshNavigationRouteIfNeeded(geo.Position position) async {
-    if (!_isNavigationActive || _selectedDestinationCoordinate == null) return;
+    if (!_isNavigationActive ||
+        _selectedDestinationCoordinate == null ||
+        !navoraHasReliableNavigationPosition(position.accuracy)) {
+      return;
+    }
 
     final currentPosition = LatLng(position.latitude, position.longitude);
     final liveRoute = _routePolylines.isEmpty
@@ -2304,11 +2522,18 @@ class _HomePageState extends State<HomePage> {
       liveRoute,
     );
     final hasLiveRoute = liveRoute.length > 1;
+    final exceedsRouteThreshold =
+        hasLiveRoute &&
+        distanceToRoute >
+            (_isOffRoute ? recoveryThresholdMeters : offRouteThresholdMeters);
+    if (exceedsRouteThreshold) {
+      _offRouteReadings++;
+    } else {
+      _offRouteReadings = 0;
+    }
     final isOffRoute =
         hasLiveRoute &&
-        (_isOffRoute
-            ? distanceToRoute > recoveryThresholdMeters
-            : distanceToRoute > offRouteThresholdMeters);
+        (_isOffRoute ? exceedsRouteThreshold : _offRouteReadings >= 2);
     if (hasLiveRoute && isOffRoute != _isOffRoute) {
       _isOffRoute = isOffRoute;
       if (mounted) setState(() {});
@@ -2321,8 +2546,7 @@ class _HomePageState extends State<HomePage> {
 
     if (_isRefreshingNavigation) return;
     final now = DateTime.now();
-    if (!_isOffRoute &&
-        _lastNavigationRefreshAt != null &&
+    if (_lastNavigationRefreshAt != null &&
         now.difference(_lastNavigationRefreshAt!) <
             const Duration(seconds: 12)) {
       return;
@@ -2334,18 +2558,23 @@ class _HomePageState extends State<HomePage> {
         currentPosition,
         _selectedDestinationCoordinate!,
         vehicle: _selectedVehicle,
+        avoidTolls: _avoidTolls,
       );
       if (!mounted || !_isNavigationActive) return;
-      final routePoints = route['points'] as List<LatLng>;
+      final routeOptions =
+          route['options'] as List<Map<String, dynamic>>? ?? [route];
+      final selectedRoute = routeOptions.first;
+      final routePoints = selectedRoute['points'] as List<LatLng>;
       final remainingRoute = navoraTrimRouteToRemainingPath(
         routePoints,
         LatLng(position.latitude, position.longitude),
         vehicle: _selectedVehicle,
       );
       final trafficPolylines =
-          route['trafficPolylines'] as List<Polyline>? ?? const [];
+          selectedRoute['trafficPolylines'] as List<Polyline>? ?? const [];
       setState(() {
         _navigationTrafficPolylines = trafficPolylines;
+        _alternativeRoutePolylines = const [];
         _routePolylines = [
           Polyline(
             polylineId: const PolylineId('route-live'),
@@ -2354,17 +2583,209 @@ class _HomePageState extends State<HomePage> {
             width: 7,
           ),
         ];
-        _navigationSteps = List<Map<String, dynamic>>.from(route['steps']);
+        _navigationSteps = List<Map<String, dynamic>>.from(
+          selectedRoute['steps'],
+        );
         _navigationStepIndex = 0;
-        _navigationDistanceKm = route['distanceKm'] as double;
-        _navigationDurationMinutes = route['durationMinutes'] as int;
+        _navigationDistanceKm = selectedRoute['distanceKm'] as double;
+        _navigationDurationMinutes = selectedRoute['durationMinutes'] as int;
         _isOffRoute = false;
+        _offRouteReadings = 0;
+        _hasShownRouteUpdateError = false;
       });
     } catch (error) {
       debugPrint('Canlı rota güncellenemedi: $error');
+      if (mounted && !_hasShownRouteUpdateError) {
+        _hasShownRouteUpdateError = true;
+        _showTrackingMessage(
+          'Rota güncellenemedi. İnternet bağlantınızı kontrol edin.',
+        );
+      }
     } finally {
       _isRefreshingNavigation = false;
     }
+  }
+
+  Future<void> _subscribeToSearchHistory() async {
+    await _searchHistorySubscription?.cancel();
+    _searchHistorySubscription = null;
+    final user = FirebaseAuth.instance.currentUser;
+    if (user == null) {
+      if (mounted) setState(_searchHistory.clear);
+      return;
+    }
+
+    _searchHistorySubscription = FirebaseFirestore.instance
+        .collection('users')
+        .doc(user.uid)
+        .collection('search_history')
+        .orderBy('created_at', descending: true)
+        .limit(5)
+        .snapshots()
+        .listen(
+          (snapshot) {
+            if (!mounted ||
+                FirebaseAuth.instance.currentUser?.uid != user.uid) {
+              return;
+            }
+            final history = snapshot.docs
+                .map((document) {
+                  final data = document.data();
+                  final latitude = (data['latitude'] as num?)?.toDouble();
+                  final longitude = (data['longitude'] as num?)?.toDouble();
+                  return <String, dynamic>{
+                    'id': document.id,
+                    'query': data['query']?.toString() ?? '',
+                    'name': data['name']?.toString() ?? '',
+                    if (latitude != null && longitude != null)
+                      'coordinate': LatLng(latitude, longitude),
+                  };
+                })
+                .where((entry) => (entry['query'] as String).isNotEmpty)
+                .toList();
+            setState(() {
+              _searchHistory
+                ..clear()
+                ..addAll(history);
+            });
+          },
+          onError: (Object error) {
+            debugPrint('Arama geçmişi dinlenemedi: $error');
+            if (mounted) {
+              _showTrackingMessage('Arama geçmişi yüklenemedi.');
+            }
+          },
+        );
+  }
+
+  Future<void> _recordSearchHistory({
+    required String query,
+    required String name,
+    required LatLng coordinate,
+  }) async {
+    final normalizedQuery = query.trim();
+    if (normalizedQuery.isEmpty || !_isSearchHistoryEnabled) return;
+
+    final entry = <String, dynamic>{
+      'query': normalizedQuery,
+      'name': name,
+      'coordinate': coordinate,
+    };
+    if (mounted) {
+      setState(() {
+        _searchHistory.removeWhere((item) => item['query'] == normalizedQuery);
+        _searchHistory.insert(0, entry);
+        if (_searchHistory.length > 5) _searchHistory.removeLast();
+      });
+    }
+
+    final user = FirebaseAuth.instance.currentUser;
+    if (user == null) return;
+
+    try {
+      final historyCollection = FirebaseFirestore.instance
+          .collection('users')
+          .doc(user.uid)
+          .collection('search_history');
+      final matchingEntries = await historyCollection
+          .where('query', isEqualTo: normalizedQuery)
+          .get();
+      final document = historyCollection.doc();
+      final batch = FirebaseFirestore.instance.batch();
+      for (final duplicate in matchingEntries.docs) {
+        batch.delete(duplicate.reference);
+      }
+      batch.set(document, {
+        'query': normalizedQuery,
+        'name': name,
+        'latitude': coordinate.latitude,
+        'longitude': coordinate.longitude,
+        'created_at': FieldValue.serverTimestamp(),
+      });
+      await batch.commit();
+
+      final oldEntries = await historyCollection
+          .orderBy('created_at', descending: true)
+          .limit(20)
+          .get();
+      if (oldEntries.docs.length > 5) {
+        final cleanupBatch = FirebaseFirestore.instance.batch();
+        for (final oldEntry in oldEntries.docs.skip(5)) {
+          cleanupBatch.delete(oldEntry.reference);
+        }
+        await cleanupBatch.commit();
+      }
+    } catch (error) {
+      debugPrint('Arama geçmişi Firestore’a kaydedilemedi: $error');
+      if (mounted) {
+        _showTrackingMessage('Arama geçmişi kaydedilemedi.');
+      }
+    }
+  }
+
+  Future<bool> _clearSearchHistory() async {
+    final user = FirebaseAuth.instance.currentUser;
+    if (user == null) {
+      if (mounted) {
+        setState(() {
+          _searchHistory.clear();
+          _showSearchPanel = false;
+        });
+      }
+      return true;
+    }
+
+    try {
+      final historyCollection = FirebaseFirestore.instance
+          .collection('users')
+          .doc(user.uid)
+          .collection('search_history');
+      final entries = await historyCollection.get();
+      for (var offset = 0; offset < entries.docs.length; offset += 450) {
+        final batch = FirebaseFirestore.instance.batch();
+        for (final entry in entries.docs.skip(offset).take(450)) {
+          batch.delete(entry.reference);
+        }
+        await batch.commit();
+      }
+      if (mounted) {
+        setState(() {
+          _searchHistory.clear();
+          _showSearchPanel = false;
+        });
+      }
+      return true;
+    } catch (error) {
+      debugPrint('Arama geçmişi Firestore’dan silinemedi: $error');
+      if (mounted) {
+        _showTrackingMessage('Arama geçmişi silinemedi.');
+      }
+      return false;
+    }
+  }
+
+  Future<void> _confirmAndClearSearchHistory() async {
+    final confirmed = await showDialog<bool>(
+      context: context,
+      builder: (dialogContext) => AlertDialog(
+        title: const Text('Arama geçmişi silinsin mi?'),
+        content: const Text(
+          'Bu işlem hesabınızda kayıtlı son aramaları da siler.',
+        ),
+        actions: [
+          TextButton(
+            onPressed: () => Navigator.pop(dialogContext, false),
+            child: const Text('Vazgeç'),
+          ),
+          FilledButton(
+            onPressed: () => Navigator.pop(dialogContext, true),
+            child: const Text('Geçmişi sil'),
+          ),
+        ],
+      ),
+    );
+    if (!mounted || confirmed != true) return;
+    await _clearSearchHistory();
   }
 
   void _handleSearchChanged(String value) {
@@ -2394,6 +2815,38 @@ class _HomePageState extends State<HomePage> {
     });
   }
 
+  Future<geo.Position?> _getPositionForSearch() async {
+    if (_currentPosition != null) return _currentPosition;
+    final pending = _searchPositionFuture;
+    if (pending != null) return pending;
+
+    final future = _loadPositionForSearch();
+    _searchPositionFuture = future;
+    try {
+      return await future;
+    } finally {
+      if (identical(_searchPositionFuture, future)) {
+        _searchPositionFuture = null;
+      }
+    }
+  }
+
+  Future<geo.Position?> _loadPositionForSearch() async {
+    if (!await _ensureLocationPermission()) return null;
+    try {
+      final position = await geo.Geolocator.getCurrentPosition(
+        locationSettings: const geo.LocationSettings(
+          accuracy: geo.LocationAccuracy.medium,
+        ),
+      ).timeout(const Duration(seconds: 12));
+      if (mounted) setState(() => _currentPosition = position);
+      return position;
+    } catch (error) {
+      debugPrint('Arama uzaklığı için konum alınamadı: $error');
+      return _currentPosition;
+    }
+  }
+
   Future<void> _openSearchPage() async {
     final selected = await Navigator.push<Map<String, dynamic>>(
       context,
@@ -2404,6 +2857,9 @@ class _HomePageState extends State<HomePage> {
           initialLocation: _currentPosition == null
               ? null
               : LatLng(_currentPosition!.latitude, _currentPosition!.longitude),
+          isHistoryEnabled: _isSearchHistoryEnabled,
+          onClearHistory: _clearSearchHistory,
+          onHistoryEnabledChanged: _setSearchHistoryEnabled,
         ),
       ),
     );
@@ -2490,18 +2946,18 @@ class _HomePageState extends State<HomePage> {
   Future<void> _loadSearchSuggestions(String query) async {
     final requestId = ++_searchRequestId;
     try {
+      final currentPosition = await _getPositionForSearch();
+      if (!mounted || requestId != _searchRequestId) return;
+      final searchLocation = currentPosition == null
+          ? null
+          : LatLng(currentPosition.latitude, currentPosition.longitude);
       final isBusinessQuery = NavoraPlacesService.isBusinessQuery(query);
       if (isBusinessQuery) {
         var businesses = <Map<String, dynamic>>[];
         try {
           businesses = await NavoraPlacesService.searchText(
             query,
-            location: _currentPosition == null
-                ? null
-                : LatLng(
-                    _currentPosition!.latitude,
-                    _currentPosition!.longitude,
-                  ),
+            location: searchLocation,
           );
         } catch (error) {
           debugPrint('Google Places text search failed: $error');
@@ -2515,48 +2971,20 @@ class _HomePageState extends State<HomePage> {
           return;
         }
         final category = _matchNearbyCategory(query);
-        if (category != null && _currentPosition != null) {
+        if (category != null && currentPosition != null) {
           await _loadNearbyCategoryResults(
             category,
-            _currentPosition,
+            currentPosition,
             _nearbyBusinessConfig()[category]!,
           );
           return;
         }
       } else {
-        var googleSuggestions = <Map<String, dynamic>>[];
-        try {
-          googleSuggestions = await NavoraPlacesService.autocomplete(
-            query,
-            location: _currentPosition == null
-                ? null
-                : LatLng(
-                    _currentPosition!.latitude,
-                    _currentPosition!.longitude,
-                  ),
-          );
-        } catch (error) {
-          debugPrint('Google Places autocomplete failed: $error');
-        }
-        if (googleSuggestions.isNotEmpty) {
-          if (!mounted || requestId != _searchRequestId) return;
-          setState(() {
-            _searchSuggestions = googleSuggestions;
-            _showSearchPanel = true;
-          });
-          return;
-        }
-
         var googleResults = <Map<String, dynamic>>[];
         try {
           googleResults = await NavoraPlacesService.searchText(
             query,
-            location: _currentPosition == null
-                ? null
-                : LatLng(
-                    _currentPosition!.latitude,
-                    _currentPosition!.longitude,
-                  ),
+            location: searchLocation,
           );
         } catch (error) {
           debugPrint('Google Places text search failed: $error');
@@ -2565,6 +2993,24 @@ class _HomePageState extends State<HomePage> {
           if (!mounted || requestId != _searchRequestId) return;
           setState(() {
             _searchSuggestions = googleResults;
+            _showSearchPanel = true;
+          });
+          return;
+        }
+
+        var googleSuggestions = <Map<String, dynamic>>[];
+        try {
+          googleSuggestions = await NavoraPlacesService.autocomplete(
+            query,
+            location: searchLocation,
+          );
+        } catch (error) {
+          debugPrint('Google Places autocomplete failed: $error');
+        }
+        if (googleSuggestions.isNotEmpty) {
+          if (!mounted || requestId != _searchRequestId) return;
+          setState(() {
+            _searchSuggestions = googleSuggestions;
             _showSearchPanel = true;
           });
           return;
@@ -2581,7 +3027,6 @@ class _HomePageState extends State<HomePage> {
         'limit': '12',
         'countrycodes': 'tr',
       };
-      final currentPosition = _currentPosition;
       if (_activeCategory != null && currentPosition != null) {
         const radius = 0.18;
         searchParams['viewbox'] = [
@@ -2641,7 +3086,7 @@ class _HomePageState extends State<HomePage> {
           'distanceMeters': distanceMeters,
           'distanceText': distanceMeters == null
               ? null
-              : _formatNearbyDistance(distanceMeters),
+              : _formatSearchDistance(distanceMeters),
         };
       }).toList();
 
@@ -2656,13 +3101,13 @@ class _HomePageState extends State<HomePage> {
       }
 
       if (!mounted || requestId != _searchRequestId) return;
-      if (suggestions.isEmpty && _currentPosition != null) {
+      if (suggestions.isEmpty && currentPosition != null) {
         final fallbackCategory = _matchNearbyCategory(query);
         if (fallbackCategory != null) {
           final config = _nearbyBusinessConfig()[fallbackCategory]!;
           await _loadNearbyCategoryResults(
             fallbackCategory,
-            _currentPosition,
+            currentPosition,
             config,
           );
           return;
@@ -2691,8 +3136,24 @@ class _HomePageState extends State<HomePage> {
               'category': 'Konum',
               'query': query,
               'coordinate': LatLng(location.latitude, location.longitude),
-              'distanceMeters': null,
-              'distanceText': null,
+              'distanceMeters': currentPosition == null
+                  ? null
+                  : geo.Geolocator.distanceBetween(
+                      currentPosition.latitude,
+                      currentPosition.longitude,
+                      location.latitude,
+                      location.longitude,
+                    ),
+              'distanceText': currentPosition == null
+                  ? null
+                  : _formatSearchDistance(
+                      geo.Geolocator.distanceBetween(
+                        currentPosition.latitude,
+                        currentPosition.longitude,
+                        location.latitude,
+                        location.longitude,
+                      ),
+                    ),
             },
           ];
         }
@@ -2736,6 +3197,15 @@ class _HomePageState extends State<HomePage> {
         location.longitude,
       );
       final placemark = placemarks.isNotEmpty ? placemarks.first : null;
+      final currentPosition = _currentPosition;
+      final distanceMeters = currentPosition == null
+          ? null
+          : geo.Geolocator.distanceBetween(
+              currentPosition.latitude,
+              currentPosition.longitude,
+              location.latitude,
+              location.longitude,
+            );
       return <String, dynamic>{
         'name': placemark?.locality ?? query,
         'subtitle': placemark != null
@@ -2749,8 +3219,10 @@ class _HomePageState extends State<HomePage> {
         'category': 'Konum',
         'query': query,
         'coordinate': LatLng(location.latitude, location.longitude),
-        'distanceMeters': null,
-        'distanceText': null,
+        'distanceMeters': distanceMeters,
+        'distanceText': distanceMeters == null
+            ? null
+            : _formatSearchDistance(distanceMeters),
       };
     } catch (_) {
       return null;
@@ -2787,7 +3259,7 @@ class _HomePageState extends State<HomePage> {
     await _fitMapToPoints(points);
   }
 
-  String _searchResultCategory(Map<String, dynamic> item) {
+  String? _searchResultCategory(Map<String, dynamic> item) {
     final category = item['category']?.toString();
     final type = item['type']?.toString();
     final osmClass = item['class']?.toString();
@@ -2802,7 +3274,7 @@ class _HomePageState extends State<HomePage> {
         type == 'bakery' ||
         type == 'supermarket' ||
         type == 'hotel') {
-      return 'İşletme veya mekan';
+      return null;
     }
     if (type == 'road' || type == 'street') return 'Cadde veya sokak';
     if (type == 'city' || type == 'town' || type == 'village') {
@@ -2850,6 +3322,7 @@ class _HomePageState extends State<HomePage> {
 
   void _clearRouteState() {
     _routePolylines = const <Polyline>[];
+    _alternativeRoutePolylines = const <Polyline>[];
     _navigationTrafficPolylines = const <Polyline>[];
     _navigationSteps = [];
     _navigationStepIndex = 0;
@@ -2858,9 +3331,12 @@ class _HomePageState extends State<HomePage> {
     _isNavigationActive = false;
     _isMapTilted = false;
     _isFollowingCurrentPosition = true;
-    _hasNavigationBearing = false;
-    _navigationBearing = 0;
+    _hasMapBearing = false;
+    _mapBearing = 0;
     _isOffRoute = false;
+    _isGpsAccuracyDegraded = false;
+    _hasAnnouncedArrival = false;
+    _offRouteReadings = 0;
   }
 
   void _cancelSearch() {
@@ -3012,7 +3488,7 @@ out center tags;
               'query': address.isEmpty ? name : '$name, $address',
               'coordinate': coordinate,
               'distanceMeters': distance,
-              'distanceText': _formatNearbyDistance(distance),
+              'distanceText': _formatSearchDistance(distance),
             };
           })
           .whereType<Map<String, dynamic>>()
@@ -3039,6 +3515,9 @@ out center tags;
     if (meters < 1000) return '${meters.round()} m';
     return '${(meters / 1000).toStringAsFixed(1)} km';
   }
+
+  String _formatSearchDistance(double meters) =>
+      '${(meters / 1000).toStringAsFixed(1)} km';
 
   Future<Map<String, String>> _resolveAddressCoordinates(
     Map<String, String> address,
@@ -3132,7 +3611,6 @@ out center tags;
                   itemBuilder: (context, index) {
                     final item = items[index];
                     final isSuggestion = _searchSuggestions.isNotEmpty;
-                    final category = item['category'] ?? 'Konum';
                     final subtitle = isSuggestion
                         ? (item['subtitle'] as String? ?? 'Konum önerisi')
                         : (item['query'] as String? ?? 'Arama geçmişi');
@@ -3174,21 +3652,47 @@ out center tags;
                             Row(
                               crossAxisAlignment: CrossAxisAlignment.start,
                               children: [
-                                Container(
-                                  width: 38,
-                                  height: 38,
-                                  decoration: BoxDecoration(
-                                    color: const Color(0xFF2A180D),
-                                    borderRadius: BorderRadius.circular(12),
-                                  ),
-                                  child: Icon(
-                                    isSuggestion
-                                        ? _searchResultIcon(
-                                            item['type'] as String?,
-                                          )
-                                        : Icons.history_rounded,
-                                    color: const Color(0xFFFF6B00),
-                                    size: 18,
+                                SizedBox(
+                                  width: 52,
+                                  child: Column(
+                                    mainAxisSize: MainAxisSize.min,
+                                    children: [
+                                      Container(
+                                        width: 38,
+                                        height: 38,
+                                        decoration: BoxDecoration(
+                                          color: const Color(0xFF2A180D),
+                                          borderRadius: BorderRadius.circular(
+                                            12,
+                                          ),
+                                        ),
+                                        child: Icon(
+                                          isSuggestion
+                                              ? _searchResultIcon(
+                                                  item['type'] as String?,
+                                                )
+                                              : Icons.history_rounded,
+                                          color: const Color(0xFFFF6B00),
+                                          size: 18,
+                                        ),
+                                      ),
+                                      if (isSuggestion) ...[
+                                        const SizedBox(height: 4),
+                                        Text(
+                                          distanceText?.isNotEmpty == true
+                                              ? distanceText!
+                                              : 'Konum gerekli',
+                                          maxLines: 1,
+                                          overflow: TextOverflow.ellipsis,
+                                          textAlign: TextAlign.center,
+                                          style: const TextStyle(
+                                            color: Color(0xFFFFB36B),
+                                            fontSize: 9,
+                                            fontWeight: FontWeight.w700,
+                                          ),
+                                        ),
+                                      ],
+                                    ],
                                   ),
                                 ),
                                 const SizedBox(width: 12),
@@ -3218,29 +3722,6 @@ out center tags;
                                           fontSize: 11.5,
                                           height: 1.3,
                                         ),
-                                      ),
-                                      const SizedBox(height: 6),
-                                      Row(
-                                        children: [
-                                          Icon(
-                                            Icons.location_on_rounded,
-                                            size: 11,
-                                            color: const Color(0xFFFF7A00),
-                                          ),
-                                          const SizedBox(width: 4),
-                                          Expanded(
-                                            child: Text(
-                                              '$category • ${distanceText ?? 'Yakın konum'}',
-                                              maxLines: 1,
-                                              overflow: TextOverflow.ellipsis,
-                                              style: TextStyle(
-                                                color: Colors.white70,
-                                                fontSize: 10.5,
-                                                fontWeight: FontWeight.w600,
-                                              ),
-                                            ),
-                                          ),
-                                        ],
                                       ),
                                     ],
                                   ),
@@ -3366,12 +3847,7 @@ out center tags;
                 SizedBox(
                   height: 46,
                   child: TextButton.icon(
-                    onPressed: () {
-                      setState(() {
-                        _searchHistory.clear();
-                        _showSearchPanel = false;
-                      });
-                    },
+                    onPressed: _confirmAndClearSearchHistory,
                     icon: const Icon(
                       Icons.delete_outline_rounded,
                       size: 18,
@@ -3498,8 +3974,7 @@ out center tags;
     final routeVehicle = _selectedVehicle == 'Bisiklet'
         ? 'Araba'
         : _selectedVehicle;
-    final shouldPersistRouteVehicle = routeVehicle != _selectedVehicle;
-
+    final shouldPersistSelectedVehicle = routeVehicle != _selectedVehicle;
     if (mounted) {
       setState(() {
         _clearRouteState();
@@ -3508,7 +3983,13 @@ out center tags;
 
     Map<String, dynamic> route;
     try {
-      route = await _fetchRoadRoute(start, destination, vehicle: routeVehicle);
+      route = await _fetchRoadRoute(
+        start,
+        destination,
+        vehicle: routeVehicle,
+        avoidTolls: _avoidTolls,
+        includeAlternativeRoutes: true,
+      );
     } catch (error) {
       debugPrint('Yol rotası alınamadı: $error');
       _showTrackingMessage(
@@ -3522,38 +4003,28 @@ out center tags;
       return;
     }
 
-    final routePoints = route['points'] as List<LatLng>;
-    var routeDistanceKm = route['distanceKm'] as double;
-    var durationMinutes = route['durationMinutes'] as int;
-    var routeTrafficStatus = route['trafficStatus'] as String? ?? 'Açık';
-    var navigationSteps = List<Map<String, dynamic>>.from(route['steps']);
+    var routeOptions =
+        route['options'] as List<Map<String, dynamic>>? ?? [route];
+    var selectedRouteIndex = 0;
+    var avoidTolls = _avoidTolls;
+    var selectedRoute = routeOptions[selectedRouteIndex];
+    var routeDistanceKm = selectedRoute['distanceKm'] as double;
+    var durationMinutes = selectedRoute['durationMinutes'] as int;
+    var routeTrafficStatus =
+        selectedRoute['trafficStatus'] as String? ?? 'Açık';
+    var navigationSteps = List<Map<String, dynamic>>.from(
+      selectedRoute['steps'],
+    );
     var selectedTravelMode = routeVehicle;
     var isRecalculatingRoute = false;
-    final remainingRoute = navoraTrimRouteToRemainingPath(
-      routePoints,
-      start,
-      vehicle: routeVehicle,
-    );
-    final trafficPolylines =
-        route['trafficPolylines'] as List<Polyline>? ?? const [];
 
     setState(() {
       _selectedVehicle = routeVehicle;
-      _navigationTrafficPolylines = trafficPolylines;
-      _routePolylines = [
-        Polyline(
-          polylineId: const PolylineId('route-navigation'),
-          points: remainingRoute,
-          color: const Color(0xFF4285F4),
-          width: 7,
-        ),
-      ];
-      _navigationSteps = navigationSteps;
-      _navigationStepIndex = 0;
-      _navigationDistanceKm = routeDistanceKm;
-      _navigationDurationMinutes = durationMinutes;
     });
-    if (shouldPersistRouteVehicle) unawaited(_persistVehicleProfile());
+    _applyRouteOptions(routeOptions, selectedRouteIndex, routeVehicle, start);
+    if (shouldPersistSelectedVehicle) {
+      unawaited(_persistSelectedVehicle());
+    }
     await _fitMapToPoints([start, destination]);
     if (!mounted) {
       _isOpeningDirections = false;
@@ -3562,7 +4033,8 @@ out center tags;
 
     _isOpeningDirections = false;
 
-    showModalBottomSheet(
+    var didStartNavigation = false;
+    await showModalBottomSheet<void>(
       context: context,
       isScrollControlled: true,
       backgroundColor: const Color(0xFF121212),
@@ -3571,61 +4043,83 @@ out center tags;
       ),
       builder: (modalContext) => StatefulBuilder(
         builder: (context, setSheetState) {
-          Future<void> selectTravelMode(String vehicle) async {
-            if (vehicle == selectedTravelMode || isRecalculatingRoute) return;
+          void selectRouteOption(int index) {
+            if (index == selectedRouteIndex ||
+                index < 0 ||
+                index >= routeOptions.length) {
+              return;
+            }
+            selectedRoute = routeOptions[index];
+            setSheetState(() {
+              selectedRouteIndex = index;
+              routeDistanceKm = selectedRoute['distanceKm'] as double;
+              durationMinutes = selectedRoute['durationMinutes'] as int;
+              routeTrafficStatus =
+                  selectedRoute['trafficStatus'] as String? ?? 'Açık';
+              navigationSteps = List<Map<String, dynamic>>.from(
+                selectedRoute['steps'],
+              );
+            });
+            _applyRouteOptions(
+              routeOptions,
+              selectedRouteIndex,
+              selectedTravelMode,
+              start,
+            );
+          }
+
+          Future<void> updateRouteOptions({
+            String? vehicle,
+            bool? tolls,
+          }) async {
+            final nextVehicle = vehicle ?? selectedTravelMode;
+            final nextAvoidTolls = tolls ?? avoidTolls;
+            if (isRecalculatingRoute) return;
             setSheetState(() => isRecalculatingRoute = true);
             try {
               final updatedRoute = await _fetchRoadRoute(
                 start,
                 destination,
-                vehicle: vehicle,
+                vehicle: nextVehicle,
+                avoidTolls: nextAvoidTolls,
+                includeAlternativeRoutes: true,
               );
               if (!mounted || !modalContext.mounted) return;
 
-              final updatedPoints = updatedRoute['points'] as List<LatLng>;
-              final updatedRemainingRoute = navoraTrimRouteToRemainingPath(
-                updatedPoints,
-                start,
-                vehicle: vehicle,
-              );
-              final updatedTrafficPolylines =
-                  updatedRoute['trafficPolylines'] as List<Polyline>? ??
-                  const [];
-              final updatedSteps = List<Map<String, dynamic>>.from(
-                updatedRoute['steps'],
-              );
-
-              selectedTravelMode = vehicle;
-              routeDistanceKm = updatedRoute['distanceKm'] as double;
-              durationMinutes = updatedRoute['durationMinutes'] as int;
+              routeOptions =
+                  updatedRoute['options'] as List<Map<String, dynamic>>? ??
+                  [updatedRoute];
+              selectedRouteIndex = 0;
+              selectedTravelMode = nextVehicle;
+              avoidTolls = nextAvoidTolls;
+              selectedRoute = routeOptions.first;
+              routeDistanceKm = selectedRoute['distanceKm'] as double;
+              durationMinutes = selectedRoute['durationMinutes'] as int;
               routeTrafficStatus =
-                  updatedRoute['trafficStatus'] as String? ?? 'Açık';
-              navigationSteps = updatedSteps;
-
+                  selectedRoute['trafficStatus'] as String? ?? 'Açık';
+              navigationSteps = List<Map<String, dynamic>>.from(
+                selectedRoute['steps'],
+              );
+              setSheetState(() {});
               setState(() {
-                _selectedVehicle = vehicle;
-                _navigationTrafficPolylines = updatedTrafficPolylines;
-                _routePolylines = [
-                  Polyline(
-                    polylineId: const PolylineId('route-navigation'),
-                    points: updatedRemainingRoute,
-                    color: const Color(0xFF4285F4),
-                    width: 7,
-                  ),
-                ];
-                _navigationSteps = updatedSteps;
-                _navigationStepIndex = 0;
-                _navigationDistanceKm = routeDistanceKm;
-                _navigationDurationMinutes = durationMinutes;
+                _selectedVehicle = nextVehicle;
                 _isOffRoute = false;
+                _offRouteReadings = 0;
               });
-              unawaited(_persistVehicleProfile());
+              _applyRouteOptions(
+                routeOptions,
+                selectedRouteIndex,
+                nextVehicle,
+                start,
+              );
+              if (vehicle != null) unawaited(_persistSelectedVehicle());
+              if (tolls != null) unawaited(_setAvoidTolls(nextAvoidTolls));
               await _fitMapToPoints([start, destination]);
             } catch (error) {
-              debugPrint('Ulaşım türü için rota alınamadı: $error');
+              debugPrint('Rota tercihleri için rota alınamadı: $error');
               if (mounted) {
                 _showTrackingMessage(
-                  'Bu ulaşım türü için rota hesaplanamadı. Tekrar deneyin.',
+                  'Rota tercihi güncellenemedi. Lütfen tekrar deneyin.',
                 );
               }
             } finally {
@@ -3635,232 +4129,339 @@ out center tags;
             }
           }
 
+          Future<void> selectTravelMode(String vehicle) async {
+            if (vehicle == selectedTravelMode) return;
+            await updateRouteOptions(vehicle: vehicle);
+          }
+
+          Future<void> toggleAvoidTolls(bool avoid) async {
+            if (avoid == avoidTolls) return;
+            await updateRouteOptions(tolls: avoid);
+          }
+
           return SafeArea(
-            child: Padding(
-              padding: const EdgeInsets.fromLTRB(18, 12, 18, 22),
-              child: Column(
-                mainAxisSize: MainAxisSize.min,
-                crossAxisAlignment: CrossAxisAlignment.start,
-                children: [
-                  Center(
-                    child: Container(
-                      width: 42,
-                      height: 5,
-                      margin: const EdgeInsets.only(bottom: 18),
-                      decoration: BoxDecoration(
-                        color: const Color(0xFF4A4A4A),
-                        borderRadius: BorderRadius.circular(8),
-                      ),
-                    ),
-                  ),
-                  Row(
+            child: ConstrainedBox(
+              constraints: BoxConstraints(
+                maxHeight: MediaQuery.sizeOf(context).height * 0.9,
+              ),
+              child: SingleChildScrollView(
+                child: Padding(
+                  padding: const EdgeInsets.fromLTRB(18, 12, 18, 22),
+                  child: Column(
+                    mainAxisSize: MainAxisSize.min,
+                    crossAxisAlignment: CrossAxisAlignment.start,
                     children: [
-                      Container(
-                        width: 46,
-                        height: 46,
-                        decoration: BoxDecoration(
-                          color: const Color(0xFFFF6B00),
-                          borderRadius: BorderRadius.circular(15),
+                      Center(
+                        child: Container(
+                          width: 42,
+                          height: 5,
+                          margin: const EdgeInsets.only(bottom: 18),
+                          decoration: BoxDecoration(
+                            color: const Color(0xFF4A4A4A),
+                            borderRadius: BorderRadius.circular(8),
+                          ),
                         ),
-                        child: const Icon(
-                          Icons.navigation_rounded,
+                      ),
+                      Row(
+                        children: [
+                          Container(
+                            width: 46,
+                            height: 46,
+                            decoration: BoxDecoration(
+                              color: const Color(0xFFFF6B00),
+                              borderRadius: BorderRadius.circular(15),
+                            ),
+                            child: const Icon(
+                              Icons.navigation_rounded,
+                              color: Colors.white,
+                            ),
+                          ),
+                          const SizedBox(width: 12),
+                          const Expanded(
+                            child: Column(
+                              crossAxisAlignment: CrossAxisAlignment.start,
+                              children: [
+                                Text(
+                                  'Hazır mısınız?',
+                                  style: TextStyle(
+                                    fontSize: 12,
+                                    color: Color(0xFFBDBDBD),
+                                    fontWeight: FontWeight.w600,
+                                  ),
+                                ),
+                                SizedBox(height: 3),
+                                Text(
+                                  'Yolculuk özeti',
+                                  style: TextStyle(
+                                    fontSize: 20,
+                                    color: Colors.white,
+                                    fontWeight: FontWeight.w800,
+                                  ),
+                                ),
+                              ],
+                            ),
+                          ),
+                          IconButton(
+                            tooltip: 'Kapat',
+                            onPressed: () => Navigator.pop(context),
+                            icon: const Icon(
+                              Icons.close_rounded,
+                              color: Colors.white70,
+                            ),
+                          ),
+                        ],
+                      ),
+                      const SizedBox(height: 16),
+                      Text(
+                        _selectedDestinationName ?? 'Seçilen konum',
+                        maxLines: 2,
+                        overflow: TextOverflow.ellipsis,
+                        style: const TextStyle(
+                          fontSize: 19,
+                          fontWeight: FontWeight.bold,
                           color: Colors.white,
                         ),
                       ),
-                      const SizedBox(width: 12),
-                      const Expanded(
-                        child: Column(
-                          crossAxisAlignment: CrossAxisAlignment.start,
-                          children: [
-                            Text(
-                              'Hazır mısınız?',
-                              style: TextStyle(
-                                fontSize: 12,
-                                color: Color(0xFFBDBDBD),
-                                fontWeight: FontWeight.w600,
-                              ),
+                      const SizedBox(height: 6),
+                      const Text(
+                        'Mevcut konumunuzdan yol tarifi',
+                        style: TextStyle(
+                          color: Color(0xFFBDBDBD),
+                          fontSize: 13,
+                        ),
+                      ),
+                      const SizedBox(height: 16),
+                      const Text(
+                        'Ulaşım türü',
+                        style: TextStyle(
+                          color: Colors.white,
+                          fontSize: 13,
+                          fontWeight: FontWeight.w700,
+                        ),
+                      ),
+                      const SizedBox(height: 8),
+                      SingleChildScrollView(
+                        scrollDirection: Axis.horizontal,
+                        child: SegmentedButton<String>(
+                          segments: const [
+                            ButtonSegment(
+                              value: 'Araba',
+                              label: Text('Araba'),
+                              icon: Icon(Icons.directions_car_rounded),
                             ),
-                            SizedBox(height: 3),
-                            Text(
-                              'Yolculuk özeti',
-                              style: TextStyle(
-                                fontSize: 20,
-                                color: Colors.white,
-                                fontWeight: FontWeight.w800,
+                            ButtonSegment(
+                              value: 'Motosiklet',
+                              label: Text('Motor'),
+                              icon: Icon(Icons.two_wheeler_rounded),
+                            ),
+                            ButtonSegment(
+                              value: 'Yürüyüş',
+                              label: Text('Yaya'),
+                              icon: Icon(Icons.directions_walk_rounded),
+                            ),
+                          ],
+                          selected: {selectedTravelMode},
+                          showSelectedIcon: false,
+                          onSelectionChanged: isRecalculatingRoute
+                              ? null
+                              : (selection) => unawaited(
+                                  selectTravelMode(selection.first),
+                                ),
+                          style: SegmentedButton.styleFrom(
+                            foregroundColor: const Color(0xFFD7D7D7),
+                            selectedForegroundColor: Colors.white,
+                            selectedBackgroundColor: const Color(0xFFFF7A00),
+                          ),
+                        ),
+                      ),
+                      if (selectedTravelMode != 'Yürüyüş') ...[
+                        const SizedBox(height: 8),
+                        SwitchListTile(
+                          contentPadding: EdgeInsets.zero,
+                          dense: true,
+                          title: const Text(
+                            'Ücretli yollardan kaçın',
+                            style: TextStyle(color: Colors.white, fontSize: 13),
+                          ),
+                          secondary: const Icon(
+                            Icons.toll_rounded,
+                            color: Color(0xFFFF9A3D),
+                          ),
+                          value: avoidTolls,
+                          activeThumbColor: const Color(0xFFFF7A00),
+                          onChanged: isRecalculatingRoute
+                              ? null
+                              : toggleAvoidTolls,
+                        ),
+                      ],
+                      if (isRecalculatingRoute) ...[
+                        const SizedBox(height: 8),
+                        const LinearProgressIndicator(
+                          minHeight: 2,
+                          color: Color(0xFFFF7A00),
+                          backgroundColor: Color(0xFF303030),
+                        ),
+                      ],
+                      const SizedBox(height: 18),
+                      Container(
+                        width: double.infinity,
+                        padding: const EdgeInsets.fromLTRB(12, 16, 12, 16),
+                        decoration: BoxDecoration(
+                          color: const Color(0xFF242424),
+                          borderRadius: BorderRadius.circular(20),
+                        ),
+                        child: Row(
+                          mainAxisAlignment: MainAxisAlignment.spaceAround,
+                          children: [
+                            _buildRouteSummary(
+                              Icons.straighten_rounded,
+                              '${routeDistanceKm.toStringAsFixed(1)} km',
+                              'Yaklaşık mesafe',
+                            ),
+                            _buildRouteSummary(
+                              Icons.schedule_rounded,
+                              navoraFormatNavigationDuration(
+                                durationMinutes,
+                                isWalking: selectedTravelMode == 'Yürüyüş',
                               ),
+                              'Tahmini süre',
+                            ),
+                            _buildRouteSummary(
+                              Icons.traffic_rounded,
+                              routeTrafficStatus,
+                              'Trafik katmanı',
                             ),
                           ],
                         ),
                       ),
-                      IconButton(
-                        tooltip: 'Kapat',
-                        onPressed: () => Navigator.pop(context),
-                        icon: const Icon(
-                          Icons.close_rounded,
-                          color: Colors.white70,
+                      if (routeOptions.length > 1) ...[
+                        const SizedBox(height: 14),
+                        const Text(
+                          'Alternatif rotalar',
+                          style: TextStyle(
+                            color: Colors.white,
+                            fontWeight: FontWeight.bold,
+                            fontSize: 14,
+                          ),
+                        ),
+                        const SizedBox(height: 8),
+                        SingleChildScrollView(
+                          scrollDirection: Axis.horizontal,
+                          child: Row(
+                            children: [
+                              for (
+                                var index = 0;
+                                index < routeOptions.length;
+                                index++
+                              ) ...[
+                                if (index > 0) const SizedBox(width: 8),
+                                ChoiceChip(
+                                  selected: selectedRouteIndex == index,
+                                  selectedColor: const Color(0xFF6A3212),
+                                  backgroundColor: const Color(0xFF242424),
+                                  label: Text(
+                                    '${index == 0 ? 'Önerilen' : 'Rota ${index + 1}'}\n'
+                                    '${(routeOptions[index]['distanceKm'] as double).toStringAsFixed(1)} km • '
+                                    '${navoraFormatNavigationDuration(routeOptions[index]['durationMinutes'] as int)}',
+                                  ),
+                                  labelStyle: const TextStyle(
+                                    color: Colors.white,
+                                    fontSize: 11,
+                                  ),
+                                  onSelected: isRecalculatingRoute
+                                      ? null
+                                      : (_) => selectRouteOption(index),
+                                ),
+                              ],
+                            ],
+                          ),
+                        ),
+                      ],
+                      if (navigationSteps.isNotEmpty) ...[
+                        const SizedBox(height: 14),
+                        const Text(
+                          'Yol üzerindeki adımlar',
+                          style: TextStyle(
+                            fontWeight: FontWeight.bold,
+                            fontSize: 14,
+                            color: Colors.white,
+                          ),
+                        ),
+                        const SizedBox(height: 6),
+                        ...navigationSteps.take(3).map(_buildNavigationStep),
+                      ],
+                      const SizedBox(height: 16),
+                      SizedBox(
+                        width: double.infinity,
+                        height: 54,
+                        child: ElevatedButton.icon(
+                          onPressed: isRecalculatingRoute
+                              ? null
+                              : () async {
+                                  didStartNavigation = true;
+                                  Navigator.pop(context);
+                                  if (mounted) {
+                                    setState(() {
+                                      _isNavigationActive = true;
+                                      _isMapTilted = true;
+                                      _isFollowingCurrentPosition = true;
+                                      _hasMapBearing = false;
+                                      _isOffRoute = false;
+                                      _offRouteReadings = 0;
+                                      _isGpsAccuracyDegraded = false;
+                                      _hasAnnouncedArrival = false;
+                                      _lastNavigationRefreshAt = null;
+                                      _hasShownRouteUpdateError = false;
+                                      _selectedIndex = 1;
+                                      _activeNavigationTitle =
+                                          _selectedDestinationName;
+                                      _activeNavigationDestination =
+                                          _searchController.text.trim().isEmpty
+                                          ? _selectedDestinationName
+                                          : _searchController.text.trim();
+                                      _showSearchPanel = false;
+                                      FocusManager.instance.primaryFocus
+                                          ?.unfocus();
+                                    });
+                                  }
+                                  await _speakNavigation(
+                                    'Yola çıkıldı. ${navigationSteps.isEmpty ? 'Rotanızı takip edin.' : navigationSteps.first['voice']}',
+                                  );
+                                  await _toggleDriveTracking();
+                                },
+                          icon: const Icon(Icons.navigation_rounded),
+                          label: const Text('Yola çık'),
+                          style: ElevatedButton.styleFrom(
+                            backgroundColor: const Color(0xFFFF6B00),
+                            foregroundColor: Colors.white,
+                            shape: RoundedRectangleBorder(
+                              borderRadius: BorderRadius.circular(17),
+                            ),
+                          ),
                         ),
                       ),
                     ],
                   ),
-                  const SizedBox(height: 16),
-                  Text(
-                    _selectedDestinationName ?? 'Seçilen konum',
-                    maxLines: 2,
-                    overflow: TextOverflow.ellipsis,
-                    style: const TextStyle(
-                      fontSize: 19,
-                      fontWeight: FontWeight.bold,
-                      color: Colors.white,
-                    ),
-                  ),
-                  const SizedBox(height: 6),
-                  const Text(
-                    'Mevcut konumunuzdan yol tarifi',
-                    style: TextStyle(color: Color(0xFFBDBDBD), fontSize: 13),
-                  ),
-                  const SizedBox(height: 16),
-                  const Text(
-                    'Ulaşım türü',
-                    style: TextStyle(
-                      color: Colors.white,
-                      fontSize: 13,
-                      fontWeight: FontWeight.w700,
-                    ),
-                  ),
-                  const SizedBox(height: 8),
-                  SingleChildScrollView(
-                    scrollDirection: Axis.horizontal,
-                    child: SegmentedButton<String>(
-                      segments: const [
-                        ButtonSegment(
-                          value: 'Araba',
-                          label: Text('Araba'),
-                          icon: Icon(Icons.directions_car_rounded),
-                        ),
-                        ButtonSegment(
-                          value: 'Motosiklet',
-                          label: Text('Motor'),
-                          icon: Icon(Icons.two_wheeler_rounded),
-                        ),
-                        ButtonSegment(
-                          value: 'Yürüyüş',
-                          label: Text('Yaya'),
-                          icon: Icon(Icons.directions_walk_rounded),
-                        ),
-                      ],
-                      selected: {selectedTravelMode},
-                      showSelectedIcon: false,
-                      onSelectionChanged: isRecalculatingRoute
-                          ? null
-                          : (selection) =>
-                                unawaited(selectTravelMode(selection.first)),
-                      style: SegmentedButton.styleFrom(
-                        foregroundColor: const Color(0xFFD7D7D7),
-                        selectedForegroundColor: Colors.white,
-                        selectedBackgroundColor: const Color(0xFFFF7A00),
-                      ),
-                    ),
-                  ),
-                  if (isRecalculatingRoute) ...[
-                    const SizedBox(height: 8),
-                    const LinearProgressIndicator(
-                      minHeight: 2,
-                      color: Color(0xFFFF7A00),
-                      backgroundColor: Color(0xFF303030),
-                    ),
-                  ],
-                  const SizedBox(height: 18),
-                  Container(
-                    width: double.infinity,
-                    padding: const EdgeInsets.fromLTRB(12, 16, 12, 16),
-                    decoration: BoxDecoration(
-                      color: const Color(0xFF242424),
-                      borderRadius: BorderRadius.circular(20),
-                    ),
-                    child: Row(
-                      mainAxisAlignment: MainAxisAlignment.spaceAround,
-                      children: [
-                        _buildRouteSummary(
-                          Icons.straighten_rounded,
-                          '${routeDistanceKm.toStringAsFixed(1)} km',
-                          'Yaklaşık mesafe',
-                        ),
-                        _buildRouteSummary(
-                          Icons.schedule_rounded,
-                          navoraFormatNavigationDuration(durationMinutes),
-                          'Tahmini süre',
-                        ),
-                        _buildRouteSummary(
-                          Icons.traffic_rounded,
-                          routeTrafficStatus,
-                          'Trafik katmanı',
-                        ),
-                      ],
-                    ),
-                  ),
-                  if (navigationSteps.isNotEmpty) ...[
-                    const SizedBox(height: 14),
-                    const Text(
-                      'Yol üzerindeki adımlar',
-                      style: TextStyle(
-                        fontWeight: FontWeight.bold,
-                        fontSize: 14,
-                        color: Colors.white,
-                      ),
-                    ),
-                    const SizedBox(height: 6),
-                    ...navigationSteps.take(3).map(_buildNavigationStep),
-                  ],
-                  const SizedBox(height: 16),
-                  SizedBox(
-                    width: double.infinity,
-                    height: 54,
-                    child: ElevatedButton.icon(
-                      onPressed: isRecalculatingRoute
-                          ? null
-                          : () async {
-                              Navigator.pop(context);
-                              if (mounted) {
-                                setState(() {
-                                  _isNavigationActive = true;
-                                  _isMapTilted = true;
-                                  _isFollowingCurrentPosition = true;
-                                  _hasNavigationBearing = false;
-                                  _isOffRoute = false;
-                                  _selectedIndex = 1;
-                                  _activeNavigationTitle =
-                                      _selectedDestinationName;
-                                  _activeNavigationDestination =
-                                      _searchController.text.trim().isEmpty
-                                      ? _selectedDestinationName
-                                      : _searchController.text.trim();
-                                  _showSearchPanel = false;
-                                  FocusManager.instance.primaryFocus?.unfocus();
-                                });
-                              }
-                              await _speakNavigation(
-                                'Yola çıkıldı. ${navigationSteps.isEmpty ? 'Rotanızı takip edin.' : navigationSteps.first['voice']}',
-                              );
-                              await _toggleDriveTracking();
-                            },
-                      icon: const Icon(Icons.navigation_rounded),
-                      label: const Text('Yola çık'),
-                      style: ElevatedButton.styleFrom(
-                        backgroundColor: const Color(0xFFFF6B00),
-                        foregroundColor: Colors.white,
-                        shape: RoundedRectangleBorder(
-                          borderRadius: BorderRadius.circular(17),
-                        ),
-                      ),
-                    ),
-                  ),
-                ],
+                ),
               ),
             ),
           );
         },
       ),
     );
+    if (!didStartNavigation && mounted) {
+      setState(() {
+        _clearRouteState();
+        _selectedDestinationCoordinate = null;
+        _selectedDestinationName = null;
+        _selectedPlaceDetails = null;
+        _searchResultName = null;
+        _searchMarkers = [];
+        _searchSuggestions = [];
+        _searchController.clear();
+        _showSearchPanel = false;
+      });
+    }
   }
 
   Future<void> _goToSavedAddress(Map<String, String> address) async {
@@ -3915,17 +4516,27 @@ out center tags;
     LatLng start,
     LatLng destination, {
     String vehicle = 'Araba',
+    bool avoidTolls = false,
+    bool includeAlternativeRoutes = false,
   }) async {
     if (NavoraTrafficService.googleRoutesApiKey.isEmpty) {
       throw StateError('Google Routes API anahtarı tanımlanmamış.');
     }
-    return _fetchGoogleRoadRoute(start, destination, vehicle: vehicle);
+    return _fetchGoogleRoadRoute(
+      start,
+      destination,
+      vehicle: vehicle,
+      avoidTolls: avoidTolls,
+      includeAlternativeRoutes: includeAlternativeRoutes,
+    );
   }
 
   Future<Map<String, dynamic>> _fetchGoogleRoadRoute(
     LatLng start,
     LatLng destination, {
     required String vehicle,
+    required bool avoidTolls,
+    required bool includeAlternativeRoutes,
   }) async {
     final travelMode = switch (vehicle) {
       'Yürüyüş' => 'WALK',
@@ -3972,11 +4583,14 @@ out center tags;
               },
             },
             'travelMode': travelMode,
+            if (includeTraffic && includeAlternativeRoutes)
+              'computeAlternativeRoutes': true,
             'polylineEncoding': 'GEO_JSON_LINESTRING',
             'polylineQuality': 'HIGH_QUALITY',
             if (includeTraffic) ...{
               'routingPreference': 'TRAFFIC_AWARE_OPTIMAL',
               'extraComputations': ['TRAFFIC_ON_POLYLINE'],
+              'routeModifiers': {'avoidTolls': avoidTolls},
             },
           }),
         )
@@ -3990,7 +4604,20 @@ out center tags;
     if (routes == null || routes.isEmpty) {
       throw Exception('Google Routes rota döndürmedi');
     }
-    final route = routes.first as Map<String, dynamic>;
+    final parsedRoutes = routes
+        .whereType<Map<String, dynamic>>()
+        .map((route) => _parseGoogleRoadRoute(route, travelMode))
+        .toList();
+    if (parsedRoutes.isEmpty) {
+      throw Exception('Google Routes returned no valid route');
+    }
+    return {...parsedRoutes.first, 'options': parsedRoutes};
+  }
+
+  Map<String, dynamic> _parseGoogleRoadRoute(
+    Map<String, dynamic> route,
+    String travelMode,
+  ) {
     final polyline = route['polyline'] as Map<String, dynamic>? ?? const {};
     final geoJson =
         polyline['geoJsonLinestring'] as Map<String, dynamic>? ?? const {};
@@ -4021,10 +4648,21 @@ out center tags;
     final durationSeconds = double.tryParse(
       route['duration']?.toString().replaceFirst('s', '') ?? '',
     );
-    return {
+    final distanceKm =
+        ((route['distanceMeters'] as num?)?.toDouble() ?? 0) / 1000;
+    final routeDurationMinutes = (((durationSeconds ?? 0) / 60).ceil()).clamp(
+      1,
+      999999,
+    );
+    return <String, dynamic>{
       'points': points,
-      'distanceKm': ((route['distanceMeters'] as num?)?.toDouble() ?? 0) / 1000,
-      'durationMinutes': (((durationSeconds ?? 0) / 60).ceil()).clamp(1, 999),
+      'distanceKm': distanceKm,
+      'durationMinutes': travelMode == 'WALK'
+          ? navoraWalkingDurationMinutes(
+              distanceKm: distanceKm,
+              routeDurationMinutes: routeDurationMinutes,
+            )
+          : routeDurationMinutes.clamp(1, 999),
       'steps': steps,
       'trafficPolylines': NavoraTrafficService.buildRouteTrafficPolylines(
         points,
@@ -4034,6 +4672,65 @@ out center tags;
         trafficIntervals,
       ),
     };
+  }
+
+  void _applyRouteOptions(
+    List<Map<String, dynamic>> routeOptions,
+    int selectedIndex,
+    String vehicle,
+    LatLng origin,
+  ) {
+    if (routeOptions.isEmpty ||
+        selectedIndex < 0 ||
+        selectedIndex >= routeOptions.length) {
+      return;
+    }
+    final selectedRoute = routeOptions[selectedIndex];
+    final selectedPoints = navoraTrimRouteToRemainingPath(
+      selectedRoute['points'] as List<LatLng>,
+      origin,
+      vehicle: vehicle,
+    );
+    final alternativePolylines = <Polyline>[];
+    for (var index = 0; index < routeOptions.length; index++) {
+      if (index == selectedIndex) continue;
+      final option = routeOptions[index];
+      final points = navoraTrimRouteToRemainingPath(
+        option['points'] as List<LatLng>,
+        origin,
+        vehicle: vehicle,
+      );
+      if (points.length < 2) continue;
+      alternativePolylines.add(
+        Polyline(
+          polylineId: PolylineId('route-alternative-$index'),
+          points: points,
+          color: const Color(0xFFB9C4CC),
+          width: 5,
+          zIndex: 1,
+        ),
+      );
+    }
+    setState(() {
+      _routePolylines = [
+        Polyline(
+          polylineId: const PolylineId('route-navigation'),
+          points: selectedPoints,
+          color: const Color(0xFF4285F4),
+          width: 7,
+          zIndex: 2,
+        ),
+      ];
+      _alternativeRoutePolylines = alternativePolylines;
+      _navigationTrafficPolylines =
+          selectedRoute['trafficPolylines'] as List<Polyline>? ?? const [];
+      _navigationSteps = List<Map<String, dynamic>>.from(
+        selectedRoute['steps'] as List<Map<String, dynamic>>,
+      );
+      _navigationStepIndex = 0;
+      _navigationDistanceKm = selectedRoute['distanceKm'] as double;
+      _navigationDurationMinutes = selectedRoute['durationMinutes'] as int;
+    });
   }
 
   Map<String, dynamic> _formatGoogleNavigationStep(Map<String, dynamic> step) {
@@ -4138,17 +4835,17 @@ out center tags;
                 ),
               ),
               IconButton(
+                tooltip: 'Yolculuğu paylaş',
+                onPressed: () => unawaited(_shareCurrentTrip()),
+                icon: const Icon(Icons.share_rounded, color: Color(0xFFFF6B00)),
+              ),
+              IconButton(
                 tooltip: _isNavigationVoiceEnabled
                     ? 'Navigasyon sesini kapat'
                     : 'Navigasyon sesini aç',
                 onPressed: () async {
                   final enabled = !_isNavigationVoiceEnabled;
-                  setState(() => _isNavigationVoiceEnabled = enabled);
-                  if (enabled) {
-                    await _speakNavigation('Navigasyon sesi açıldı.');
-                  } else {
-                    await _tts.stop();
-                  }
+                  await _setNavigationVoiceEnabled(enabled);
                 },
                 icon: Icon(
                   _isNavigationVoiceEnabled
@@ -4169,13 +4866,19 @@ out center tags;
               ),
             ],
           ),
-          if (_isOffRoute || !_isFollowingCurrentPosition) ...[
+          if (_isOffRoute ||
+              _isGpsAccuracyDegraded ||
+              !_isFollowingCurrentPosition) ...[
             const SizedBox(height: 4),
             Row(
               children: [
                 Icon(
-                  _isOffRoute ? Icons.alt_route_rounded : Icons.pan_tool_alt,
-                  color: _isOffRoute
+                  _isOffRoute
+                      ? Icons.alt_route_rounded
+                      : _isGpsAccuracyDegraded
+                      ? Icons.gps_not_fixed_rounded
+                      : Icons.pan_tool_alt,
+                  color: _isOffRoute || _isGpsAccuracyDegraded
                       ? const Color(0xFFFF6B00)
                       : const Color(0xFF98A2B3),
                   size: 16,
@@ -4185,9 +4888,11 @@ out center tags;
                   child: Text(
                     _isOffRoute
                         ? 'Rotadan sapıldı, rota yeniden hesaplanıyor'
+                        : _isGpsAccuracyDegraded
+                        ? 'GPS doğruluğu düşük, rota güncellemesi bekleniyor'
                         : 'Harita takibi duraklatıldı',
                     style: TextStyle(
-                      color: _isOffRoute
+                      color: _isOffRoute || _isGpsAccuracyDegraded
                           ? const Color(0xFFFF9A3C)
                           : const Color(0xFFB5BCC8),
                       fontSize: 12,
@@ -4271,7 +4976,10 @@ out center tags;
                 ),
               ),
               Text(
-                navoraFormatNavigationDuration(_navigationDurationMinutes),
+                navoraFormatNavigationDuration(
+                  _navigationDurationMinutes,
+                  isWalking: _selectedVehicle == 'Yürüyüş',
+                ),
                 style: const TextStyle(
                   color: Colors.white,
                   fontWeight: FontWeight.bold,
@@ -4290,6 +4998,45 @@ out center tags;
         ],
       ),
     );
+  }
+
+  Future<void> _shareCurrentTrip() async {
+    final destination = _selectedDestinationCoordinate;
+    final destinationName = _activeNavigationDestination?.trim();
+    final durationMinutes = _navigationDurationMinutes;
+    if (destination == null || durationMinutes == null) {
+      _showTrackingMessage('Paylaşılacak aktif rota bulunamadı.');
+      return;
+    }
+
+    final arrival = DateTime.now().add(Duration(minutes: durationMinutes));
+    final arrivalText = MaterialLocalizations.of(context)
+        .formatTimeOfDay(TimeOfDay.fromDateTime(arrival));
+    final directionsUri = Uri.https('www.google.com', '/maps/dir/', {
+      'api': '1',
+      'destination': '${destination.latitude},${destination.longitude}',
+      'travelmode': _selectedVehicle == 'Yürüyüş' ? 'walking' : 'driving',
+    });
+    final message = [
+      'Navora Map yolculuk bilgisi',
+      if (destinationName != null && destinationName.isNotEmpty)
+        'Varış: $destinationName',
+      'Tahmini varış: $arrivalText',
+      'Kalan mesafe: ${_navigationDistanceKm?.toStringAsFixed(1) ?? '-'} km',
+      'Rota: $directionsUri',
+    ].join('\n');
+
+    try {
+      final result = await SharePlus.instance.share(
+        ShareParams(text: message, subject: 'Navora Map yolculuğum'),
+      );
+      if (result.status == ShareResultStatus.unavailable && mounted) {
+        _showTrackingMessage('Paylaşım menüsü bu cihazda açılamadı.');
+      }
+    } catch (error) {
+      debugPrint('Yolculuk paylaşılamadı: $error');
+      if (mounted) _showTrackingMessage('Yolculuk paylaşılamadı.');
+    }
   }
 
   int get _monthEarned => _pointLedger
@@ -4330,7 +5077,12 @@ out center tags;
         ? value.toDate()
         : DateTime.tryParse(value?.toString() ?? '');
     if (date == null) return 'Tarih yok';
-    return '${date.day.toString().padLeft(2, '0')}.${date.month.toString().padLeft(2, '0')}.${date.year}';
+    final localDate = date.toLocal();
+    final day = localDate.day.toString().padLeft(2, '0');
+    final month = localDate.month.toString().padLeft(2, '0');
+    final hour = localDate.hour.toString().padLeft(2, '0');
+    final minute = localDate.minute.toString().padLeft(2, '0');
+    return '$day.$month.${localDate.year} $hour:$minute';
   }
 
   Future<void> _deleteExpiredHistory(
@@ -4358,25 +5110,449 @@ out center tags;
   String _dailyQuotaKey(DateTime date) =>
       '${date.year.toString().padLeft(4, '0')}-${date.month.toString().padLeft(2, '0')}-${date.day.toString().padLeft(2, '0')}';
 
-  Future<void> _persistDailyQuota() async {
-    final userId = FirebaseAuth.instance.currentUser?.uid ?? 'guest';
-    final preferences = await SharedPreferences.getInstance();
-    final prefix = 'navora.dailyQuota.$userId.';
-    await preferences.setString(
-      '${prefix}date',
-      _dailyQuotaDate ?? _dailyQuotaKey(DateTime.now()),
+  DocumentReference<Map<String, dynamic>> _dailyQuotaReference(
+    String userId,
+    String date,
+  ) => FirebaseFirestore.instance
+      .collection('users')
+      .doc(userId)
+      .collection('daily_usage')
+      .doc(date);
+
+  HttpsCallable _quotaCallable(String name) =>
+      FirebaseFunctions.instanceFor(region: 'europe-west1').httpsCallable(name);
+
+  Future<HttpsCallableResult<dynamic>> _callQuotaCallable(
+    String name,
+    Map<String, dynamic> data,
+  ) async {
+    final auth = FirebaseAuth.instance;
+    final user = auth.currentUser;
+    if (user == null) {
+      throw FirebaseFunctionsException(
+        code: 'unauthenticated',
+        message: 'Oturum açmanız gerekiyor.',
+      );
+    }
+
+    await user.getIdToken();
+    try {
+      return await _quotaCallable(name).call(data);
+    } on FirebaseFunctionsException catch (error) {
+      if (error.code != 'unauthenticated' ||
+          auth.currentUser?.uid != user.uid) {
+        rethrow;
+      }
+      await user.getIdToken(true);
+      if (auth.currentUser?.uid != user.uid) rethrow;
+      return _quotaCallable(name).call(data);
+    }
+  }
+
+  Future<void> _reserveDailyQuota(String kind, String reservationId) async {
+    final result = await _callQuotaCallable('reserveDailyQuota', {
+      'kind': kind,
+      'reservationId': reservationId,
+    });
+    final data = result.data;
+    if (data is! Map) {
+      throw StateError('Günlük kullanım yanıtı geçersiz.');
+    }
+    if (!mounted) return;
+    setState(() {
+      _dailyQuotaDate = data['date']?.toString();
+      _roomsCreatedToday = (data['rooms'] as num?)?.toInt() ?? 0;
+      _freeAiQueriesUsedToday = (data['ai'] as num?)?.toInt() ?? 0;
+      _bonusChatRooms = (data['bonusChatRooms'] as num?)?.toInt() ?? 0;
+      _bonusAiQueries = (data['bonusAiQueries'] as num?)?.toInt() ?? 0;
+    });
+  }
+
+  Future<void> _subscribeToDailyQuota(String userId, String date) async {
+    await _dailyQuotaSubscription?.cancel();
+    if (!mounted || FirebaseAuth.instance.currentUser?.uid != userId) return;
+
+    _dailyQuotaSubscription = _dailyQuotaReference(userId, date)
+        .snapshots()
+        .listen(
+          (snapshot) {
+            if (!mounted ||
+                FirebaseAuth.instance.currentUser?.uid != userId ||
+                _dailyQuotaDate != date ||
+                !snapshot.exists) {
+              return;
+            }
+            final data = snapshot.data()!;
+            setState(() {
+              if (data['quota_version'] == 1) {
+                _roomsCreatedToday = (data['rooms'] as num?)?.toInt() ?? 0;
+                _freeAiQueriesUsedToday = (data['ai'] as num?)?.toInt() ?? 0;
+              } else {
+                _roomsCreatedToday = 0;
+                _freeAiQueriesUsedToday = 0;
+              }
+            });
+          },
+          onError: (Object error) {
+            debugPrint('Günlük kullanım bilgisi dinlenemedi: $error');
+            if (mounted) {
+              _showTrackingMessage('Günlük kullanım bilgisi güncellenemedi.');
+            }
+          },
+        );
+  }
+
+  void _subscribeToAiChats(String userId) {
+    _aiChatsSubscription?.cancel();
+    _aiChatsSubscription = FirebaseFirestore.instance
+        .collection('users')
+        .doc(userId)
+        .collection('ai_chats')
+        .orderBy('created_at', descending: true)
+        .limit(50)
+        .snapshots()
+        .listen(
+          (snapshot) {
+            if (!mounted || FirebaseAuth.instance.currentUser?.uid != userId) {
+              return;
+            }
+            final messages = <Map<String, String>>[
+              {
+                'sender': 'ai',
+                'text': 'Merhaba! Ben Navora AI. Rotan, yakındaki mekanlar veya trafik hakkında ne öğrenmek istersin?',
+              },
+            ];
+            for (final document in snapshot.docs.reversed) {
+              final data = document.data();
+              final question = data['question']?.toString().trim() ?? '';
+              final answer = data['answer']?.toString().trim() ?? '';
+              if (question.isEmpty || answer.isEmpty) continue;
+              messages
+                ..add({'sender': 'user', 'text': question})
+                ..add({'sender': 'ai', 'text': answer});
+            }
+            setState(() {
+              _aiMessages
+                ..clear()
+                ..addAll(messages);
+            });
+          },
+          onError: (Object error) {
+            debugPrint('Navora AI geçmişi yüklenemedi: $error');
+            if (mounted) {
+              _showTrackingMessage('Yapay zeka sohbet geçmişi yüklenemedi.');
+            }
+          },
+        );
+  }
+
+  void _subscribeToAccountPoints(String userId) {
+    final userReference = FirebaseFirestore.instance
+        .collection('users')
+        .doc(userId);
+    _pointsProfileSubscription?.cancel();
+    _pointsProfileSubscription = userReference.snapshots().listen(
+      (snapshot) {
+        if (!mounted ||
+            FirebaseAuth.instance.currentUser?.uid != userId ||
+            !snapshot.exists) {
+          return;
+        }
+        final data = snapshot.data()!;
+        setState(() {
+          _navoraPoints = data['points_version'] == 1
+              ? (data['navora_points'] as num?)?.toInt() ?? 0
+              : 0;
+          _bonusChatRooms = (data['bonus_chat_rooms'] as num?)?.toInt() ?? 0;
+          _bonusAiQueries = (data['bonus_ai_queries'] as num?)?.toInt() ?? 0;
+          _proDiscountUnlocked = data['pro_discount_unlocked'] == true;
+          _isProUser = false;
+          final photoUrl = data['photo_url']?.toString().trim();
+          if (photoUrl != null && photoUrl.isNotEmpty) {
+            _profilePhotoUrl = photoUrl;
+          }
+          final visitedCities = data['visited_cities'];
+          _visitedCities
+            ..clear()
+            ..addAll(
+              visitedCities is List
+                  ? visitedCities
+                        .whereType<String>()
+                        .map((city) => city.trim())
+                        .where((city) => city.isNotEmpty)
+                  : const <String>[],
+            );
+        });
+      },
+      onError: (Object error) {
+        debugPrint('Navora puan bakiyesi dinlenemedi: $error');
+        if (mounted) _showTrackingMessage('Puan bakiyesi güncellenemedi.');
+      },
     );
-    await preferences.setInt('${prefix}rooms', _roomsCreatedToday);
-    await preferences.setInt('${prefix}ai', _freeAiQueriesUsedToday);
+    _pointLedgerSubscription?.cancel();
+    _pointLedgerSubscription = userReference
+        .collection('point_ledger')
+        .orderBy('created_at', descending: true)
+        .limit(100)
+        .snapshots()
+        .listen(
+          (snapshot) {
+            if (!mounted || FirebaseAuth.instance.currentUser?.uid != userId) {
+              return;
+            }
+            setState(() {
+              _pointLedger
+                ..clear()
+                ..addAll(
+                  snapshot.docs
+                      .where((document) => document.data()['version'] == 1)
+                      .map((document) {
+                        final entry = document.data();
+                        return <String, dynamic>{
+                          'title': entry['title']?.toString() ?? 'Puan işlemi',
+                          'detail': entry['detail']?.toString() ?? '',
+                          'amount': (entry['amount'] as num?)?.toInt() ?? 0,
+                          'date': entry['date']?.toString() ?? 'Şimdi',
+                        };
+                      }),
+                );
+            });
+          },
+          onError: (Object error) {
+            debugPrint('Navora puan geçmişi yüklenemedi: $error');
+            if (mounted) _showTrackingMessage('Puan geçmişi yüklenemedi.');
+          },
+        );
+  }
+
+  void _subscribeToUserCollections(String userId) {
+    final userReference = FirebaseFirestore.instance
+        .collection('users')
+        .doc(userId);
+
+    _savedRoutesSubscription = userReference
+        .collection('saved_routes')
+        .orderBy('created_at', descending: true)
+        .snapshots()
+        .listen(
+          (snapshot) {
+            if (!mounted || FirebaseAuth.instance.currentUser?.uid != userId) {
+              return;
+            }
+            setState(() {
+              _savedRoutes
+                ..clear()
+                ..addAll(
+                  snapshot.docs.map((document) {
+                    final route = document.data();
+                    return <String, String>{
+                      'id': document.id,
+                      'title': route['title']?.toString() ?? 'Kayıtlı rota',
+                      'start': route['start']?.toString() ?? '',
+                      'destination': route['destination']?.toString() ?? '',
+                      'distance_km': route['distance_km']?.toString() ?? '',
+                    };
+                  }),
+                );
+            });
+          },
+          onError: (Object error) {
+            debugPrint('Kayıtlı rotalar dinlenemedi: $error');
+            if (mounted) {
+              _showTrackingMessage('Kayıtlı rotalar güncellenemedi.');
+            }
+          },
+        );
+
+    _savedAddressesSubscription = userReference
+        .collection('saved_addresses')
+        .snapshots()
+        .listen(
+          (snapshot) {
+            if (!mounted || FirebaseAuth.instance.currentUser?.uid != userId) {
+              return;
+            }
+            setState(() {
+              _savedAddresses
+                ..clear()
+                ..addAll(
+                  snapshot.docs.map((document) {
+                    final address = document.data();
+                    return <String, String>{
+                      'id': document.id,
+                      'title': address['title']?.toString() ?? 'Adres',
+                      'address': address['address']?.toString() ?? '',
+                      'type': address['type']?.toString() ?? 'favorite',
+                      'latitude': address['latitude']?.toString() ?? '',
+                      'longitude': address['longitude']?.toString() ?? '',
+                    };
+                  }),
+                );
+            });
+          },
+          onError: (Object error) {
+            debugPrint('Kayıtlı adresler dinlenemedi: $error');
+            if (mounted) {
+              _showTrackingMessage('Kayıtlı adresler güncellenemedi.');
+            }
+          },
+        );
+
+    _subscribeToMapLayers();
+
+    _drivingHistorySubscription = userReference
+        .collection('driving_history')
+        .snapshots()
+        .listen(
+          (snapshot) {
+            if (!mounted || FirebaseAuth.instance.currentUser?.uid != userId) {
+              return;
+            }
+            _liveDrivingHistory
+              ..clear()
+              ..addAll(
+                snapshot.docs
+                    .where((document) => !_isHistoryExpired(document.data()))
+                    .map((document) => document.data())
+                    .map(
+                      (history) => <String, String>{
+                        'route':
+                            history['route']?.toString() ?? 'Tamamlanan rota',
+                        'date': _formatHistoryDate(
+                          history['completed_at'] ?? history['date'],
+                        ),
+                        'duration': '${history['duration_minutes'] ?? 0} dk',
+                        'km': '${history['distance_km'] ?? 0} km',
+                      },
+                    ),
+              );
+            setState(() {
+              _drivingHistory
+                ..clear()
+                ..addAll(_liveDrivingHistory)
+                ..addAll(_liveRouteHistory);
+            });
+          },
+          onError: (Object error) {
+            debugPrint('Sürüş geçmişi dinlenemedi: $error');
+            if (mounted) _showTrackingMessage('Sürüş geçmişi güncellenemedi.');
+          },
+        );
+
+    _routeHistorySubscription = userReference
+        .collection('route_history')
+        .snapshots()
+        .listen(
+          (snapshot) {
+            if (!mounted || FirebaseAuth.instance.currentUser?.uid != userId) {
+              return;
+            }
+            _liveRouteHistory
+              ..clear()
+              ..addAll(
+                snapshot.docs
+                    .where((document) => !_isHistoryExpired(document.data()))
+                    .map((document) => document.data())
+                    .map(
+                      (history) => <String, String>{
+                        'route':
+                            history['title']?.toString() ?? 'Tamamlanan rota',
+                        'date': _formatHistoryDate(
+                          history['completed_at'] ?? history['date'],
+                        ),
+                        'duration': '${history['duration_minutes'] ?? 0} dk',
+                        'km': '${history['distance_km'] ?? 0} km',
+                      },
+                    ),
+              );
+            setState(() {
+              _drivingHistory
+                ..clear()
+                ..addAll(_liveDrivingHistory)
+                ..addAll(_liveRouteHistory);
+            });
+          },
+          onError: (Object error) {
+            debugPrint('Rota geçmişi dinlenemedi: $error');
+            if (mounted) _showTrackingMessage('Rota geçmişi güncellenemedi.');
+          },
+        );
+
+    _sosContactsSubscription = userReference
+        .collection('sos_contacts')
+        .snapshots()
+        .listen(
+          (snapshot) {
+            if (!mounted || FirebaseAuth.instance.currentUser?.uid != userId) {
+              return;
+            }
+            setState(() {
+              _sosContacts
+                ..clear()
+                ..addAll(
+                  snapshot.docs.map((document) {
+                    final contact = document.data();
+                    return <String, String>{
+                      'id': document.id,
+                      'name': contact['name']?.toString() ?? '',
+                      'phone': contact['phone']?.toString() ?? '',
+                      'relation': contact['relation']?.toString() ?? '',
+                    };
+                  }),
+                );
+            });
+          },
+          onError: (Object error) {
+            debugPrint('SOS kişileri dinlenemedi: $error');
+            if (mounted) _showTrackingMessage('SOS kişileri güncellenemedi.');
+          },
+        );
+  }
+
+  Future<void> _persistDailyQuota() async {
+    final userId = FirebaseAuth.instance.currentUser?.uid;
+    final date = _dailyQuotaDate ?? _dailyQuotaKey(DateTime.now());
+    try {
+      final preferences = await SharedPreferences.getInstance();
+      final prefix = 'navora.dailyQuota.${userId ?? 'guest'}.';
+      await preferences.setString('${prefix}date', date);
+      await preferences.setInt('${prefix}rooms', _roomsCreatedToday);
+      await preferences.setInt('${prefix}ai', _freeAiQueriesUsedToday);
+    } catch (error) {
+      debugPrint('Günlük kullanım bilgisi kaydedilemedi: $error');
+      if (mounted) {
+        _showTrackingMessage('Günlük kullanım bilgisi kaydedilemedi.');
+      }
+    }
+  }
+
+  Future<void> _recordDailyQuotaUsage({
+    bool roomCreated = false,
+    bool aiQueryCompleted = false,
+  }) async {
+    final userId = FirebaseAuth.instance.currentUser?.uid;
+    final date = _dailyQuotaKey(DateTime.now());
+    if (userId == null) {
+      if (mounted) {
+        setState(() {
+          _dailyQuotaDate = date;
+          if (roomCreated) _roomsCreatedToday++;
+          if (aiQueryCompleted) _freeAiQueriesUsedToday++;
+        });
+      }
+      await _persistDailyQuota();
+      return;
+    }
   }
 
   Future<void> _loadProfileData() async {
     final user = FirebaseAuth.instance.currentUser;
-    if (user == null) return;
+    if (user == null) {
+      _showTrackingMessage('Oda oluşturmak için önce hesabına giriş yap.');
+      return;
+    }
 
     try {
-      final preferences = await SharedPreferences.getInstance();
-      final quotaPrefix = 'navora.dailyQuota.${user.uid}.';
       final profile = await FirebaseFirestore.instance
           .collection('users')
           .doc(user.uid)
@@ -4407,8 +5583,21 @@ out center tags;
           .doc(user.uid)
           .collection('sos_contacts')
           .get();
-      final data = profile.data();
-      if (!mounted || data == null) return;
+      final pointLedgerCollection = FirebaseFirestore.instance
+          .collection('users')
+          .doc(user.uid)
+          .collection('point_ledger');
+      final pointLedgerSnapshot = await pointLedgerCollection
+          .orderBy('created_at', descending: true)
+          .limit(100)
+          .get();
+      final today = _dailyQuotaKey(DateTime.now());
+      final dailyQuotaSnapshot = await _dailyQuotaReference(
+        user.uid,
+        today,
+      ).get();
+      final data = profile.data() ?? <String, dynamic>{};
+      if (!mounted) return;
 
       await _deleteExpiredHistory(
         user.uid,
@@ -4448,18 +5637,18 @@ out center tags;
               },
             )
             .toList();
-        if (savedAddresses.isNotEmpty) {
-          _savedAddresses
-            ..clear()
-            ..addAll(savedAddresses);
-        }
+        _savedAddresses
+          ..clear()
+          ..addAll(savedAddresses);
         final drivingHistory = drivingHistorySnapshot.docs
             .where((document) => !_isHistoryExpired(document.data()))
             .map((document) => document.data())
             .map(
               (history) => <String, String>{
                 'route': history['route']?.toString() ?? 'Tamamlanan rota',
-                'date': history['date']?.toString() ?? '',
+                'date': _formatHistoryDate(
+                  history['completed_at'] ?? history['date'],
+                ),
                 'duration': '${history['duration_minutes'] ?? 0} dk',
                 'km': '${history['distance_km'] ?? 0} km',
               },
@@ -4471,18 +5660,18 @@ out center tags;
             .map(
               (history) => <String, String>{
                 'route': history['title']?.toString() ?? 'Tamamlanan rota',
-                'date': _formatHistoryDate(history['completed_at']),
+                'date': _formatHistoryDate(
+                  history['completed_at'] ?? history['date'],
+                ),
                 'duration': '${history['duration_minutes'] ?? 0} dk',
                 'km': '${history['distance_km'] ?? 0} km',
               },
             )
             .toList();
         drivingHistory.addAll(routeHistory);
-        if (drivingHistory.isNotEmpty) {
-          _drivingHistory
-            ..clear()
-            ..addAll(drivingHistory);
-        }
+        _drivingHistory
+          ..clear()
+          ..addAll(drivingHistory);
         final sosContacts = sosContactsSnapshot.docs
             .map(
               (document) => {
@@ -4505,29 +5694,34 @@ out center tags;
                 : const [],
           );
         final storedPoints = data['navora_points'];
-        _navoraPoints =
-            preferences.getInt('navora.points.${user.uid}') ??
-            (storedPoints is num ? storedPoints.toInt() : 0);
-        final today = _dailyQuotaKey(DateTime.now());
-        final storedQuotaDate = preferences.getString('${quotaPrefix}date');
+        _navoraPoints = data['points_version'] == 1 && storedPoints is num
+            ? storedPoints.toInt()
+            : 0;
+        _bonusChatRooms = (data['bonus_chat_rooms'] as num?)?.toInt() ?? 0;
+        _bonusAiQueries = (data['bonus_ai_queries'] as num?)?.toInt() ?? 0;
+        _proDiscountUnlocked = data['pro_discount_unlocked'] == true;
         _dailyQuotaDate = today;
-        if (storedQuotaDate == today) {
-          _roomsCreatedToday = preferences.getInt('${quotaPrefix}rooms') ?? 0;
-          _freeAiQueriesUsedToday = preferences.getInt('${quotaPrefix}ai') ?? 0;
+        if (dailyQuotaSnapshot.exists &&
+            dailyQuotaSnapshot.data()?['quota_version'] == 1) {
+          final usage = dailyQuotaSnapshot.data()!;
+          _roomsCreatedToday = (usage['rooms'] as num?)?.toInt() ?? 0;
+          _freeAiQueriesUsedToday = (usage['ai'] as num?)?.toInt() ?? 0;
         } else {
           _roomsCreatedToday = 0;
           _freeAiQueriesUsedToday = 0;
-          unawaited(_persistDailyQuota());
         }
-        final encodedPointLedger = preferences.getString(
-          'navora.pointLedger.${user.uid}',
-        );
-        final pointLedger = encodedPointLedger == null
-            ? <Map<String, dynamic>>[]
-            : (jsonDecode(encodedPointLedger) as List<dynamic>)
-                  .whereType<Map>()
-                  .map(Map<String, dynamic>.from)
-                  .toList();
+        final pointLedger = pointLedgerSnapshot.docs
+            .where((document) => document.data()['version'] == 1)
+            .map((document) {
+              final entry = document.data();
+              return <String, dynamic>{
+                'title': entry['title']?.toString() ?? 'Puan işlemi',
+                'detail': entry['detail']?.toString() ?? '',
+                'amount': (entry['amount'] as num?)?.toInt() ?? 0,
+                'date': entry['date']?.toString() ?? 'Şimdi',
+              };
+            })
+            .toList();
         _pointLedger
           ..clear()
           ..addAll(pointLedger);
@@ -4550,16 +5744,16 @@ out center tags;
         } else {
           _selectedVehicle = 'Araba';
         }
-        final vehicleBrandModel = data['vehicle_brand_model']?.toString();
-        final vehicleKm = data['vehicle_km']?.toString();
-        if (vehicleBrandModel != null && vehicleBrandModel.isNotEmpty) {
-          _vehicleBrandModel = vehicleBrandModel;
-        }
-        if (vehicleKm != null && vehicleKm.isNotEmpty) _vehicleKm = vehicleKm;
         if (phone is String && phone.isNotEmpty) _userPhone = phone;
       });
-    } catch (_) {
-      // Profil verisi okunamazsa varsayılan bilgiler kullanılmaya devam eder.
+      _subscribeToAccountPoints(user.uid);
+      _subscribeToUserCollections(user.uid);
+      await _subscribeToDailyQuota(user.uid, today);
+    } catch (error) {
+      debugPrint('Profil verileri yüklenemedi: $error');
+      if (mounted) {
+        _showTrackingMessage('Profil verileri yüklenemedi.');
+      }
     }
   }
 
@@ -4768,6 +5962,11 @@ out center tags;
                                   onTap: () =>
                                       unawaited(_createCommunityPlace()),
                                 ),
+                                _buildChip(
+                                  Icons.bookmark_rounded,
+                                  'Kayıtlı yerler',
+                                  onTap: _showSavedAddressesDialog,
+                                ),
                               ],
                             ),
                           ),
@@ -4795,6 +5994,16 @@ out center tags;
                   child: Column(
                     mainAxisSize: MainAxisSize.min,
                     children: [
+                      FloatingActionButton.small(
+                        heroTag: 'map-layers',
+                        onPressed: _showMapLayersSheet,
+                        tooltip: 'Harita katmanları',
+                        backgroundColor: const Color(0xFF191919),
+                        foregroundColor: const Color(0xFFFF6B00),
+                        shape: const CircleBorder(),
+                        child: const Icon(Icons.layers_rounded),
+                      ),
+                      const SizedBox(height: 10),
                       if (_isNavigationActive) ...[
                         FloatingActionButton.small(
                           heroTag: 'navigation-compass',
@@ -4837,18 +6046,6 @@ out center tags;
                               : Icons.near_me_rounded,
                         ),
                       ),
-                      if (_isDriveTracking) ...[
-                        const SizedBox(height: 10),
-                        FloatingActionButton.small(
-                          heroTag: 'road-report',
-                          onPressed: _showAddRoadReportSheet,
-                          tooltip: 'Yol bildirimi ekle',
-                          backgroundColor: const Color(0xFF191919),
-                          foregroundColor: const Color(0xFFFF6B00),
-                          shape: const CircleBorder(),
-                          child: const Icon(Icons.add_alert_rounded),
-                        ),
-                      ],
                     ],
                   ),
                 ),
@@ -4898,188 +6095,6 @@ out center tags;
           ),
         ),
       ),
-    );
-  }
-
-  Future<void> _showAddRoadReportSheet() async {
-    if (_currentPosition == null) {
-      _showTrackingMessage('Bildirim eklemek için önce konumunuzu açın.');
-      return;
-    }
-
-    const reportTypes = ['Radar', 'Trafik', 'Yol çalışması', 'Kaza'];
-    String selectedType = reportTypes.first;
-    final descriptionController = TextEditingController();
-    final report = await showModalBottomSheet<Map<String, String>>(
-      context: context,
-      isScrollControlled: true,
-      backgroundColor: const Color(0xFF171717),
-      shape: const RoundedRectangleBorder(
-        borderRadius: BorderRadius.vertical(top: Radius.circular(24)),
-      ),
-      builder: (context) => StatefulBuilder(
-        builder: (context, setSheetState) => Padding(
-          padding: EdgeInsets.fromLTRB(
-            20,
-            22,
-            20,
-            MediaQuery.of(context).viewInsets.bottom + 24,
-          ),
-          child: Column(
-            mainAxisSize: MainAxisSize.min,
-            crossAxisAlignment: CrossAxisAlignment.start,
-            children: [
-              const Text(
-                'Yol bildirimi ekle',
-                style: TextStyle(
-                  color: Colors.white,
-                  fontSize: 19,
-                  fontWeight: FontWeight.bold,
-                ),
-              ),
-              const SizedBox(height: 6),
-              Text(
-                'Bildirim mevcut konumunuzda haritaya işaretlenecek.',
-                style: const TextStyle(color: Colors.white70, fontSize: 12),
-              ),
-              const SizedBox(height: 16),
-              DropdownButtonFormField<String>(
-                initialValue: selectedType,
-                dropdownColor: const Color(0xFF242424),
-                style: const TextStyle(color: Colors.white),
-                iconEnabledColor: const Color(0xFFFF7A00),
-                decoration: InputDecoration(
-                  labelText: 'Bildirim türü',
-                  labelStyle: const TextStyle(color: Color(0xFFBDBDBD)),
-                  enabledBorder: OutlineInputBorder(
-                    borderRadius: BorderRadius.circular(12),
-                    borderSide: const BorderSide(color: Color(0xFF333333)),
-                  ),
-                  focusedBorder: OutlineInputBorder(
-                    borderRadius: BorderRadius.circular(12),
-                    borderSide: const BorderSide(color: Color(0xFFFF7A00)),
-                  ),
-                  filled: true,
-                  fillColor: const Color(0xFF1F1F1F),
-                ),
-                items: reportTypes
-                    .map(
-                      (type) => DropdownMenuItem(
-                        value: type,
-                        child: Row(
-                          children: [
-                            Icon(
-                              _reportIcon(type),
-                              size: 20,
-                              color: const Color(0xFFFF7A00),
-                            ),
-                            const SizedBox(width: 8),
-                            Text(
-                              type,
-                              style: const TextStyle(color: Colors.white),
-                            ),
-                          ],
-                        ),
-                      ),
-                    )
-                    .toList(),
-                onChanged: (value) {
-                  if (value != null) setSheetState(() => selectedType = value);
-                },
-              ),
-              const SizedBox(height: 12),
-              TextField(
-                controller: descriptionController,
-                maxLines: 2,
-                style: const TextStyle(color: Colors.white),
-                decoration: InputDecoration(
-                  labelText: 'Kısa açıklama',
-                  hintText: 'Örn. Sağ şeritte yoğunluk var',
-                  labelStyle: const TextStyle(color: Color(0xFFBDBDBD)),
-                  hintStyle: const TextStyle(color: Color(0xFF8F8F8F)),
-                  enabledBorder: OutlineInputBorder(
-                    borderRadius: BorderRadius.circular(12),
-                    borderSide: const BorderSide(color: Color(0xFF333333)),
-                  ),
-                  focusedBorder: OutlineInputBorder(
-                    borderRadius: BorderRadius.circular(12),
-                    borderSide: const BorderSide(color: Color(0xFFFF7A00)),
-                  ),
-                  filled: true,
-                  fillColor: const Color(0xFF1F1F1F),
-                ),
-              ),
-              const SizedBox(height: 16),
-              SizedBox(
-                width: double.infinity,
-                height: 46,
-                child: ElevatedButton.icon(
-                  onPressed: () {
-                    Navigator.pop(context, {
-                      'type': selectedType,
-                      'description': descriptionController.text.trim(),
-                    });
-                  },
-                  style: ElevatedButton.styleFrom(
-                    backgroundColor: const Color(0xFFFF7A00),
-                    foregroundColor: Colors.white,
-                    shape: RoundedRectangleBorder(
-                      borderRadius: BorderRadius.circular(12),
-                    ),
-                  ),
-                  icon: const Icon(Icons.publish_rounded),
-                  label: const Text('Haritada yayınla'),
-                ),
-              ),
-            ],
-          ),
-        ),
-      ),
-    );
-    descriptionController.dispose();
-
-    if (report == null || !mounted || _currentPosition == null) return;
-    final position = _currentPosition!;
-    final reportType = report['type']!;
-    final expiresAt = DateTime.now().add(_reportDuration(reportType));
-    final reportDescription = report['description']!.isEmpty
-        ? 'Yol durumu bildirimi'
-        : report['description']!;
-    setState(() {
-      _roadReports.add({
-        'id': DateTime.now().microsecondsSinceEpoch,
-        'type': reportType,
-        'description': reportDescription,
-        'latitude': position.latitude,
-        'longitude': position.longitude,
-        'time': 'Şimdi',
-        'confirmationCount': 0,
-        'incorrectCount': 0,
-        'expiresAt': expiresAt,
-      });
-    });
-    try {
-      await FirebaseFirestore.instance.collection('road_reports').add({
-        'type': reportType,
-        'description': reportDescription,
-        'latitude': position.latitude,
-        'longitude': position.longitude,
-        'created_at': FieldValue.serverTimestamp(),
-        'expires_at': Timestamp.fromDate(expiresAt),
-        'user_id': FirebaseAuth.instance.currentUser?.uid,
-        'confirmation_count': 0,
-        'incorrect_count': 0,
-      });
-    } catch (error) {
-      debugPrint('Yol bildirimi kaydedilemedi: $error');
-      if (!mounted) return;
-      _showTrackingMessage(
-        'Bildirim sadece bu cihazda gösteriliyor. Sunucuya kaydedilemedi.',
-      );
-    }
-    if (!mounted) return;
-    ScaffoldMessenger.of(context).showSnackBar(
-      const SnackBar(content: Text('Yol bildirimi haritaya eklendi.')),
     );
   }
 
@@ -5146,6 +6161,21 @@ out center tags;
       if (mounted) {
         ScaffoldMessenger.of(context)
             .showSnackBar(const SnackBar(content: Text('İlan silindi.')));
+      }
+    } on FirebaseFunctionsException catch (error) {
+      debugPrint('İlan silinemedi (${error.code}): ${error.message}');
+      if (mounted) {
+        ScaffoldMessenger.of(context).showSnackBar(
+          SnackBar(
+            content: Text(switch (error.code) {
+              'unauthenticated' =>
+                'Oturumun sona ermiş. Tekrar giriş yapıp dene.',
+              'permission-denied' => 'Bu ilanı silme yetkin yok.',
+              'not-found' => 'İlan silme servisi bulunamadı. Uygulamayı güncelleyip tekrar dene.',
+              _ => 'İlan silinemedi (${error.code}). Daha sonra tekrar dene.',
+            }),
+          ),
+        );
       }
     } catch (error) {
       debugPrint('İlan silinemedi: $error');
@@ -5403,17 +6433,26 @@ out center tags;
 
   Widget _buildLostPetMapToolbar() {
     final hasError = _lostPetReportsError != null;
+    final visibleReports = _lostPetReports
+        .where(
+          (report) =>
+              report['collection'] ==
+              (_isPetAdoptionMode
+                  ? 'pet_adoption_listings'
+                  : 'lost_pet_reports'),
+        )
+        .length;
     final status =
         _lostPetReportsError ??
         (_isLoadingLostPetReports
             ? 'Bildirimler yükleniyor...'
-            : _lostPetReports.isEmpty
+            : visibleReports == 0
             ? _isPetAdoptionMode
                   ? 'Henüz sahiplendirme ilanı yok'
                   : 'Aktif kayıp dost bildirimi yok'
             : _isPetAdoptionMode
-            ? '${_lostPetReports.length} ilan haritada'
-            : '${_lostPetReports.length} aktif bildirim');
+            ? '$visibleReports ilan haritada'
+            : '$visibleReports aktif bildirim');
     return Container(
       padding: const EdgeInsets.fromLTRB(6, 5, 12, 10),
       decoration: BoxDecoration(
@@ -5536,13 +6575,16 @@ out center tags;
 
   Widget _buildPropertyMapToolbar() {
     final selectedType = _activePropertyListingType!;
+    final visibleListings = _propertyListings
+        .where((listing) => listing['listing_type'] == selectedType)
+        .length;
     final status =
         _propertyListingsError ??
         (_isPropertyListingsLoading
             ? 'İlanlar yükleniyor...'
-            : _propertyListings.isEmpty
+            : visibleListings == 0
             ? 'Bu kategoride henüz ilan yok'
-            : '${_propertyListings.length} ilan haritada');
+            : '$visibleListings ilan haritada');
 
     return Container(
       padding: const EdgeInsets.fromLTRB(6, 5, 12, 10),
@@ -5656,62 +6698,46 @@ out center tags;
 
   Widget _buildMapPage() {
     final roomGlowCircles = <Circle>{};
-    final roomMarkers = _liveRooms
-        .where(
-          (room) =>
-              _chatRoomMarkerIcon != null &&
-              room['latitude'] is num &&
-              room['longitude'] is num,
-        )
-        .map(
-          (room) => Marker(
-            markerId: MarkerId(
-              'room-${room['id'] ?? room['name'] ?? DateTime.now().microsecondsSinceEpoch}',
-            ),
-            position: LatLng(
-              (room['latitude'] as num).toDouble(),
-              (room['longitude'] as num).toDouble(),
-            ),
-            icon: _chatRoomMarkerIcon!,
-            onTap: () => _showRoomMarkerDialog(room),
-          ),
-        )
-        .toList();
-    final communityPlaceMarkers = _communityPlaces
-        .map(
-          (place) => Marker(
-            markerId: MarkerId('community-place-${place['id']}'),
-            position: LatLng(
-              (place['latitude'] as num).toDouble(),
-              (place['longitude'] as num).toDouble(),
-            ),
-            icon: BitmapDescriptor.defaultMarkerWithHue(
-              BitmapDescriptor.hueCyan,
-            ),
-            onTap: () => _showCommunityPlaceOnMap(place),
-          ),
-        )
-        .toList();
-    final reportMarkers = _roadReports
-        .map(
-          (report) => Marker(
-            markerId: MarkerId('report-${report['id']}'),
-            position: LatLng(
-              (report['latitude'] as num).toDouble(),
-              (report['longitude'] as num).toDouble(),
-            ),
-            icon: BitmapDescriptor.defaultMarkerWithHue(
-              _reportMarkerColor(report['type'] as String) == Colors.red
-                  ? BitmapDescriptor.hueRed
-                  : _reportMarkerColor(report['type'] as String) ==
-                        Colors.orange
-                  ? BitmapDescriptor.hueOrange
-                  : BitmapDescriptor.hueBlue,
-            ),
-            onTap: () => _showRoadReportDialog(report),
-          ),
-        )
-        .toList();
+    final roomMarkers = !_isMapLayerVisible('rooms')
+        ? <Marker>[]
+        : _liveRooms
+              .where(
+                (room) =>
+                    _chatRoomMarkerIcon != null &&
+                    room['latitude'] is num &&
+                    room['longitude'] is num,
+              )
+              .map(
+                (room) => Marker(
+                  markerId: MarkerId(
+                    'room-${room['id'] ?? room['name'] ?? DateTime.now().microsecondsSinceEpoch}',
+                  ),
+                  position: LatLng(
+                    (room['latitude'] as num).toDouble(),
+                    (room['longitude'] as num).toDouble(),
+                  ),
+                  icon: _chatRoomMarkerIcon!,
+                  onTap: () => _showRoomMarkerDialog(room),
+                ),
+              )
+              .toList();
+    final communityPlaceMarkers = !_isMapLayerVisible('community')
+        ? <Marker>[]
+        : _communityPlaces
+              .map(
+                (place) => Marker(
+                  markerId: MarkerId('community-place-${place['id']}'),
+                  position: LatLng(
+                    (place['latitude'] as num).toDouble(),
+                    (place['longitude'] as num).toDouble(),
+                  ),
+                  icon: BitmapDescriptor.defaultMarkerWithHue(
+                    BitmapDescriptor.hueCyan,
+                  ),
+                  onTap: () => _showCommunityPlaceOnMap(place),
+                ),
+              )
+              .toList();
     final currentVehicleMarker =
         _currentPosition == null || !_isNavigationActive
         ? null
@@ -5774,57 +6800,70 @@ out center tags;
           );
         })
         .toList();
-    final lostPetMarkers = _lostPetReports.map((report) {
-      final isAdoption = report['collection'] == 'pet_adoption_listings';
-      final latitude = (report['latitude'] as num).toDouble();
-      final longitude = (report['longitude'] as num).toDouble();
-      final petName = report['pet_name']?.toString() ?? '';
-      final petType = _lostPetTypeLabel(report['pet_type']?.toString());
-      return Marker(
-        markerId: MarkerId(
-          '${isAdoption ? 'adoption' : 'lost-pet'}-${report['id']}',
-        ),
-        position: LatLng(latitude, longitude),
-        icon: BitmapDescriptor.defaultMarkerWithHue(
-          isAdoption ? BitmapDescriptor.hueGreen : BitmapDescriptor.hueRose,
-        ),
-        infoWindow: InfoWindow(
-          title: petName.isEmpty
-              ? isAdoption
-                    ? 'Sahiplendirme ilanı'
-                    : 'Kayıp ${petType.toLowerCase()}'
-              : petName,
-          snippet: isAdoption
-              ? 'Sahiplendiriliyor • $petType • ${report['address']}'
-              : '$petType • ${report['address']}',
-        ),
-        onTap: () => _showLostPetReport(report),
-      );
-    }).toList();
-    final propertyMarkers = _propertyListings.map((listing) {
-      final latitude = (listing['latitude'] as num).toDouble();
-      final longitude = (listing['longitude'] as num).toDouble();
-      return Marker(
-        markerId: MarkerId('property-${listing['id']}'),
-        position: LatLng(latitude, longitude),
-        icon: BitmapDescriptor.defaultMarkerWithHue(
-          listing['listing_type'] == 'kiralik'
-              ? BitmapDescriptor.hueAzure
-              : BitmapDescriptor.hueOrange,
-        ),
-        infoWindow: InfoWindow(
-          title: listing['title']?.toString() ?? 'Konut ilanı',
-          snippet: _formatListingPrice(listing['price']),
-        ),
-        onTap: () => _showPropertyListing(listing),
-      );
-    }).toList();
+    final lostPetMarkers = _lostPetReports
+        .where((report) {
+          return report['collection'] == 'pet_adoption_listings'
+              ? _isMapLayerVisible('adoptions')
+              : _isMapLayerVisible('lostPets');
+        })
+        .map((report) {
+          final isAdoption = report['collection'] == 'pet_adoption_listings';
+          final latitude = (report['latitude'] as num).toDouble();
+          final longitude = (report['longitude'] as num).toDouble();
+          final petName = report['pet_name']?.toString() ?? '';
+          final petType = _lostPetTypeLabel(report['pet_type']?.toString());
+          return Marker(
+            markerId: MarkerId(
+              '${isAdoption ? 'adoption' : 'lost-pet'}-${report['id']}',
+            ),
+            position: LatLng(latitude, longitude),
+            icon: BitmapDescriptor.defaultMarkerWithHue(
+              isAdoption ? BitmapDescriptor.hueGreen : BitmapDescriptor.hueRose,
+            ),
+            infoWindow: InfoWindow(
+              title: petName.isEmpty
+                  ? isAdoption
+                        ? 'Sahiplendirme ilanı'
+                        : 'Kayıp ${petType.toLowerCase()}'
+                  : petName,
+              snippet: isAdoption
+                  ? 'Sahiplendiriliyor • $petType • ${report['address']}'
+                  : '$petType • ${report['address']}',
+            ),
+            onTap: () => _showLostPetReport(report),
+          );
+        })
+        .toList();
+    final propertyMarkers = _propertyListings
+        .where((listing) {
+          return _isMapLayerVisible('properties') &&
+              (_activePropertyListingType == null ||
+                  listing['listing_type'] == _activePropertyListingType);
+        })
+        .map((listing) {
+          final latitude = (listing['latitude'] as num).toDouble();
+          final longitude = (listing['longitude'] as num).toDouble();
+          return Marker(
+            markerId: MarkerId('property-${listing['id']}'),
+            position: LatLng(latitude, longitude),
+            icon: BitmapDescriptor.defaultMarkerWithHue(
+              listing['listing_type'] == 'kiralik'
+                  ? BitmapDescriptor.hueAzure
+                  : BitmapDescriptor.hueOrange,
+            ),
+            infoWindow: InfoWindow(
+              title: listing['title']?.toString() ?? 'Konut ilanı',
+              snippet: _formatListingPrice(listing['price']),
+            ),
+            onTap: () => _showPropertyListing(listing),
+          );
+        })
+        .toList();
 
     final mapMarkers = <Marker>{
       ..._searchMarkers,
       ...roomMarkers,
       ...communityPlaceMarkers,
-      ...reportMarkers,
       ...savedAddressMarkers,
       ...lostPetMarkers,
       ...propertyMarkers,
@@ -5833,263 +6872,57 @@ out center tags;
       mapMarkers.add(currentVehicleMarker);
     }
 
-    return GoogleMap(
-      initialCameraPosition: const CameraPosition(
-        target: LatLng(41.0082, 28.9784),
-        zoom: 11.5,
-      ),
-      cameraTargetBounds: CameraTargetBounds(
-        LatLngBounds(
-          southwest: LatLng(35.8, 25.6),
-          northeast: LatLng(42.2, 44.8),
+    return Listener(
+      onPointerDown: (event) => _activeMapPointers.add(event.pointer),
+      onPointerUp: (event) => _activeMapPointers.remove(event.pointer),
+      onPointerCancel: (event) => _activeMapPointers.remove(event.pointer),
+      child: GoogleMap(
+        initialCameraPosition: const CameraPosition(
+          target: LatLng(41.0082, 28.9784),
+          zoom: 11.5,
         ),
-      ),
-      minMaxZoomPreference: const MinMaxZoomPreference(5.5, 20),
-      style: _darkGoogleMapStyle,
-      mapType: _mapType,
-      trafficEnabled: false,
-      myLocationEnabled: _locationPermissionGranted && !_isNavigationActive,
-      myLocationButtonEnabled: false,
-      zoomControlsEnabled: false,
-      compassEnabled: true,
-      markers: mapMarkers,
-      circles: roomGlowCircles,
-      polylines: {
-        ..._routePolylines,
-        if (_isNavigationActive) ..._navigationTrafficPolylines,
-      },
-      onMapCreated: (controller) {
-        _mapController = controller;
-        final currentPosition = _currentPosition;
-        if (currentPosition != null) {
-          unawaited(_centerOnPosition(currentPosition));
-        }
-      },
-      onTap: _handleRouteMapTap,
-      onLongPress: _selectMapLocation,
-      onCameraMoveStarted: () {
-        if (_isProgrammaticCameraMove || !_isFollowingCurrentPosition) return;
-        if (mounted) {
-          setState(() => _isFollowingCurrentPosition = false);
-        }
-      },
-    );
-  }
-
-  Color _reportMarkerColor(String type) {
-    switch (type) {
-      case 'Radar':
-        return const Color(0xFFFF6B00);
-      case 'Trafik':
-        return Colors.red;
-      case 'Yol çalışması':
-        return Colors.orange;
-      default:
-        return Colors.orange;
-    }
-  }
-
-  void _showRoadReportDialog(Map<String, dynamic> report) {
-    final reportId = report['id']?.toString();
-    final currentUser = FirebaseAuth.instance.currentUser;
-    final canVote =
-        reportId != null &&
-        currentUser != null &&
-        report['userId'] != currentUser.uid;
-    showModalBottomSheet(
-      context: context,
-      shape: const RoundedRectangleBorder(
-        borderRadius: BorderRadius.vertical(top: Radius.circular(24)),
-      ),
-      builder: (sheetContext) => StatefulBuilder(
-        builder: (context, setSheetState) {
-          final isSubmitting = report['isSubmittingFeedback'] == true;
-          return Padding(
-            padding: const EdgeInsets.fromLTRB(20, 22, 20, 28),
-            child: Column(
-              mainAxisSize: MainAxisSize.min,
-              crossAxisAlignment: CrossAxisAlignment.start,
-              children: [
-                Row(
-                  children: [
-                    Icon(
-                      _reportIcon(report['type'] as String),
-                      color: const Color(0xFFFF6B00),
-                      size: 28,
-                    ),
-                    const SizedBox(width: 12),
-                    Expanded(
-                      child: Text(
-                        report['type'] as String,
-                        style: const TextStyle(
-                          fontSize: 18,
-                          fontWeight: FontWeight.bold,
-                        ),
-                      ),
-                    ),
-                    IconButton(
-                      onPressed: () => Navigator.pop(context),
-                      icon: const Icon(Icons.close_rounded),
-                    ),
-                  ],
-                ),
-                const SizedBox(height: 12),
-                Text(
-                  report['description'] as String,
-                  style: const TextStyle(fontSize: 14, height: 1.4),
-                ),
-                const SizedBox(height: 8),
-                Text(
-                  'Topluluk bildirimi • ${report['time']}',
-                  style: TextStyle(color: Colors.grey.shade600, fontSize: 12),
-                ),
-                const SizedBox(height: 12),
-                Text(
-                  '${report['confirmationCount'] ?? 0} doğrulama • '
-                  '${report['incorrectCount'] ?? 0} yanlış bildirimi',
-                  style: TextStyle(color: Colors.grey.shade400, fontSize: 12),
-                ),
-                if (canVote) ...[
-                  const SizedBox(height: 12),
-                  Row(
-                    children: [
-                      Expanded(
-                        child: OutlinedButton.icon(
-                          onPressed: isSubmitting
-                              ? null
-                              : () => _sendRoadReportFeedback(
-                                  context,
-                                  setSheetState,
-                                  report,
-                                  reportId,
-                                  'confirmed',
-                                ),
-                          icon: const Icon(Icons.thumb_up_alt_outlined),
-                          label: const Text('Doğrula'),
-                        ),
-                      ),
-                      const SizedBox(width: 10),
-                      Expanded(
-                        child: OutlinedButton.icon(
-                          onPressed: isSubmitting
-                              ? null
-                              : () => _sendRoadReportFeedback(
-                                  context,
-                                  setSheetState,
-                                  report,
-                                  reportId,
-                                  'incorrect',
-                                ),
-                          icon: const Icon(Icons.flag_outlined),
-                          label: const Text('Yanlış bildir'),
-                        ),
-                      ),
-                    ],
-                  ),
-                ],
-              ],
-            ),
-          );
+        cameraTargetBounds: CameraTargetBounds(
+          LatLngBounds(
+            southwest: LatLng(35.8, 25.6),
+            northeast: LatLng(42.2, 44.8),
+          ),
+        ),
+        minMaxZoomPreference: const MinMaxZoomPreference(5.5, 20),
+        style: _darkGoogleMapStyle,
+        mapType: _mapType,
+        trafficEnabled: false,
+        myLocationEnabled: _locationPermissionGranted && !_isNavigationActive,
+        myLocationButtonEnabled: false,
+        zoomControlsEnabled: false,
+        compassEnabled: true,
+        markers: mapMarkers,
+        circles: roomGlowCircles,
+        polylines: {
+          ..._routePolylines,
+          ..._alternativeRoutePolylines,
+          if (_isNavigationActive) ..._navigationTrafficPolylines,
+        },
+        onMapCreated: (controller) {
+          _mapController = controller;
+          final currentPosition = _currentPosition;
+          if (currentPosition != null) {
+            unawaited(_centerOnPosition(currentPosition));
+          }
+        },
+        onTap: _handleRouteMapTap,
+        onLongPress: _selectMapLocation,
+        onCameraMoveStarted: () {
+          if (_isProgrammaticCameraMove ||
+              _activeMapPointers.isEmpty ||
+              !_isFollowingCurrentPosition) {
+            return;
+          }
+          if (mounted) {
+            setState(() => _isFollowingCurrentPosition = false);
+          }
         },
       ),
     );
-  }
-
-  Future<void> _sendRoadReportFeedback(
-    BuildContext sheetContext,
-    StateSetter setSheetState,
-    Map<String, dynamic> report,
-    String reportId,
-    String vote,
-  ) async {
-    setSheetState(() => report['isSubmittingFeedback'] = true);
-    try {
-      final user = FirebaseAuth.instance.currentUser;
-      if (user == null) throw StateError('sign-in-required');
-
-      final reportReference = FirebaseFirestore.instance
-          .collection('road_reports')
-          .doc(reportId);
-      final feedbackReference = reportReference
-          .collection('feedback')
-          .doc(user.uid);
-      final counterField = vote == 'confirmed'
-          ? 'confirmation_count'
-          : 'incorrect_count';
-
-      await FirebaseFirestore.instance.runTransaction((transaction) async {
-        final reportSnapshot = await transaction.get(reportReference);
-        final feedbackSnapshot = await transaction.get(feedbackReference);
-        if (!reportSnapshot.exists) throw StateError('report-missing');
-        if (feedbackSnapshot.exists) throw StateError('already-voted');
-
-        final reportData = reportSnapshot.data()!;
-        if (reportData['user_id'] == user.uid) {
-          throw StateError('own-report');
-        }
-        final expiresAt = reportData['expires_at'];
-        if (expiresAt is! Timestamp ||
-            !expiresAt.toDate().isAfter(DateTime.now())) {
-          throw StateError('report-expired');
-        }
-
-        transaction.set(feedbackReference, {
-          'vote': vote,
-          'created_at': FieldValue.serverTimestamp(),
-        });
-        transaction.update(reportReference, {
-          counterField: FieldValue.increment(1),
-        });
-      });
-
-      if (!mounted) return;
-      setState(() {
-        final index = _roadReports.indexWhere(
-          (item) => item['id']?.toString() == reportId,
-        );
-        if (index < 0) return;
-        final field = vote == 'confirmed'
-            ? 'confirmationCount'
-            : 'incorrectCount';
-        _roadReports[index][field] =
-            ((_roadReports[index][field] as int?) ?? 0) + 1;
-      });
-      if (sheetContext.mounted) Navigator.pop(sheetContext);
-      _showTrackingMessage(
-        vote == 'confirmed'
-            ? 'Bildirim doğrulandı.'
-            : 'Yanlış bildirim inceleme için işaretlendi.',
-      );
-    } catch (error) {
-      final message = error is StateError && error.message == 'already-voted'
-          ? 'Bu bildirim için zaten oy kullandın.'
-          : error is StateError && error.message == 'own-report'
-          ? 'Kendi bildirimini doğrulayamazsın.'
-          : error is StateError && error.message == 'report-expired'
-          ? 'Bu bildirimin süresi dolmuş.'
-          : error is StateError && error.message == 'sign-in-required'
-          ? 'Oy kullanmak için giriş yapmalısın.'
-          : 'Geri bildirimin kaydedilemedi.';
-      debugPrint('Yol bildirimi geri bildirimi kaydedilemedi: $error');
-      if (mounted) _showTrackingMessage(message);
-    } finally {
-      if (sheetContext.mounted) {
-        setSheetState(() => report['isSubmittingFeedback'] = false);
-      }
-    }
-  }
-
-  IconData _reportIcon(String type) {
-    switch (type) {
-      case 'Radar':
-        return Icons.speed_rounded;
-      case 'Trafik':
-        return Icons.traffic_rounded;
-      case 'Yol çalışması':
-        return Icons.construction_rounded;
-      default:
-        return Icons.car_crash_rounded;
-    }
   }
 
   void _showRoomMarkerDialog(Map<String, dynamic> room) {
@@ -6164,7 +6997,8 @@ out center tags;
                     );
                     return;
                   }
-                  if (room['isProtected'] == true) {
+                  if (room['isProtected'] == true &&
+                      !_canManageExploreHighlights) {
                     _showPasswordPromptDialog(room);
                   } else {
                     _openRoomChat(room);
@@ -6172,7 +7006,8 @@ out center tags;
                 },
               ),
             ),
-            if (room['ownerId'] == FirebaseAuth.instance.currentUser?.uid) ...[
+            if (room['ownerId'] == FirebaseAuth.instance.currentUser?.uid ||
+                _canManageExploreHighlights) ...[
               const SizedBox(height: 10),
               SizedBox(
                 width: double.infinity,
@@ -6209,17 +7044,28 @@ out center tags;
     _searchDebounce?.cancel();
     _tts.stop();
     _speech.stop();
-    _roadReportsSubscription?.cancel();
     _communityPlacesSubscription?.cancel();
     _roomsSubscription?.cancel();
-    _propertyListingsSubscription?.cancel();
-    _lostPetReportsSubscription?.cancel();
+    _mapPropertyListingsSubscription?.cancel();
+    _mapLostPetReportsSubscription?.cancel();
+    _mapAdoptionListingsSubscription?.cancel();
     _publicChatSubscription?.cancel();
-    _roadReportCleanupTimer?.cancel();
+    _searchHistorySubscription?.cancel();
+    _aiChatsSubscription?.cancel();
+    _pointLedgerSubscription?.cancel();
+    _dailyQuotaSubscription?.cancel();
+    _pointsProfileSubscription?.cancel();
+    _savedRoutesSubscription?.cancel();
+    _savedAddressesSubscription?.cancel();
+    _drivingHistorySubscription?.cancel();
+    _routeHistorySubscription?.cancel();
+    _sosContactsSubscription?.cancel();
     _roomExpiryTimer?.cancel();
     _positionSubscription?.cancel();
     _locationPositionSubscription?.cancel();
     _accelerometerSubscription?.cancel();
+    _magnetometerSubscription?.cancel();
+    _compassCameraUpdateTimer?.cancel();
     super.dispose();
   }
 
@@ -6415,30 +7261,58 @@ out center tags;
                         ),
                       ],
                     ),
-                    if (_chatSubTab == 1)
-                      ElevatedButton.icon(
-                        style: ElevatedButton.styleFrom(
-                          backgroundColor: const Color(0xFF191919),
-                          foregroundColor: const Color(0xFFFF6B00),
-                          elevation: 0,
-                          padding: const EdgeInsets.symmetric(
-                            horizontal: 10,
-                            vertical: 6,
+                    Row(
+                      mainAxisSize: MainAxisSize.min,
+                      children: [
+                        if (_chatSubTab == 0 && _canManageExploreHighlights)
+                          IconButton(
+                            tooltip: 'Genel sohbeti sıfırla',
+                            onPressed: _isResettingPublicChat
+                                ? null
+                                : _resetPublicChat,
+                            icon: _isResettingPublicChat
+                                ? const SizedBox(
+                                    width: 18,
+                                    height: 18,
+                                    child: CircularProgressIndicator(
+                                      strokeWidth: 2,
+                                      color: Colors.white,
+                                    ),
+                                  )
+                                : const Icon(
+                                    Icons.delete_sweep_rounded,
+                                    color: Colors.white,
+                                  ),
                           ),
-                          shape: RoundedRectangleBorder(
-                            borderRadius: BorderRadius.circular(12),
+                        if (_chatSubTab == 1)
+                          ElevatedButton.icon(
+                            style: ElevatedButton.styleFrom(
+                              backgroundColor: const Color(0xFF191919),
+                              foregroundColor: const Color(0xFFFF6B00),
+                              elevation: 0,
+                              padding: const EdgeInsets.symmetric(
+                                horizontal: 10,
+                                vertical: 6,
+                              ),
+                              shape: RoundedRectangleBorder(
+                                borderRadius: BorderRadius.circular(12),
+                              ),
+                            ),
+                            icon: const Icon(
+                              Icons.add_circle_outline,
+                              size: 18,
+                            ),
+                            label: const Text(
+                              'Oda Aç',
+                              style: TextStyle(
+                                fontSize: 12,
+                                fontWeight: FontWeight.bold,
+                              ),
+                            ),
+                            onPressed: _showCreateRoomDialog,
                           ),
-                        ),
-                        icon: const Icon(Icons.add_circle_outline, size: 18),
-                        label: const Text(
-                          'Oda Aç',
-                          style: TextStyle(
-                            fontSize: 12,
-                            fontWeight: FontWeight.bold,
-                          ),
-                        ),
-                        onPressed: _showCreateRoomDialog,
-                      ),
+                      ],
+                    ),
                   ],
                 ),
                 const SizedBox(height: 14),
@@ -6604,6 +7478,9 @@ out center tags;
       itemBuilder: (context, index) {
         final msg = _publicFeedMessages[index];
         final senderName = msg['sender']?.toString() ?? '';
+        final senderId = msg['senderId']?.toString() ?? '';
+        final messageId = msg['_document_id']?.toString() ?? '';
+        final currentUserId = FirebaseAuth.instance.currentUser?.uid;
         final distanceText = msg['distance']?.toString();
         return Container(
           margin: const EdgeInsets.only(bottom: 12),
@@ -6671,9 +7548,59 @@ out center tags;
                     ),
                   ),
                   const SizedBox(width: 8),
-                  Text(
-                    msg['time']!,
-                    style: TextStyle(color: Colors.grey.shade500, fontSize: 11),
+                  SizedBox(
+                    width:
+                        currentUserId != null &&
+                            senderId != currentUserId &&
+                            messageId.isNotEmpty
+                        ? 72
+                        : 32,
+                    child: Row(
+                      mainAxisAlignment: MainAxisAlignment.end,
+                      children: [
+                        Text(
+                          msg['time']!,
+                          style: TextStyle(
+                            color: Colors.grey.shade500,
+                            fontSize: 11,
+                          ),
+                        ),
+                        if (currentUserId != null &&
+                            senderId != currentUserId &&
+                            messageId.isNotEmpty) ...[
+                          const SizedBox(width: 2),
+                          IconButton(
+                            tooltip: 'Mesaj seçenekleri',
+                            padding: EdgeInsets.zero,
+                            visualDensity: VisualDensity.compact,
+                            constraints: const BoxConstraints.tightFor(
+                              width: 32,
+                              height: 32,
+                            ),
+                            icon: const Icon(
+                              Icons.more_vert,
+                              color: Color(0xFF8D8D8D),
+                              size: 20,
+                            ),
+                            onPressed: () {
+                              showModalBottomSheet<void>(
+                                context: context,
+                                builder: (sheetContext) => SafeArea(
+                                  child: ListTile(
+                                    leading: const Icon(Icons.flag_outlined),
+                                    title: const Text('Şikayet et'),
+                                    onTap: () {
+                                      Navigator.pop(sheetContext);
+                                      unawaited(_reportPublicChatMessage(msg));
+                                    },
+                                  ),
+                                ),
+                              );
+                            },
+                          ),
+                        ],
+                      ],
+                    ),
                   ),
                 ],
               ),
@@ -6797,14 +7724,6 @@ out center tags;
                             fontSize: 11,
                             fontWeight: FontWeight.bold,
                             color: Colors.amberAccent,
-                          ),
-                        ),
-                        const SizedBox(width: 8),
-                        Text(
-                          '• ${_generalGlobalRoom['activeUsers']}',
-                          style: const TextStyle(
-                            fontSize: 11,
-                            color: Colors.white70,
                           ),
                         ),
                       ],
@@ -7053,15 +7972,17 @@ out center tags;
                           );
                           return;
                         }
-                        if (isProtected) {
+                        if (isProtected && !_canManageExploreHighlights) {
                           _showPasswordPromptDialog(room);
                         } else {
                           _openRoomChat(room);
                         }
                       },
                       child: Text(
-                        isProtected
+                        isProtected && !_canManageExploreHighlights
                             ? 'Şifre ile odaya katıl'
+                            : _canManageExploreHighlights
+                            ? 'Yönetici olarak odaya gir'
                             : 'Odaya katıl ve mesaj yaz',
                         style: const TextStyle(
                           color: Colors.white,
@@ -7087,7 +8008,9 @@ out center tags;
       return;
     }
     final roomLimit = _isProUser ? _proRoomLimit : _dailyRoomLimit;
-    if (_roomsCreatedToday >= roomLimit) {
+    if (!_canManageExploreHighlights &&
+        _roomsCreatedToday >= roomLimit &&
+        _bonusChatRooms == 0) {
       _showProUpgradeModal();
       return;
     }
@@ -7151,7 +8074,9 @@ out center tags;
                   ),
                 ),
                 child: Text(
-                  _isProUser
+                  _canManageExploreHighlights
+                      ? 'Yönetici hesabı: sınırsız oda açma'
+                      : _isProUser
                       ? '✨ Navora Pro günlük oda hakkı: $_roomsCreatedToday / $_proRoomLimit'
                       : 'Günlük oda hakkı: $_roomsCreatedToday / $_dailyRoomLimit',
                   style: TextStyle(
@@ -7194,30 +8119,33 @@ out center tags;
                   borderRadius: BorderRadius.circular(14),
                   border: Border.all(color: const Color(0xFF2B2B2B)),
                 ),
-                child: SwitchListTile(
-                  contentPadding: EdgeInsets.zero,
-                  title: const Text(
-                    'Şifreli Oda Olsun mu?',
-                    style: TextStyle(
-                      fontSize: 13,
-                      fontWeight: FontWeight.bold,
-                      color: Colors.white,
+                child: Material(
+                  color: Colors.transparent,
+                  child: SwitchListTile(
+                    contentPadding: EdgeInsets.zero,
+                    title: const Text(
+                      'Şifreli Oda Olsun mu?',
+                      style: TextStyle(
+                        fontSize: 13,
+                        fontWeight: FontWeight.bold,
+                        color: Colors.white,
+                      ),
                     ),
+                    subtitle: const Text(
+                      'Sadece şifreyi bilenler katılabilir',
+                      style: TextStyle(fontSize: 11, color: Color(0xFFBDBDBD)),
+                    ),
+                    value: requiresPassword,
+                    activeTrackColor: const Color(0xFFFF6B00),
+                    activeThumbColor: Colors.white,
+                    inactiveThumbColor: const Color(0xFFBDBDBD),
+                    inactiveTrackColor: const Color(0xFF2B2B2B),
+                    onChanged: (val) {
+                      setModalState(() {
+                        requiresPassword = val;
+                      });
+                    },
                   ),
-                  subtitle: const Text(
-                    'Sadece şifreyi bilenler katılabilir',
-                    style: TextStyle(fontSize: 11, color: Color(0xFFBDBDBD)),
-                  ),
-                  value: requiresPassword,
-                  activeTrackColor: const Color(0xFFFF6B00),
-                  activeThumbColor: Colors.white,
-                  inactiveThumbColor: const Color(0xFFBDBDBD),
-                  inactiveTrackColor: const Color(0xFF2B2B2B),
-                  onChanged: (val) {
-                    setModalState(() {
-                      requiresPassword = val;
-                    });
-                  },
                 ),
               ),
               if (requiresPassword) ...[
@@ -7306,10 +8234,13 @@ out center tags;
                     }
 
                     final expiresAt = DateTime.now().add(_chatRoomLifetime);
+                    String? quotaReservationId;
+                    var quotaReserved = false;
                     try {
                       final roomReference = FirebaseFirestore.instance
                           .collection('chat_rooms')
                           .doc();
+                      quotaReservationId = roomReference.id;
                       final listingReference = FirebaseFirestore.instance
                           .collection('chat_room_listings')
                           .doc(roomReference.id);
@@ -7319,6 +8250,8 @@ out center tags;
                       final passwordHash = requiresPassword
                           ? await navoraHashRoomPassword(password, salt)
                           : null;
+                      await _reserveDailyQuota('room', roomReference.id);
+                      quotaReserved = true;
                       final batch = FirebaseFirestore.instance.batch();
                       batch.set(roomReference, {
                         'schema_version': 2,
@@ -7377,23 +8310,52 @@ out center tags;
                         'created_at': FieldValue.serverTimestamp(),
                       });
                       await batch.commit();
-                      if (mounted) {
-                        setState(() {
-                          _roomsCreatedToday++;
-                          _dailyQuotaDate = _dailyQuotaKey(DateTime.now());
-                        });
+                      quotaReserved = false;
+                      try {
+                        await _callQuotaCallable(
+                          'completeDailyQuotaReservation',
+                          {'reservationId': roomReference.id},
+                        );
+                      } catch (error) {
+                        debugPrint('Sohbet odası kotası tamamlanamadı: $error');
                       }
                     } catch (error) {
                       debugPrint('Sohbet odası oluşturulamadı: $error');
+                      if (quotaReserved && quotaReservationId != null) {
+                        try {
+                          await _callQuotaCallable(
+                            'cancelDailyQuotaReservation',
+                            {'reservationId': quotaReservationId},
+                          );
+                        } catch (releaseError) {
+                          debugPrint(
+                            'Sohbet odası kotası geri alınamadı: $releaseError',
+                          );
+                        }
+                      }
                       if (mounted) {
-                        _showTrackingMessage(
-                          'Oda oluşturulamadı. Tekrar deneyin.',
-                        );
+                        final quotaExceeded =
+                            error is FirebaseFunctionsException &&
+                            error.code == 'resource-exhausted';
+                        if (quotaExceeded) {
+                          _showProUpgradeModal();
+                        } else if (error is FirebaseFunctionsException &&
+                            error.code == 'unauthenticated') {
+                          _showTrackingMessage(
+                            'Oturum doğrulanamadı. Lütfen çıkış yapıp tekrar giriş yapın.',
+                          );
+                        } else if (error is FirebaseAuthException) {
+                          _showTrackingMessage(
+                            'Oturum doğrulanamadı. Lütfen tekrar giriş yapın.',
+                          );
+                        } else {
+                          _showTrackingMessage(
+                            'Oda oluşturulamadı. Tekrar deneyin.',
+                          );
+                        }
                       }
                       return;
                     }
-
-                    unawaited(_persistDailyQuota());
 
                     if (!context.mounted) return;
                     Navigator.pop(context);
@@ -7435,6 +8397,7 @@ out center tags;
       roomId,
       user.uid,
       passwordHash: passwordHash,
+      isAdmin: _canManageExploreHighlights,
     );
     if (!canEnter || !mounted) {
       if (mounted) _showTrackingMessage('Şifre hatalı veya oda dolu.');
@@ -7467,6 +8430,7 @@ out center tags;
     String roomId,
     String userId, {
     String? passwordHash,
+    bool isAdmin = false,
   }) async {
     try {
       final firestore = FirebaseFirestore.instance;
@@ -7486,13 +8450,15 @@ out center tags;
         }
         final listing = listingSnapshot.data()!;
         final isProtected = listing['is_protected'] == true;
-        if (isProtected && (passwordHash == null || passwordHash.isEmpty)) {
+        if (!isAdmin &&
+            isProtected &&
+            (passwordHash == null || passwordHash.isEmpty)) {
           return;
         }
         final activeCount =
             (listing['active_users_count'] as num?)?.toInt() ?? 1;
         final maxUsers = (listing['max_users'] as num?)?.toInt() ?? 50;
-        if (activeCount >= maxUsers) return;
+        if (!isAdmin && activeCount >= maxUsers) return;
 
         transaction.set(memberReference, {
           'password_hash': passwordHash ?? '',
@@ -7522,7 +8488,12 @@ out center tags;
   Future<void> _deleteRoom(Map<String, dynamic> room) async {
     final user = FirebaseAuth.instance.currentUser;
     final roomId = room['id']?.toString();
-    if (user == null || roomId == null || room['ownerId'] != user.uid) return;
+    final ownerId = (room['ownerId'] ?? room['owner_id'])?.toString();
+    if (user == null ||
+        roomId == null ||
+        (ownerId != user.uid && !_canManageExploreHighlights)) {
+      return;
+    }
     final shouldDelete = await showDialog<bool>(
       context: context,
       builder: (dialogContext) => AlertDialog(
@@ -8166,14 +9137,37 @@ out center tags;
                                     ),
                                   ],
                                 ),
-                                child: const CircleAvatar(
+                                child: CircleAvatar(
                                   radius: 40,
                                   backgroundColor: Color(0xFFEAF3FF),
-                                  child: Icon(
-                                    Icons.person,
-                                    size: 52,
-                                    color: Color(0xFFFF6B00),
-                                  ),
+                                  child:
+                                      _profilePhotoUrl == null ||
+                                          _profilePhotoUrl!.isEmpty
+                                      ? const Icon(
+                                          Icons.person,
+                                          size: 52,
+                                          color: Color(0xFFFF6B00),
+                                        )
+                                      : ClipOval(
+                                          child: SizedBox(
+                                            width: 80,
+                                            height: 80,
+                                            child: Image.network(
+                                              _profilePhotoUrl!,
+                                              fit: BoxFit.cover,
+                                              errorBuilder:
+                                                  (
+                                                    context,
+                                                    error,
+                                                    stackTrace,
+                                                  ) => const Icon(
+                                                    Icons.person,
+                                                    size: 52,
+                                                    color: Color(0xFFFF6B00),
+                                                  ),
+                                            ),
+                                          ),
+                                        ),
                                 ),
                               ),
                               Positioned(
@@ -8191,11 +9185,20 @@ out center tags;
                                       ),
                                     ],
                                   ),
-                                  child: const Icon(
-                                    Icons.camera_alt_rounded,
-                                    size: 14,
-                                    color: Color(0xFFFF6B00),
-                                  ),
+                                  child: _isUploadingProfilePhoto
+                                      ? const SizedBox(
+                                          width: 14,
+                                          height: 14,
+                                          child: CircularProgressIndicator(
+                                            strokeWidth: 2,
+                                            color: Color(0xFFFF6B00),
+                                          ),
+                                        )
+                                      : const Icon(
+                                          Icons.camera_alt_rounded,
+                                          size: 14,
+                                          color: Color(0xFFFF6B00),
+                                        ),
                                 ),
                               ),
                             ],
@@ -8378,6 +9381,34 @@ out center tags;
             _buildMyPropertyListings(),
           ],
 
+          if (_canManageExploreHighlights) ...[
+            const SizedBox(height: 10),
+            _buildProfileMenuItem(
+              icon: Icons.fact_check_outlined,
+              title: 'İlan inceleme',
+              subtitle: 'Yeni ilanları incele, onayla veya reddet',
+              onTap: () => unawaited(
+                Navigator.of(context).push<void>(
+                  MaterialPageRoute<void>(
+                    builder: (context) => const PropertyListingModerationPage(),
+                  ),
+                ),
+              ),
+            ),
+            _buildProfileMenuItem(
+              icon: Icons.report_gmailerrorred_rounded,
+              title: 'Sohbet şikayetleri',
+              subtitle: 'Bildirilen mesajları incele ve işlem yap',
+              onTap: () => unawaited(
+                Navigator.of(context).push<void>(
+                  MaterialPageRoute<void>(
+                    builder: (context) => const ChatMessageModerationPage(),
+                  ),
+                ),
+              ),
+            ),
+          ],
+
           const SizedBox(height: 22),
 
           const Text(
@@ -8537,10 +9568,13 @@ out center tags;
     final statusLabel = switch (status) {
       'active' => 'Yayında',
       'pending_review' => 'İncelemede',
+      'rejected' => 'Reddedildi',
       _ => 'Pasif',
     };
     final statusColor = isActive
         ? const Color(0xFF69C981)
+        : status == 'rejected'
+        ? const Color(0xFFFF8A80)
         : const Color(0xFFFFC266);
     final imageUrl = listing['cover_image_url']?.toString() ?? '';
 
@@ -8775,94 +9809,106 @@ out center tags;
               ),
               const SizedBox(height: 10),
               Expanded(
-                child: ListView.builder(
-                  itemCount: _savedAddresses.length,
-                  itemBuilder: (context, index) {
-                    final addr = _savedAddresses[index];
-                    IconData iconData = Icons.location_on;
-                    if (addr['type'] == 'home') iconData = Icons.home;
-                    if (addr['type'] == 'work') iconData = Icons.work;
-                    if (addr['type'] == 'favorite') iconData = Icons.star;
+                child: _savedAddresses.isEmpty
+                    ? const Center(
+                        child: Text(
+                          'Henüz kayıtlı yer yok. + simgesiyle ev, iş veya favori yer ekleyin.',
+                          textAlign: TextAlign.center,
+                          style: TextStyle(color: Colors.white70),
+                        ),
+                      )
+                    : ListView.builder(
+                        itemCount: _savedAddresses.length,
+                        itemBuilder: (context, index) {
+                          final addr = _savedAddresses[index];
+                          IconData iconData = Icons.location_on;
+                          if (addr['type'] == 'home') iconData = Icons.home;
+                          if (addr['type'] == 'work') iconData = Icons.work;
+                          if (addr['type'] == 'favorite') iconData = Icons.star;
 
-                    return Card(
-                      margin: const EdgeInsets.only(bottom: 10),
-                      color: const Color(0xFF1A1A1A),
-                      shape: RoundedRectangleBorder(
-                        borderRadius: BorderRadius.circular(14),
-                        side: const BorderSide(
-                          color: Color(0xFFFF8A3D),
-                          width: 1,
-                        ),
-                      ),
-                      child: ListTile(
-                        onTap: () async {
-                          Navigator.pop(context);
-                          await _goToSavedAddress(addr);
-                        },
-                        leading: CircleAvatar(
-                          backgroundColor: const Color(0xFFFF8A3D)
-                              .withValues(alpha: 0.14),
-                          child: Icon(iconData, color: const Color(0xFFFFB066)),
-                        ),
-                        title: Text(
-                          addr['title']!,
-                          style: const TextStyle(
-                            fontWeight: FontWeight.bold,
-                            color: Colors.white,
-                          ),
-                        ),
-                        subtitle: Text(
-                          addr['address']!,
-                          style: const TextStyle(
-                            fontSize: 12,
-                            color: Colors.white70,
-                          ),
-                        ),
-                        trailing: Row(
-                          mainAxisSize: MainAxisSize.min,
-                          children: [
-                            IconButton(
-                              tooltip: 'Adrese git',
-                              icon: const Icon(
-                                Icons.navigation_rounded,
-                                color: Color(0xFFFFB066),
-                                size: 20,
+                          return Card(
+                            margin: const EdgeInsets.only(bottom: 10),
+                            color: const Color(0xFF1A1A1A),
+                            shape: RoundedRectangleBorder(
+                              borderRadius: BorderRadius.circular(14),
+                              side: const BorderSide(
+                                color: Color(0xFFFF8A3D),
+                                width: 1,
                               ),
-                              onPressed: () async {
+                            ),
+                            child: ListTile(
+                              onTap: () async {
                                 Navigator.pop(context);
                                 await _goToSavedAddress(addr);
                               },
-                            ),
-                            IconButton(
-                              tooltip: 'Adresi sil',
-                              icon: const Icon(
-                                Icons.delete_outline,
-                                color: Colors.redAccent,
-                                size: 20,
+                              leading: CircleAvatar(
+                                backgroundColor: const Color(0xFFFF8A3D)
+                                    .withValues(alpha: 0.14),
+                                child: Icon(
+                                  iconData,
+                                  color: const Color(0xFFFFB066),
+                                ),
                               ),
-                              onPressed: () async {
-                                final user = FirebaseAuth.instance.currentUser;
-                                final addressId = addr['id'];
-                                if (user != null && addressId != null) {
-                                  await FirebaseFirestore.instance
-                                      .collection('users')
-                                      .doc(user.uid)
-                                      .collection('saved_addresses')
-                                      .doc(addressId)
-                                      .delete();
-                                }
-                                setState(() {
-                                  _savedAddresses.removeAt(index);
-                                });
-                                setModalState(() {});
-                              },
+                              title: Text(
+                                addr['title']!,
+                                style: const TextStyle(
+                                  fontWeight: FontWeight.bold,
+                                  color: Colors.white,
+                                ),
+                              ),
+                              subtitle: Text(
+                                addr['address']!,
+                                style: const TextStyle(
+                                  fontSize: 12,
+                                  color: Colors.white70,
+                                ),
+                              ),
+                              trailing: Row(
+                                mainAxisSize: MainAxisSize.min,
+                                children: [
+                                  IconButton(
+                                    tooltip: 'Adrese git',
+                                    icon: const Icon(
+                                      Icons.navigation_rounded,
+                                      color: Color(0xFFFFB066),
+                                      size: 20,
+                                    ),
+                                    onPressed: () async {
+                                      Navigator.pop(context);
+                                      await _goToSavedAddress(addr);
+                                    },
+                                  ),
+                                  IconButton(
+                                    tooltip: 'Adresi sil',
+                                    icon: const Icon(
+                                      Icons.delete_outline,
+                                      color: Colors.redAccent,
+                                      size: 20,
+                                    ),
+                                    onPressed: () async {
+                                      final user =
+                                          FirebaseAuth.instance.currentUser;
+                                      final addressId = addr['id'];
+                                      if (user != null && addressId != null) {
+                                        await FirebaseFirestore.instance
+                                            .collection('users')
+                                            .doc(user.uid)
+                                            .collection('saved_addresses')
+                                            .doc(addressId)
+                                            .delete();
+                                      }
+                                      setState(() {
+                                        _savedAddresses.removeAt(index);
+                                      });
+                                      setModalState(() {});
+                                    },
+                                  ),
+                                ],
+                              ),
                             ),
-                          ],
-                        ),
+                          );
+                        },
                       ),
-                    );
-                  },
-                ),
               ),
             ],
           ),
@@ -9774,30 +10820,6 @@ out center tags;
     _showTrackingMessage('Kayıtlı rota silindi.');
   }
 
-  Future<void> _shareSavedRoute(Map<String, String> route) async {
-    final user = FirebaseAuth.instance.currentUser;
-    if (user == null) {
-      _showTrackingMessage('Rota paylaşmak için hesabına giriş yap.');
-      return;
-    }
-    try {
-      final title = route['title']?.trim().isNotEmpty == true
-          ? route['title']!.trim()
-          : 'Paylaşılan rota';
-      final start = route['start']?.trim();
-      final destination = route['destination']?.trim();
-      final shareText = [
-        title,
-        if (start != null && start.isNotEmpty) 'Başlangıç: $start',
-        if (destination != null && destination.isNotEmpty)
-          'Varış: $destination',
-      ].join('\n');
-      await SharePlus.instance.share(ShareParams(text: shareText));
-    } catch (_) {
-      if (mounted) _showTrackingMessage('Rota bağlantısı oluşturulamadı.');
-    }
-  }
-
   void _showSavedRoutesSheet() {
     showModalBottomSheet<void>(
       context: context,
@@ -9892,12 +10914,6 @@ out center tags;
                                   },
                                 ),
                                 IconButton(
-                                  tooltip: 'Rotayı paylaş',
-                                  icon: const Icon(Icons.share_outlined),
-                                  onPressed: () =>
-                                      unawaited(_shareSavedRoute(route)),
-                                ),
-                                IconButton(
                                   tooltip: 'Rotayı sil',
                                   icon: const Icon(
                                     Icons.delete_outline,
@@ -9944,6 +10960,7 @@ out center tags;
               debugPrint('Konum akışı durdu: $error');
               if (!mounted) return;
               setState(() => _isLocationTracking = false);
+              unawaited(_stopCompassTracking());
               _showTrackingMessage(
                 'Konum takibi durdu. GPS ayarlarını kontrol edin.',
               );
@@ -9955,6 +10972,7 @@ out center tags;
         _isLocationTracking = true;
         _isFollowingCurrentPosition = true;
       });
+      await _startCompassTracking();
       await _centerOnPosition(position);
     } catch (error) {
       debugPrint('Konum alınırken hata: $error');
@@ -9965,6 +10983,7 @@ out center tags;
   void _handleLocationPosition(geo.Position position) {
     if (!mounted) return;
     setState(() => _currentPosition = position);
+    unawaited(_updateCurrentAddress(position));
     if (navoraShouldFollowCurrentPosition(
       isNavigationActive: _isNavigationActive,
       isDriveTracking: _isDriveTracking,
@@ -9997,26 +11016,22 @@ out center tags;
       _currentPosition = position;
       _driveStartedAt = DateTime.now();
       _driveDistanceKm = 0;
-      _vehicleStartKm = _parseVehicleKm();
       _positionSubscription = geo.Geolocator.getPositionStream(
         locationSettings: const geo.LocationSettings(
           accuracy: geo.LocationAccuracy.high,
           distanceFilter: 10,
         ),
       ).listen(_handleDrivePosition);
-      _accelerometerSubscription = sensors
-          .accelerometerEventStream(
-            samplingPeriod: sensors.SensorInterval.normalInterval,
-          )
-          .listen(_handleAccelerometer);
       if (!mounted) return;
       setState(() {
         _isDriveTracking = true;
       });
+      await _startCompassTracking();
       await _centerOnPosition(position);
     } catch (_) {
       await _positionSubscription?.cancel();
       _positionSubscription = null;
+      await _stopCompassTracking();
       if (mounted) {
         setState(() => _isDriveTracking = false);
         _showTrackingMessage(
@@ -10086,19 +11101,30 @@ out center tags;
 
   void _handleDrivePosition(geo.Position position) {
     final previousPosition = _lastDrivePosition;
-    if (previousPosition != null) {
+    final hasReliableNavigationPosition =
+        !_isNavigationActive ||
+        navoraHasReliableNavigationPosition(position.accuracy);
+    if (previousPosition != null &&
+        hasReliableNavigationPosition &&
+        (!_isNavigationActive ||
+            navoraHasReliableNavigationPosition(previousPosition.accuracy))) {
       final deltaKm = navoraSafeDistanceKm(previousPosition, position);
       if (deltaKm > 0) {
         _driveDistanceKm += deltaKm;
       }
     }
 
-    _announceUpcomingNavigationStep(position);
+    if (hasReliableNavigationPosition) {
+      _announceUpcomingNavigationStep(position);
+      _checkNavigationArrival(position);
+      _refreshNavigationRouteIfNeeded(position);
+    }
     _lastDrivePosition = position;
     if (!mounted) return;
     setState(() {
       _currentPosition = position;
-      _vehicleKm = _formatVehicleKm(_vehicleStartKm + _driveDistanceKm);
+      _isGpsAccuracyDegraded =
+          _isNavigationActive && !hasReliableNavigationPosition;
       _refreshLiveRoomDistances();
     });
     if (navoraShouldFollowCurrentPosition(
@@ -10110,14 +11136,30 @@ out center tags;
       Future.microtask(() => _centerOnPosition(position));
     }
     _updateCurrentAddress(position);
-    _refreshNavigationRouteIfNeeded(position);
+  }
+
+  void _checkNavigationArrival(geo.Position position) {
+    final destination = _selectedDestinationCoordinate;
+    if (!_isNavigationActive || _hasAnnouncedArrival || destination == null) {
+      return;
+    }
+    final distanceMeters = geo.Geolocator.distanceBetween(
+      position.latitude,
+      position.longitude,
+      destination.latitude,
+      destination.longitude,
+    );
+    if (!navoraIsWithinArrivalRadius(distanceMeters)) return;
+
+    _hasAnnouncedArrival = true;
+    unawaited(_speakNavigation('Varış noktanıza yaklaştınız.'));
+    _showTrackingMessage('Varış noktanıza yaklaştınız.');
   }
 
   Future<void> _stopDriveTracking() async {
     await _positionSubscription?.cancel();
     _positionSubscription = null;
-    await _accelerometerSubscription?.cancel();
-    _accelerometerSubscription = null;
+    await _stopCompassTracking();
     final startedAt = _driveStartedAt;
     final distance = double.parse(_driveDistanceKm.toStringAsFixed(2));
     final durationMinutes = startedAt == null
@@ -10135,15 +11177,14 @@ out center tags;
     setState(() {
       _isDriveTracking = false;
       _clearRouteState();
-      _vehicleKm = _formatVehicleKm(_vehicleStartKm + distance);
     });
     await _resetNavigationCamera();
-    unawaited(_persistVehicleProfile());
     await _tts.stop();
   }
 
   void _announceUpcomingNavigationStep(geo.Position position) {
     if (!_isNavigationActive ||
+        !navoraHasReliableNavigationPosition(position.accuracy) ||
         _navigationStepIndex >= _navigationSteps.length) {
       return;
     }
@@ -10170,6 +11211,11 @@ out center tags;
   }
 
   void _handleAccelerometer(sensors.AccelerometerEvent event) {
+    _gravityX = _gravityX == null ? event.x : _gravityX! * 0.8 + event.x * 0.2;
+    _gravityY = _gravityY == null ? event.y : _gravityY! * 0.8 + event.y * 0.2;
+    _gravityZ = _gravityZ == null ? event.z : _gravityZ! * 0.8 + event.z * 0.2;
+    _updateDeviceHeading();
+
     final recentlyAlerted =
         _lastCrashAlertAt != null &&
         DateTime.now().difference(_lastCrashAlertAt!) <
@@ -10183,6 +11229,110 @@ out center tags;
 
     _lastCrashAlertAt = DateTime.now();
     _showCrashConfirmation();
+  }
+
+  void _handleMagnetometer(sensors.MagnetometerEvent event) {
+    _magneticField = event;
+    _updateDeviceHeading();
+  }
+
+  void _updateDeviceHeading() {
+    final gravityX = _gravityX;
+    final gravityY = _gravityY;
+    final gravityZ = _gravityZ;
+    final magneticField = _magneticField;
+    if (gravityX == null ||
+        gravityY == null ||
+        gravityZ == null ||
+        magneticField == null) {
+      return;
+    }
+
+    final heading = navoraCalculateCompassHeading(
+      accelerationX: gravityX,
+      accelerationY: gravityY,
+      accelerationZ: gravityZ,
+      magneticX: magneticField.x,
+      magneticY: magneticField.y,
+      magneticZ: magneticField.z,
+    );
+    if (heading == null) return;
+    _deviceHeading = _deviceHeading == null
+        ? heading
+        : navoraSmoothBearing(_deviceHeading!, heading, factor: 0.2);
+    _queueCompassCameraUpdate();
+  }
+
+  Future<void> _startCompassTracking() async {
+    await _accelerometerSubscription?.cancel();
+    await _magnetometerSubscription?.cancel();
+    _gravityX = null;
+    _gravityY = null;
+    _gravityZ = null;
+    _magneticField = null;
+    _accelerometerSubscription = sensors
+        .accelerometerEventStream(
+          samplingPeriod: sensors.SensorInterval.normalInterval,
+        )
+        .listen(
+          _handleAccelerometer,
+          onError: (Object error) {
+            debugPrint('Pusula ivmeölçer akışı durdu: $error');
+          },
+        );
+    _magnetometerSubscription = sensors
+        .magnetometerEventStream(
+          samplingPeriod: sensors.SensorInterval.normalInterval,
+        )
+        .listen(
+          _handleMagnetometer,
+          onError: (Object error) {
+            debugPrint('Pusula manyetometre akışı durdu: $error');
+          },
+        );
+  }
+
+  Future<void> _stopCompassTracking() async {
+    _compassCameraUpdateTimer?.cancel();
+    _compassCameraUpdateTimer = null;
+    await _accelerometerSubscription?.cancel();
+    _accelerometerSubscription = null;
+    await _magnetometerSubscription?.cancel();
+    _magnetometerSubscription = null;
+  }
+
+  void _queueCompassCameraUpdate() {
+    final position = _currentPosition;
+    final deviceHeading = _deviceHeading;
+    if (position != null &&
+        position.speed >= 0.8 &&
+        position.heading.isFinite &&
+        position.heading >= 0 &&
+        position.heading < 360) {
+      return;
+    }
+    if (_hasMapBearing &&
+        deviceHeading != null &&
+        ((_mapBearing - deviceHeading + 540) % 360 - 180).abs() < 1.5) {
+      return;
+    }
+
+    if (_compassCameraUpdateTimer != null ||
+        !navoraShouldFollowCurrentPosition(
+          isNavigationActive: _isNavigationActive,
+          isDriveTracking: _isDriveTracking,
+          isLocationTracking: _isLocationTracking,
+          isFollowing: _isFollowingCurrentPosition,
+        )) {
+      return;
+    }
+
+    _compassCameraUpdateTimer = Timer(const Duration(milliseconds: 180), () {
+      _compassCameraUpdateTimer = null;
+      final currentPosition = _currentPosition;
+      if (!mounted || currentPosition == null) return;
+      unawaited(_centerOnPosition(currentPosition));
+    });
   }
 
   Future<void> _showCrashConfirmation() async {
@@ -10318,21 +11468,25 @@ out center tags;
     final controller = _mapController;
     if (controller == null) return;
 
+    final hasGpsHeading =
+        position.heading.isFinite &&
+        position.heading >= 0 &&
+        position.heading < 360 &&
+        position.speed >= 0.8;
+    final nextHeading = hasGpsHeading ? position.heading : _deviceHeading;
+    if (nextHeading != null) {
+      _mapBearing = _hasMapBearing
+          ? navoraSmoothBearing(_mapBearing, nextHeading)
+          : nextHeading;
+      _hasMapBearing = true;
+    }
+
     if (_isNavigationActive) {
-      if (position.heading.isFinite &&
-          position.heading >= 0 &&
-          position.heading < 360 &&
-          position.speed >= 0.8) {
-        _navigationBearing = _hasNavigationBearing
-            ? navoraSmoothBearing(_navigationBearing, position.heading)
-            : position.heading;
-        _hasNavigationBearing = true;
-      }
       final currentPosition = LatLng(position.latitude, position.longitude);
       final lookAheadMeters = (position.speed * 3).clamp(45.0, 110.0);
       final cameraTarget = navoraOffsetCameraTarget(
         currentPosition,
-        _navigationBearing,
+        _mapBearing,
         lookAheadMeters,
       );
       _isProgrammaticCameraMove = true;
@@ -10342,8 +11496,26 @@ out center tags;
             CameraPosition(
               target: cameraTarget,
               zoom: 17,
-              bearing: _navigationBearing,
+              bearing: _mapBearing,
               tilt: _isMapTilted ? 48 : 0,
+            ),
+          ),
+        );
+      } finally {
+        _isProgrammaticCameraMove = false;
+      }
+      return;
+    }
+
+    if (_isDriveTracking || _isLocationTracking) {
+      _isProgrammaticCameraMove = true;
+      try {
+        await controller.animateCamera(
+          CameraUpdate.newCameraPosition(
+            CameraPosition(
+              target: LatLng(position.latitude, position.longitude),
+              zoom: 16,
+              bearing: _hasMapBearing ? _mapBearing : 0,
             ),
           ),
         );
@@ -10399,286 +11571,544 @@ out center tags;
     );
   }
 
-  void _showSosContactsDialog() {
-    showModalBottomSheet(
+  Future<void> _showSosContactsDialog() async {
+    var isAddingContact = false;
+    var isSavingContact = false;
+    final nameController = TextEditingController();
+    final phoneController = TextEditingController();
+    final relationController = TextEditingController();
+    final formKey = GlobalKey<FormState>();
+
+    await showModalBottomSheet<void>(
       context: context,
       backgroundColor: const Color(0xFF191919),
       shape: const RoundedRectangleBorder(
         borderRadius: BorderRadius.vertical(top: Radius.circular(24)),
       ),
       builder: (context) => StatefulBuilder(
-        builder: (context, setModalState) => Container(
-          padding: const EdgeInsets.all(20),
-          height: MediaQuery.of(context).size.height * 0.55,
-          child: Column(
-            crossAxisAlignment: CrossAxisAlignment.start,
-            children: [
-              Row(
-                mainAxisAlignment: MainAxisAlignment.spaceBetween,
-                children: [
-                  const Text(
-                    'Acil Durum (SOS) Kişileri',
-                    style: TextStyle(
-                      fontSize: 18,
-                      fontWeight: FontWeight.bold,
-                      color: Colors.white,
+        builder: (context, setModalState) {
+          Future<void> saveContact() async {
+            if (!formKey.currentState!.validate() || isSavingContact) return;
+            final user = FirebaseAuth.instance.currentUser;
+            if (user == null) {
+              _showTrackingMessage(
+                'Acil durum kişilerini kaydetmek için giriş yapmalısınız.',
+              );
+              return;
+            }
+            final contact = <String, String>{
+              'name': nameController.text.trim(),
+              'phone': phoneController.text.trim(),
+              'relation': relationController.text.trim().isEmpty
+                  ? 'Yakın kişi'
+                  : relationController.text.trim(),
+            };
+            setModalState(() => isSavingContact = true);
+            try {
+              final document = await FirebaseFirestore.instance
+                  .collection('users')
+                  .doc(user.uid)
+                  .collection('sos_contacts')
+                  .add(contact);
+              contact['id'] = document.id;
+              if (!mounted) return;
+              setState(() => _sosContacts.add(contact));
+              nameController.clear();
+              phoneController.clear();
+              relationController.clear();
+              setModalState(() {
+                isSavingContact = false;
+                isAddingContact = false;
+              });
+            } catch (error) {
+              debugPrint('Acil durum kişisi kaydedilemedi: $error');
+              if (mounted) {
+                _showTrackingMessage('Acil durum kişisi kaydedilemedi.');
+                setModalState(() => isSavingContact = false);
+              }
+            }
+          }
+
+          return Container(
+            padding: const EdgeInsets.all(20),
+            height: MediaQuery.of(context).size.height * 0.55,
+            child: Column(
+              crossAxisAlignment: CrossAxisAlignment.start,
+              children: [
+                Row(
+                  mainAxisAlignment: MainAxisAlignment.spaceBetween,
+                  children: [
+                    Text(
+                      isAddingContact
+                          ? 'Acil durum kişisi ekle'
+                          : 'Acil Durum (SOS) Kişileri',
+                      style: const TextStyle(
+                        fontSize: 18,
+                        fontWeight: FontWeight.bold,
+                        color: Colors.white,
+                      ),
                     ),
+                    if (!isAddingContact)
+                      Row(
+                        children: [
+                          IconButton(
+                            tooltip: 'Kişi ekle',
+                            icon: const Icon(
+                              Icons.person_add_alt_1,
+                              color: Color(0xFFFFB066),
+                            ),
+                            onPressed: () {
+                              if (FirebaseAuth.instance.currentUser == null) {
+                                _showTrackingMessage(
+                                  'Acil durum kişilerini kaydetmek için giriş yapmalısınız.',
+                                );
+                                return;
+                              }
+                              setModalState(() => isAddingContact = true);
+                            },
+                          ),
+                          IconButton(
+                            icon: const Icon(
+                              Icons.close,
+                              color: Colors.white70,
+                            ),
+                            onPressed: () => Navigator.pop(context),
+                          ),
+                        ],
+                      ),
+                  ],
+                ),
+                if (isAddingContact) ...[
+                  const SizedBox(height: 6),
+                  const Text(
+                    'Kaza durumunda ulaşılabilecek bir kişiyi ekleyin.',
+                    style: TextStyle(fontSize: 12, color: Colors.white70),
                   ),
-                  Row(
-                    children: [
-                      IconButton(
-                        tooltip: 'Kişi ekle',
-                        icon: const Icon(
-                          Icons.person_add_alt_1,
-                          color: Color(0xFFFFB066),
-                        ),
-                        onPressed: () async {
-                          final contact = await _showAddSosContactDialog();
-                          if (contact == null || !mounted) return;
-                          final user = FirebaseAuth.instance.currentUser;
-                          if (user != null) {
-                            final document = await FirebaseFirestore.instance
-                                .collection('users')
-                                .doc(user.uid)
-                                .collection('sos_contacts')
-                                .add(contact);
-                            contact['id'] = document.id;
-                          }
-                          setState(() => _sosContacts.add(contact));
-                          setModalState(() {});
-                        },
-                      ),
-                      IconButton(
-                        icon: const Icon(Icons.close, color: Colors.white70),
-                        onPressed: () => Navigator.pop(context),
-                      ),
-                    ],
-                  ),
-                ],
-              ),
-              const SizedBox(height: 6),
-              const Text(
-                'Kaza veya acil durumlarda otomatik bilgilendirilecek kişiler.',
-                style: TextStyle(fontSize: 12, color: Colors.white70),
-              ),
-              const SizedBox(height: 14),
-              Expanded(
-                child: ListView.builder(
-                  itemCount: _sosContacts.length,
-                  itemBuilder: (context, index) {
-                    final sos = _sosContacts[index];
-                    return Card(
-                      margin: const EdgeInsets.only(bottom: 10),
-                      color: const Color(0xFF1A1A1A),
-                      shape: RoundedRectangleBorder(
-                        borderRadius: BorderRadius.circular(14),
-                        side: const BorderSide(
-                          color: Color(0xFFFF8A3D),
-                          width: 1,
-                        ),
-                      ),
-                      child: ListTile(
-                        leading: const CircleAvatar(
-                          backgroundColor: Color(0xFFFF8A3D),
-                          child: Icon(
-                            Icons.phone_in_talk,
-                            color: Colors.white,
-                            size: 20,
-                          ),
-                        ),
-                        title: Text(
-                          sos['name']!,
-                          style: const TextStyle(
-                            fontWeight: FontWeight.bold,
-                            fontSize: 13,
-                            color: Colors.white,
-                          ),
-                        ),
-                        subtitle: Text(
-                          '${sos['phone']} • ${sos['relation']}',
-                          style: const TextStyle(
-                            fontSize: 11,
-                            color: Colors.white70,
-                          ),
-                        ),
-                        trailing: Row(
-                          mainAxisSize: MainAxisSize.min,
+                  const SizedBox(height: 14),
+                  Expanded(
+                    child: SingleChildScrollView(
+                      child: Form(
+                        key: formKey,
+                        child: Column(
                           children: [
-                            IconButton(
-                              tooltip: 'Ara',
-                              icon: const Icon(
-                                Icons.call,
-                                color: Color(0xFFFFB066),
+                            TextFormField(
+                              controller: nameController,
+                              textCapitalization: TextCapitalization.words,
+                              textInputAction: TextInputAction.next,
+                              style: const TextStyle(color: Colors.white),
+                              decoration: _sosContactInputDecoration(
+                                label: 'Ad soyad',
+                                icon: Icons.person_outline_rounded,
                               ),
-                              onPressed: () => _callSosContact(sos),
+                              validator: (value) =>
+                                  value == null || value.trim().isEmpty
+                                  ? 'Ad soyad alanını doldurun.'
+                                  : null,
                             ),
-                            IconButton(
-                              tooltip: 'Mesaj hazırla',
-                              icon: const Icon(
-                                Icons.sms_outlined,
-                                color: Color(0xFFFF8A3D),
+                            const SizedBox(height: 12),
+                            TextFormField(
+                              controller: phoneController,
+                              keyboardType: TextInputType.phone,
+                              textInputAction: TextInputAction.next,
+                              style: const TextStyle(color: Colors.white),
+                              decoration: _sosContactInputDecoration(
+                                label: 'Telefon numarası',
+                                icon: Icons.phone_outlined,
+                                hint: '+90 5XX XXX XX XX',
                               ),
-                              onPressed: () => _messageSosContact(sos),
-                            ),
-                            IconButton(
-                              tooltip: 'Kişiyi sil',
-                              icon: const Icon(
-                                Icons.delete_outline,
-                                color: Colors.redAccent,
-                              ),
-                              onPressed: () async {
-                                final user = FirebaseAuth.instance.currentUser;
-                                final contactId = sos['id'];
-                                if (user != null && contactId != null) {
-                                  await FirebaseFirestore.instance
-                                      .collection('users')
-                                      .doc(user.uid)
-                                      .collection('sos_contacts')
-                                      .doc(contactId)
-                                      .delete();
+                              validator: (value) {
+                                final digits =
+                                    value?.replaceAll(RegExp(r'\D'), '') ?? '';
+                                if (digits.isEmpty) {
+                                  return 'Telefon numarasını doldurun.';
                                 }
-                                setState(() => _sosContacts.removeAt(index));
-                                setModalState(() {});
+                                if (digits.length < 7) {
+                                  return 'Geçerli bir telefon numarası girin.';
+                                }
+                                return null;
                               },
+                            ),
+                            const SizedBox(height: 12),
+                            TextFormField(
+                              controller: relationController,
+                              textCapitalization: TextCapitalization.sentences,
+                              textInputAction: TextInputAction.done,
+                              style: const TextStyle(color: Colors.white),
+                              decoration: _sosContactInputDecoration(
+                                label: 'Yakınlık (isteğe bağlı)',
+                                icon: Icons.people_outline_rounded,
+                                hint: 'Örn. Aile, arkadaş',
+                              ),
+                              onFieldSubmitted: (_) => saveContact(),
                             ),
                           ],
                         ),
                       ),
-                    );
-                  },
+                    ),
+                  ),
+                  const SizedBox(height: 12),
+                  Row(
+                    children: [
+                      Expanded(
+                        child: OutlinedButton(
+                          onPressed: isSavingContact
+                              ? null
+                              : () {
+                                  FocusScope.of(context).unfocus();
+                                  setModalState(() {
+                                    isAddingContact = false;
+                                    formKey.currentState?.reset();
+                                  });
+                                },
+                          style: OutlinedButton.styleFrom(
+                            foregroundColor: Colors.white70,
+                            side: const BorderSide(color: Colors.white24),
+                            padding: const EdgeInsets.symmetric(vertical: 14),
+                          ),
+                          child: const Text('Vazgeç'),
+                        ),
+                      ),
+                      const SizedBox(width: 12),
+                      Expanded(
+                        child: FilledButton.icon(
+                          onPressed: isSavingContact ? null : saveContact,
+                          icon: isSavingContact
+                              ? const SizedBox(
+                                  width: 18,
+                                  height: 18,
+                                  child: CircularProgressIndicator(
+                                    strokeWidth: 2,
+                                  ),
+                                )
+                              : const Icon(Icons.person_add_alt_1, size: 18),
+                          label: Text(
+                            isSavingContact ? 'Kaydediliyor' : 'Kişiyi ekle',
+                          ),
+                          style: FilledButton.styleFrom(
+                            backgroundColor: const Color(0xFFFF7A00),
+                            foregroundColor: Colors.white,
+                            padding: const EdgeInsets.symmetric(vertical: 14),
+                          ),
+                        ),
+                      ),
+                    ],
+                  ),
+                ] else ...[
+                  const SizedBox(height: 6),
+                  const Text(
+                    'Kaza veya acil durumlarda otomatik bilgilendirilecek kişiler.',
+                    style: TextStyle(fontSize: 12, color: Colors.white70),
+                  ),
+                  const SizedBox(height: 14),
+                  Expanded(
+                    child: ListView.builder(
+                      itemCount: _sosContacts.length,
+                      itemBuilder: (context, index) {
+                        final sos = _sosContacts[index];
+                        return Card(
+                          margin: const EdgeInsets.only(bottom: 10),
+                          color: const Color(0xFF1A1A1A),
+                          shape: RoundedRectangleBorder(
+                            borderRadius: BorderRadius.circular(14),
+                            side: const BorderSide(
+                              color: Color(0xFFFF8A3D),
+                              width: 1,
+                            ),
+                          ),
+                          child: ListTile(
+                            leading: const CircleAvatar(
+                              backgroundColor: Color(0xFFFF8A3D),
+                              child: Icon(
+                                Icons.phone_in_talk,
+                                color: Colors.white,
+                                size: 20,
+                              ),
+                            ),
+                            title: Text(
+                              sos['name']!,
+                              style: const TextStyle(
+                                fontWeight: FontWeight.bold,
+                                fontSize: 13,
+                                color: Colors.white,
+                              ),
+                            ),
+                            subtitle: Text(
+                              '${sos['phone']} • ${sos['relation']}',
+                              style: const TextStyle(
+                                fontSize: 11,
+                                color: Colors.white70,
+                              ),
+                            ),
+                            trailing: Row(
+                              mainAxisSize: MainAxisSize.min,
+                              children: [
+                                IconButton(
+                                  tooltip: 'Ara',
+                                  icon: const Icon(
+                                    Icons.call,
+                                    color: Color(0xFFFFB066),
+                                  ),
+                                  onPressed: () => _callSosContact(sos),
+                                ),
+                                IconButton(
+                                  tooltip: 'Mesaj hazırla',
+                                  icon: const Icon(
+                                    Icons.sms_outlined,
+                                    color: Color(0xFFFF8A3D),
+                                  ),
+                                  onPressed: () => _messageSosContact(sos),
+                                ),
+                                IconButton(
+                                  tooltip: 'Kişiyi sil',
+                                  icon: const Icon(
+                                    Icons.delete_outline,
+                                    color: Colors.redAccent,
+                                  ),
+                                  onPressed: () async {
+                                    final user =
+                                        FirebaseAuth.instance.currentUser;
+                                    final contactId = sos['id'];
+                                    if (user == null || contactId == null) {
+                                      _showTrackingMessage(
+                                        'Kaydedilmiş SOS kişisi bulunamadı.',
+                                      );
+                                      return;
+                                    }
+                                    try {
+                                      await FirebaseFirestore.instance
+                                          .collection('users')
+                                          .doc(user.uid)
+                                          .collection('sos_contacts')
+                                          .doc(contactId)
+                                          .delete();
+                                    } catch (error) {
+                                      debugPrint(
+                                        'Acil durum kişisi silinemedi: $error',
+                                      );
+                                      if (mounted) {
+                                        _showTrackingMessage(
+                                          'Acil durum kişisi silinemedi.',
+                                        );
+                                      }
+                                      return;
+                                    }
+                                    setState(
+                                      () => _sosContacts.removeAt(index),
+                                    );
+                                    setModalState(() {});
+                                  },
+                                ),
+                              ],
+                            ),
+                          ),
+                        );
+                      },
+                    ),
+                  ),
+                ],
+              ],
+            ),
+          );
+        },
+      ),
+    );
+
+    nameController.dispose();
+    phoneController.dispose();
+    relationController.dispose();
+  }
+
+  InputDecoration _sosContactInputDecoration({
+    required String label,
+    required IconData icon,
+    String? hint,
+  }) => InputDecoration(
+    labelText: label,
+    hintText: hint,
+    labelStyle: const TextStyle(color: Color(0xFFFFB066)),
+    hintStyle: const TextStyle(color: Colors.white38, fontSize: 13),
+    prefixIcon: Icon(icon, color: const Color(0xFFFFB066)),
+    filled: true,
+    fillColor: const Color(0xFF222222),
+    errorStyle: const TextStyle(color: Color(0xFFFF8A80)),
+    enabledBorder: OutlineInputBorder(
+      borderRadius: BorderRadius.circular(14),
+      borderSide: const BorderSide(color: Color(0xFF393939)),
+    ),
+    focusedBorder: OutlineInputBorder(
+      borderRadius: BorderRadius.circular(14),
+      borderSide: const BorderSide(color: Color(0xFFFF8A3D)),
+    ),
+    errorBorder: OutlineInputBorder(
+      borderRadius: BorderRadius.circular(14),
+      borderSide: const BorderSide(color: Color(0xFFFF5252)),
+    ),
+    focusedErrorBorder: OutlineInputBorder(
+      borderRadius: BorderRadius.circular(14),
+      borderSide: const BorderSide(color: Color(0xFFFF5252)),
+    ),
+  );
+
+  Future<void> _showPhotoUploadDialog() async {
+    if (_isUploadingProfilePhoto) return;
+    if (FirebaseAuth.instance.currentUser == null) {
+      _showTrackingMessage(
+        'Profil fotoğrafı eklemek için hesabınıza giriş yapın.',
+      );
+      return;
+    }
+
+    final source = await showModalBottomSheet<ImageSource>(
+      context: context,
+      backgroundColor: const Color(0xFF191919),
+      shape: const RoundedRectangleBorder(
+        borderRadius: BorderRadius.vertical(top: Radius.circular(24)),
+      ),
+      builder: (context) => SafeArea(
+        child: Container(
+          padding: const EdgeInsets.all(24),
+          child: Column(
+            mainAxisSize: MainAxisSize.min,
+            crossAxisAlignment: CrossAxisAlignment.start,
+            children: [
+              const Text(
+                'Profil Fotoğrafı Değiştir',
+                style: TextStyle(fontSize: 18, fontWeight: FontWeight.bold),
+              ),
+              const SizedBox(height: 6),
+              Text(
+                'Fotoğraf kaynağını seçin',
+                style: TextStyle(color: Colors.grey.shade600, fontSize: 13),
+              ),
+              const SizedBox(height: 20),
+              ListTile(
+                leading: Container(
+                  padding: const EdgeInsets.all(8),
+                  decoration: BoxDecoration(
+                    color: Colors.orange.shade50,
+                    borderRadius: BorderRadius.circular(10),
+                  ),
+                  child: const Icon(Icons.camera_alt, color: Color(0xFFFF6B00)),
                 ),
+                title: const Text(
+                  'Kameradan fotoğraf çek',
+                  style: TextStyle(fontWeight: FontWeight.bold),
+                ),
+                onTap: () => Navigator.pop(context, ImageSource.camera),
+              ),
+              ListTile(
+                leading: Container(
+                  padding: const EdgeInsets.all(8),
+                  decoration: BoxDecoration(
+                    color: const Color(0xFF2A180D),
+                    borderRadius: BorderRadius.circular(10),
+                  ),
+                  child: const Icon(
+                    Icons.photo_library,
+                    color: Color(0xFFFF6B00),
+                  ),
+                ),
+                title: const Text(
+                  'Galeriden seç',
+                  style: TextStyle(fontWeight: FontWeight.bold),
+                ),
+                onTap: () => Navigator.pop(context, ImageSource.gallery),
               ),
             ],
           ),
         ),
       ),
     );
+    if (source == null || !mounted) return;
+
+    try {
+      final image = await ImagePicker().pickImage(
+        source: source,
+        imageQuality: 82,
+        maxWidth: 1200,
+        maxHeight: 1200,
+      );
+      if (image == null || !mounted) return;
+      await _uploadProfilePhoto(image);
+    } on PlatformException catch (error) {
+      debugPrint('Profil fotoğrafı seçilemedi: ${error.code} ${error.message}');
+      if (mounted) {
+        _showTrackingMessage('Fotoğraf seçilemedi. Tekrar deneyin.');
+      }
+    } catch (error) {
+      debugPrint('Profil fotoğrafı seçilirken hata: $error');
+      if (mounted) {
+        _showTrackingMessage('Fotoğraf seçilemedi. Tekrar deneyin.');
+      }
+    }
   }
 
-  Future<Map<String, String>?> _showAddSosContactDialog() async {
-    final nameController = TextEditingController();
-    final phoneController = TextEditingController();
-    final relationController = TextEditingController();
+  Future<void> _uploadProfilePhoto(XFile image) async {
+    final user = FirebaseAuth.instance.currentUser;
+    if (user == null) {
+      _showTrackingMessage(
+        'Profil fotoğrafı eklemek için hesabınıza giriş yapın.',
+      );
+      return;
+    }
 
-    final result = await showDialog<Map<String, String>>(
-      context: context,
-      builder: (context) => AlertDialog(
-        title: const Text('SOS kişisi ekle'),
-        content: Column(
-          mainAxisSize: MainAxisSize.min,
-          children: [
-            TextField(
-              controller: nameController,
-              decoration: const InputDecoration(labelText: 'Ad Soyad'),
-            ),
-            TextField(
-              controller: phoneController,
-              keyboardType: TextInputType.phone,
-              decoration: const InputDecoration(labelText: 'Telefon'),
-            ),
-            TextField(
-              controller: relationController,
-              decoration: const InputDecoration(labelText: 'Yakınlık'),
-            ),
-          ],
-        ),
-        actions: [
-          TextButton(
-            onPressed: () => Navigator.pop(context),
-            child: const Text('Vazgeç'),
-          ),
-          FilledButton(
-            onPressed: () {
-              final name = nameController.text.trim();
-              final phone = phoneController.text.trim();
-              if (name.isEmpty || phone.isEmpty) return;
-              Navigator.pop(context, {
-                'name': name,
-                'phone': phone,
-                'relation': relationController.text.trim().isEmpty
-                    ? 'Yakın kişi'
-                    : relationController.text.trim(),
-              });
-            },
-            child: const Text('Kaydet'),
-          ),
-        ],
-      ),
-    );
+    setState(() => _isUploadingProfilePhoto = true);
+    try {
+      final bytes = await image.readAsBytes();
+      if (bytes.isEmpty) {
+        throw StateError('Seçilen profil fotoğrafı boş.');
+      }
+      if (bytes.length > 5 * 1024 * 1024) {
+        throw StateError('Profil fotoğrafı 5 MB sınırını aşıyor.');
+      }
+      final extension = image.name.split('.').last.toLowerCase();
+      final contentType = switch (image.mimeType) {
+        'image/jpeg' => 'image/jpeg',
+        'image/png' => 'image/png',
+        'image/webp' => 'image/webp',
+        _ => switch (extension) {
+          'png' => 'image/png',
+          'webp' => 'image/webp',
+          'jpg' || 'jpeg' => 'image/jpeg',
+          _ => null,
+        },
+      };
+      if (contentType == null) {
+        throw StateError('Desteklenmeyen profil fotoğrafı biçimi.');
+      }
+      final photoReference = FirebaseStorage.instance.ref().child(
+        'profile_photos/${user.uid}/avatar',
+      );
+      await photoReference.putData(
+        bytes,
+        SettableMetadata(contentType: contentType),
+      );
+      final downloadUrl =
+          '${await photoReference.getDownloadURL()}&v=${DateTime.now().millisecondsSinceEpoch}';
+      await FirebaseFirestore.instance.collection('users').doc(user.uid).set({
+        'photo_url': downloadUrl,
+        'updated_at': FieldValue.serverTimestamp(),
+      }, SetOptions(merge: true));
 
-    return result;
-  }
-
-  void _showPhotoUploadDialog() {
-    showModalBottomSheet(
-      context: context,
-      backgroundColor: const Color(0xFF191919),
-      shape: const RoundedRectangleBorder(
-        borderRadius: BorderRadius.vertical(top: Radius.circular(24)),
-      ),
-      builder: (context) => Container(
-        padding: const EdgeInsets.all(24),
-        child: Column(
-          mainAxisSize: MainAxisSize.min,
-          crossAxisAlignment: CrossAxisAlignment.start,
-          children: [
-            const Text(
-              'Profil Fotoğrafı Değiştir',
-              style: TextStyle(fontSize: 18, fontWeight: FontWeight.bold),
-            ),
-            const SizedBox(height: 6),
-            Text(
-              'Fotoğraf kaynağını seçin',
-              style: TextStyle(color: Colors.grey.shade600, fontSize: 13),
-            ),
-            const SizedBox(height: 20),
-            ListTile(
-              leading: Container(
-                padding: const EdgeInsets.all(8),
-                decoration: BoxDecoration(
-                  color: Colors.orange.shade50,
-                  borderRadius: BorderRadius.circular(10),
-                ),
-                child: const Icon(Icons.camera_alt, color: Color(0xFFFF6B00)),
-              ),
-              title: const Text(
-                'Kamera ile Çek',
-                style: TextStyle(fontWeight: FontWeight.bold),
-              ),
-              onTap: () {
-                Navigator.pop(context);
-                ScaffoldMessenger.of(context).showSnackBar(
-                  const SnackBar(content: Text('Kamera açılıyor...')),
-                );
-              },
-            ),
-            ListTile(
-              leading: Container(
-                padding: const EdgeInsets.all(8),
-                decoration: BoxDecoration(
-                  color: const Color(0xFF2A180D),
-                  borderRadius: BorderRadius.circular(10),
-                ),
-                child: const Icon(
-                  Icons.photo_library,
-                  color: Color(0xFFFF6B00),
-                ),
-              ),
-              title: const Text(
-                'Galeriden Seç',
-                style: TextStyle(fontWeight: FontWeight.bold),
-              ),
-              onTap: () {
-                Navigator.pop(context);
-                ScaffoldMessenger.of(context).showSnackBar(
-                  const SnackBar(content: Text('Galeri açılıyor...')),
-                );
-              },
-            ),
-          ],
-        ),
-      ),
-    );
+      if (!mounted || FirebaseAuth.instance.currentUser?.uid != user.uid) {
+        return;
+      }
+      setState(() {
+        _profilePhotoUrl = downloadUrl;
+        _isUploadingProfilePhoto = false;
+      });
+      _showTrackingMessage('Profil fotoğrafı güncellendi.');
+    } catch (error) {
+      debugPrint('Profil fotoğrafı yüklenemedi: $error');
+      if (mounted) {
+        setState(() => _isUploadingProfilePhoto = false);
+        _showTrackingMessage(
+          error is StateError
+              ? error.message.toString()
+              : 'Profil fotoğrafı kaydedilemedi. Tekrar deneyin.',
+        );
+      }
+    }
   }
 
   void _showEditProfileDialog() {
@@ -11011,15 +12441,18 @@ out center tags;
     );
   }
 
-  Future<void> _persistVehicleProfile() async {
+  Future<void> _persistSelectedVehicle() async {
     final user = FirebaseAuth.instance.currentUser;
     if (user == null) return;
-    await FirebaseFirestore.instance.collection('users').doc(user.uid).set({
-      'selected_vehicle': _selectedVehicle,
-      'vehicle_brand_model': _vehicleBrandModel,
-      'vehicle_km': _vehicleKm,
-      'updated_at': FieldValue.serverTimestamp(),
-    }, SetOptions(merge: true));
+    try {
+      await FirebaseFirestore.instance.collection('users').doc(user.uid).set({
+        'selected_vehicle': _selectedVehicle,
+        'updated_at': FieldValue.serverTimestamp(),
+      }, SetOptions(merge: true));
+    } catch (error) {
+      debugPrint('Ulaşım tercihi kaydedilemedi: $error');
+      if (mounted) _showTrackingMessage('Ulaşım tercihi kaydedilemedi.');
+    }
   }
 
   Future<void> _loadVehicleMarkerIcons() async {
@@ -11135,7 +12568,7 @@ out center tags;
     final text = _aiController.text.trim();
     if (text.isEmpty) return;
     final aiLimit = _isProUser ? _proAiQueriesPerDay : _freeAiQueriesPerDay;
-    if (_freeAiQueriesUsedToday >= aiLimit) {
+    if (_freeAiQueriesUsedToday >= aiLimit && _bonusAiQueries == 0) {
       _showTrackingMessage('Günlük yapay zeka soru hakkınız doldu.');
       return;
     }
@@ -11155,7 +12588,17 @@ out center tags;
       _aiController.clear();
     });
 
+    String? quotaReservationId;
     try {
+      if (user != null) {
+        quotaReservationId = FirebaseFirestore.instance
+            .collection('users')
+            .doc(user.uid)
+            .collection('quota_reservations')
+            .doc()
+            .id;
+        await _reserveDailyQuota('ai', quotaReservationId);
+      }
       final ai = FirebaseAI.googleAI(
         appCheck: FirebaseAppCheck.instance,
         auth: FirebaseAuth.instance,
@@ -11175,17 +12618,27 @@ $text''';
         throw Exception('Gemini boş cevap döndürdü.');
       }
 
+      if (quotaReservationId != null) {
+        final reservationId = quotaReservationId;
+        quotaReservationId = null;
+        try {
+          await _callQuotaCallable('completeDailyQuotaReservation', {
+            'reservationId': reservationId,
+          });
+        } catch (error) {
+          debugPrint('Navora AI kotası tamamlanamadı: $error');
+        }
+      } else {
+        await _recordDailyQuotaUsage(aiQueryCompleted: true);
+      }
       if (!mounted) return;
       setState(() {
-        _freeAiQueriesUsedToday++;
-        _dailyQuotaDate = _dailyQuotaKey(DateTime.now());
         _aiMessages.removeLast();
         _aiMessages.add({'sender': 'ai', 'text': answer});
       });
-      unawaited(_persistDailyQuota());
       if (user != null) {
-        unawaited(
-          FirebaseFirestore.instance
+        try {
+          await FirebaseFirestore.instance
               .collection('users')
               .doc(user.uid)
               .collection('ai_chats')
@@ -11193,12 +12646,29 @@ $text''';
                 'question': text,
                 'answer': answer,
                 'created_at': FieldValue.serverTimestamp(),
-              }),
-        );
+              });
+        } catch (error) {
+          debugPrint('Navora AI sohbeti kaydedilemedi: $error');
+          if (mounted) {
+            _showTrackingMessage('Yapay zeka sohbeti kaydedilemedi.');
+          }
+        }
       }
     } catch (error) {
       debugPrint('Navora AI yanıtı alınamadı: $error');
+      if (quotaReservationId != null) {
+        try {
+          await _callQuotaCallable('cancelDailyQuotaReservation', {
+            'reservationId': quotaReservationId,
+          });
+        } catch (releaseError) {
+          debugPrint('Navora AI kotası geri alınamadı: $releaseError');
+        }
+      }
       if (!mounted) return;
+      final quotaExceeded =
+          error is FirebaseFunctionsException &&
+          error.code == 'resource-exhausted';
       final aiLogicNotEnabled =
           error is FirebaseAIException &&
           error.message.contains('firebasevertexai.googleapis.com');
@@ -11206,38 +12676,14 @@ $text''';
         _aiMessages.removeLast();
         _aiMessages.add({
           'sender': 'ai',
-          'text': aiLogicNotEnabled
+          'text': quotaExceeded
+              ? 'Günlük yapay zeka soru hakkınız doldu.'
+              : aiLogicNotEnabled
               ? 'Firebase projesinde AI Logic etkin değil. Firebase Console’da navoramapa projesinin AI Logic kurulumunu tamamlayın.'
               : 'Şu anda yanıt veremiyorum. İnternet bağlantısını kontrol edip tekrar deneyin.',
         });
       });
     }
-  }
-
-  Future<void> _persistPointChange({
-    required int balance,
-    required String title,
-    required String detail,
-    required int amount,
-  }) async {
-    final user = FirebaseAuth.instance.currentUser;
-    if (user == null) return;
-    final entry = <String, dynamic>{
-      'title': title,
-      'detail': detail,
-      'amount': amount,
-      'date': 'Şimdi',
-    };
-    setState(() {
-      _pointLedger.insert(0, entry);
-      if (_pointLedger.length > 100) _pointLedger.removeLast();
-    });
-    final preferences = await SharedPreferences.getInstance();
-    await preferences.setInt('navora.points.${user.uid}', balance);
-    await preferences.setString(
-      'navora.pointLedger.${user.uid}',
-      jsonEncode(_pointLedger),
-    );
   }
 
   void _showNavoraPointsSheet() {
@@ -11269,9 +12715,9 @@ $text''';
     );
   }
 
-  bool _redeemNavoraReward(NavoraReward reward) {
+  Future<bool> _redeemNavoraReward(NavoraReward reward) async {
+    if (_isRedeemingReward) return false;
     if (reward.id == 'pro_discount' && _proDiscountUnlocked) return false;
-
     if (_navoraPoints < reward.cost) {
       ScaffoldMessenger.of(context).showSnackBar(
         const SnackBar(content: Text('Bu takas için puanın yetersiz.')),
@@ -11279,33 +12725,57 @@ $text''';
       return false;
     }
 
-    setState(() {
-      _navoraPoints -= reward.cost;
-      switch (reward.id) {
-        case 'room':
-          _bonusChatRooms++;
-          break;
-        case 'ai':
-          _bonusAiQueries++;
-          break;
-        case 'pro_discount':
-          _proDiscountUnlocked = true;
-          break;
-      }
-    });
-    unawaited(
-      _persistPointChange(
-        balance: _navoraPoints,
-        title: reward.title,
-        detail: 'Takas',
-        amount: -reward.cost,
-      ),
-    );
+    final user = FirebaseAuth.instance.currentUser;
+    if (user == null) {
+      _showTrackingMessage('Puan takası için hesabına giriş yap.');
+      return false;
+    }
 
-    ScaffoldMessenger.of(context).showSnackBar(
-      SnackBar(content: Text('${reward.title} hesabına eklendi.')),
-    );
-    return true;
+    setState(() => _isRedeemingReward = true);
+    try {
+      final result = await FirebaseFunctions.instanceFor(region: 'europe-west1')
+          .httpsCallable('redeemNavoraReward')
+          .call({'rewardId': reward.id});
+      final data = result.data;
+      if (data is! Map) {
+        throw StateError('Puan takası yanıtı geçersiz.');
+      }
+      if (mounted) {
+        setState(() {
+          _navoraPoints = (data['points'] as num?)?.toInt() ?? _navoraPoints;
+          _bonusChatRooms =
+              (data['bonusChatRooms'] as num?)?.toInt() ?? _bonusChatRooms;
+          _bonusAiQueries =
+              (data['bonusAiQueries'] as num?)?.toInt() ?? _bonusAiQueries;
+          _proDiscountUnlocked =
+              data['proDiscountUnlocked'] == true || _proDiscountUnlocked;
+        });
+        ScaffoldMessenger.of(context).showSnackBar(
+          SnackBar(content: Text('${reward.title} hesabına eklendi.')),
+        );
+      }
+      return true;
+    } on FirebaseFunctionsException catch (error) {
+      debugPrint(
+        'Navora puan takası başarısız: ${error.code} ${error.message}',
+      );
+      if (mounted) {
+        _showTrackingMessage(
+          error.code == 'resource-exhausted'
+              ? 'Puan bakiyeniz bu takas için yetersiz.'
+              : 'Puan takası tamamlanamadı. Tekrar deneyin.',
+        );
+      }
+      return false;
+    } catch (error) {
+      debugPrint('Navora puan takası başarısız: $error');
+      if (mounted) {
+        _showTrackingMessage('Puan takası tamamlanamadı. Tekrar deneyin.');
+      }
+      return false;
+    } finally {
+      if (mounted) setState(() => _isRedeemingReward = false);
+    }
   }
 
   Widget _buildProfileStat(String value, String label, {VoidCallback? onTap}) {
