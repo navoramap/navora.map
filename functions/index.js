@@ -1,4 +1,5 @@
 const { initializeApp } = require('firebase-admin/app');
+const { timingSafeEqual } = require('node:crypto');
 const { getAuth } = require('firebase-admin/auth');
 const {
   FieldPath,
@@ -11,6 +12,7 @@ const { onDocumentCreated } = require('firebase-functions/v2/firestore');
 const { onSchedule } = require('firebase-functions/v2/scheduler');
 const { setGlobalOptions } = require('firebase-functions/v2');
 const { hasRecentAuthentication } = require('./account_deletion_policy');
+const { deleteExpiredUserHistory } = require('./history_retention');
 const {
   getDailyQuota,
   getDailyQuotaDate,
@@ -18,6 +20,10 @@ const {
   getQuotaReservationSource,
 } = require('./daily_quota_policy');
 const { getRetentionCutoffs } = require('./retention_policy');
+const {
+  getRoomJoinFailureState,
+  isValidRoomPasswordHash,
+} = require('./room_join_policy');
 
 const storageBucket = process.env.FIREBASE_STORAGE_BUCKET
   || 'navoramapa.firebasestorage.app';
@@ -66,6 +72,162 @@ function quotaResult(usage, profile, date) {
     bonusAiQueries: safeCount(profile.bonus_ai_queries),
   };
 }
+
+exports.joinChatRoom = onCall(
+    { ...PUBLIC_CALLABLE_OPTIONS, enforceAppCheck: true },
+    async (request) => {
+      const uid = requireUser(request);
+      const { roomId, passwordHash = '' } = request.data ?? {};
+      if (
+        typeof roomId !== 'string' ||
+        !/^[A-Za-z0-9_-]{1,128}$/.test(roomId) ||
+        typeof passwordHash !== 'string' ||
+        (passwordHash !== '' && !isValidRoomPasswordHash(passwordHash))
+      ) {
+        throw new HttpsError('invalid-argument', 'Geçersiz oda giriş bilgisi.');
+      }
+
+      const db = getFirestore();
+      const roomReference = db.collection('chat_rooms').doc(roomId);
+      const listingReference = db.collection('chat_room_listings').doc(roomId);
+      const memberReference = roomReference.collection('members').doc(uid);
+      const accessReference = roomReference.collection('private').doc('access');
+      const attemptsReference = db
+          .collection('users')
+          .doc(uid)
+          .collection('room_join_attempts')
+          .doc(roomId);
+
+      const result = await db.runTransaction(async (transaction) => {
+        const [
+          roomSnapshot,
+          listingSnapshot,
+          memberSnapshot,
+          attemptsSnapshot,
+        ] = await Promise.all([
+          transaction.get(roomReference),
+          transaction.get(listingReference),
+          transaction.get(memberReference),
+          transaction.get(attemptsReference),
+        ]);
+        if (!roomSnapshot.exists || !listingSnapshot.exists) {
+          return { status: 'not-found' };
+        }
+
+        const room = roomSnapshot.data();
+        const listing = listingSnapshot.data();
+        const currentMembers = room.member_ids;
+        const isAdmin = request.auth.token.admin === true;
+        const isPrivileged = isAdmin || room.owner_id === uid;
+        const expiresAt = room.expires_at?.toDate?.() ?? room.expires_at;
+        if (
+          room.schema_version !== 2 ||
+          typeof room.owner_id !== 'string' ||
+          typeof room.is_protected !== 'boolean' ||
+          !(expiresAt instanceof Date) ||
+          expiresAt.getTime() <= Date.now()
+        ) {
+          return { status: 'not-available' };
+        }
+        if (memberSnapshot.exists) return { status: 'joined' };
+        if (
+          !Array.isArray(currentMembers) ||
+          currentMembers.includes(uid) ||
+          !currentMembers.includes(room.owner_id) ||
+          !Number.isSafeInteger(room.active_users_count) ||
+          room.active_users_count !== currentMembers.length ||
+          listing.active_users_count !== room.active_users_count ||
+          listing.owner_id !== room.owner_id
+        ) {
+          return { status: 'not-available' };
+        }
+
+        const now = new Date();
+        const currentAttempts = attemptsSnapshot.exists
+          ? attemptsSnapshot.data()
+          : {};
+        const attemptState = getRoomJoinFailureState(currentAttempts, now);
+        if (!isPrivileged && attemptState.locked) {
+          return { status: 'locked' };
+        }
+
+        let acceptedPasswordHash = '';
+        if (room.is_protected && !isPrivileged) {
+          const accessSnapshot = await transaction.get(accessReference);
+          const storedPasswordHash = accessSnapshot.data()?.password_hash;
+          const hashesMatch =
+            isValidRoomPasswordHash(passwordHash) &&
+            isValidRoomPasswordHash(storedPasswordHash) &&
+            timingSafeEqual(
+              Buffer.from(passwordHash, 'hex'),
+              Buffer.from(storedPasswordHash, 'hex'),
+            );
+          if (!hashesMatch) {
+            const nextAttempts = getRoomJoinFailureState(currentAttempts, now);
+            transaction.set(attemptsReference, {
+              failed_count: nextAttempts.failed_count,
+              window_started_at: nextAttempts.window_started_at,
+              locked_until: nextAttempts.locked_until,
+              updated_at: FieldValue.serverTimestamp(),
+            });
+            return {
+              status: nextAttempts.locked_until ? 'locked' : 'invalid-password',
+            };
+          }
+          acceptedPasswordHash = passwordHash;
+        }
+
+        const activeCount = room.active_users_count;
+        const maximumUsers = room.max_users;
+        if (
+          !Number.isSafeInteger(maximumUsers) ||
+          maximumUsers < 2 ||
+          activeCount >= maximumUsers && !isPrivileged ||
+          activeCount >= 51
+        ) {
+          return { status: 'full' };
+        }
+
+        const nextCount = activeCount + 1;
+        const timestamp = FieldValue.serverTimestamp();
+        transaction.create(memberReference, {
+          password_hash: acceptedPasswordHash,
+          joined_at: timestamp,
+        });
+        transaction.update(roomReference, {
+          member_ids: [...currentMembers, uid],
+          active_users_count: nextCount,
+          active_users: `${nextCount} kişi aktif`,
+          updated_at: timestamp,
+        });
+        transaction.update(listingReference, {
+          active_users_count: nextCount,
+          active_users: `${nextCount} kişi aktif`,
+          updated_at: timestamp,
+        });
+        if (attemptsSnapshot.exists) transaction.delete(attemptsReference);
+        return { status: 'joined' };
+      });
+
+      if (result.status === 'joined') return { joined: true };
+      if (result.status === 'locked') {
+        throw new HttpsError(
+            'resource-exhausted',
+            'Çok fazla hatalı şifre denemesi. 15 dakika sonra tekrar deneyin.',
+        );
+      }
+      if (result.status === 'full') {
+        throw new HttpsError('resource-exhausted', 'Sohbet odası dolu.');
+      }
+      if (result.status === 'not-found') {
+        throw new HttpsError('not-found', 'Sohbet odası bulunamadı.');
+      }
+      throw new HttpsError(
+          'permission-denied',
+          'Şifre hatalı veya bu odaya giriş yapılamıyor.',
+      );
+    },
+);
 
 exports.reserveDailyQuota = onCall(PUBLIC_CALLABLE_OPTIONS, async (request) => {
   const uid = requireUser(request);
@@ -792,12 +954,26 @@ async function cleanupExpiredChatData(db = getFirestore(), now = new Date()) {
       'createdAt',
       cutoffs.publicMessagesCreatedAtOrBefore,
   );
+  const expiredDrivingHistory = await deleteExpiredUserHistory(
+      db,
+      'driving_history',
+      now,
+      PAGE_SIZE,
+  );
+  const expiredRouteHistory = await deleteExpiredUserHistory(
+      db,
+      'route_history',
+      now,
+      PAGE_SIZE,
+  );
   const expiredQuotaReservations = await cleanupExpiredQuotaReservations(db, now);
 
   return {
     expiredRooms,
     expiredListings,
     oldPublicMessages,
+    expiredDrivingHistory,
+    expiredRouteHistory,
     expiredQuotaReservations,
   };
 }

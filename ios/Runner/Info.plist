@@ -41,11 +41,11 @@
 		</dict>
 	</array>
 	<key>NSLocationWhenInUseUsageDescription</key>
-	<string>Navora Map, sürüş mesafesi ve hızını hesaplamak için konumunu kullanır.</string>
+	<string>Navora Map, haritada konumunu göstermek, yakındaki yerleri bulmak ve sen başlattığında rota veya sürüş özellikleri sunmak için konumunu kullanır.</string>
 	<key>NSMicrophoneUsageDescription</key>
-	<string>Navora Map, sesli arama ve sesli navigasyon için mikrofon erişimi kullanır.</string>
+	<string>Navora Map'te sesli arama yapabilmek için mikrofon erişimi gerekir.</string>
 	<key>NSSpeechRecognitionUsageDescription</key>
-	<string>Navora Map, sesli arama ve sesli navigasyon komutlarını anlamak için konuşma tanımayı kullanır.</string>
+	<string>Konuşmanı arama metnine dönüştürmek için konuşma tanıma kullanılır.</string>
 	<key>NSPhotoLibraryUsageDescription</key>
 	<string>Profiline ve ilanlarına fotoğraf eklemek için fotoğraf arşivine erişim gerekir.</string>
 	<key>NSCameraUsageDescription</key>

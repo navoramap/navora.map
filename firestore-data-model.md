@@ -22,6 +22,10 @@ Chat admins can create rooms without daily quota, join protected rooms without
 their password (including one additional member slot when a room is full), clear
 general chat messages, and delete any chat room, including its messages,
 members, password document, and discovery listing.
+Room admission runs through the App Check-enforced `joinChatRoom` callable. It
+verifies protected-room hashes server-side, updates membership and discovery
+counts atomically, and locks an account out of a room for 15 minutes after five
+failed password attempts in a 15-minute window.
 
 - `users/{uid}`: private profile, consent and quota metadata.
 - `users/{uid}/saved_routes`: saved routes.
@@ -33,6 +37,7 @@ members, password document, and discovery listing.
 - `users/{uid}/point_ledger`: versioned, append-only points transactions; only Cloud Functions may write.
 - `users/{uid}/daily_usage/{yyyy-MM-dd}`: server-maintained room, AI and daily points counters. Signed-in clients can read but cannot write.
 - `users/{uid}/quota_reservations/{reservationId}`: short-lived, server-created quota reservations for room creation and AI requests; clients cannot read or write.
+- `users/{uid}/room_join_attempts/{roomId}`: server-managed, unreadable protected-room password failure counters and temporary lock state.
 - `users/{uid}/ai_chats`: AI conversation history.
 - `community_places/{placeId}`: user-submitted map locations with a bounded
 	name, category, optional description/address/photo URL, coordinates and owner UID.
@@ -49,7 +54,7 @@ The rules require authentication for shared data and restrict private paths to
 the matching user UID or room membership. `chat_room_listings` must not contain
 password verifiers, message history, email addresses, or phone numbers. Password
 rooms publish only a random salt; the verifier stays in the owner-only access
-document and membership creation must match it in the rules.
+document and only the trusted room-join callable may add non-owner members.
 
 Legacy `chat_rooms` documents currently contain plaintext `password` and an
 embedded `messages` array. They must be migrated before deploying rules that

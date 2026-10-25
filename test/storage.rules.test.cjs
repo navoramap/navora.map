@@ -185,7 +185,6 @@ test('listing owner uploads limited image files to pending listing slots', async
   await assertSucceeds(
     uploadBytes(photo, new Uint8Array([1, 2, 3]), { contentType: 'image/jpeg' }),
   );
-  await assertSucceeds(deleteObject(photo));
 
   await assertFails(
     uploadBytes(
@@ -215,6 +214,7 @@ test('listing owner uploads limited image files to pending listing slots', async
   await assertSucceeds(getMetadata(ref(adminStorage, photo.fullPath)));
   const otherStorage = testEnvironment.authenticatedContext('other').storage();
   await assertFails(getMetadata(ref(otherStorage, photo.fullPath)));
+  await assertSucceeds(deleteObject(photo));
 });
 
 test('active listing images are readable by signed-in users only', async () => {

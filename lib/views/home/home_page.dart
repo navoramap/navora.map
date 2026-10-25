@@ -8393,16 +8393,8 @@ out center tags;
     final user = FirebaseAuth.instance.currentUser;
     if (user == null) return;
 
-    final canEnter = await _joinRoom(
-      roomId,
-      user.uid,
-      passwordHash: passwordHash,
-      isAdmin: _canManageExploreHighlights,
-    );
-    if (!canEnter || !mounted) {
-      if (mounted) _showTrackingMessage('Şifre hatalı veya oda dolu.');
-      return;
-    }
+    final canEnter = await _joinRoom(roomId, passwordHash: passwordHash);
+    if (!canEnter || !mounted) return;
 
     final ownerId = (room['ownerId'] ?? room['owner_id'])?.toString() ?? '';
     final moderatorIdsValue =
@@ -8426,61 +8418,27 @@ out center tags;
     );
   }
 
-  Future<bool> _joinRoom(
-    String roomId,
-    String userId, {
-    String? passwordHash,
-    bool isAdmin = false,
-  }) async {
+  Future<bool> _joinRoom(String roomId, {String? passwordHash}) async {
     try {
-      final firestore = FirebaseFirestore.instance;
-      final reference = firestore.collection('chat_rooms').doc(roomId);
-      final listingReference = firestore
-          .collection('chat_room_listings')
-          .doc(roomId);
-      final memberReference = reference.collection('members').doc(userId);
-      var allowed = false;
-      await firestore.runTransaction((transaction) async {
-        final listingSnapshot = await transaction.get(listingReference);
-        final memberSnapshot = await transaction.get(memberReference);
-        if (!listingSnapshot.exists) return;
-        if (memberSnapshot.exists) {
-          allowed = true;
-          return;
-        }
-        final listing = listingSnapshot.data()!;
-        final isProtected = listing['is_protected'] == true;
-        if (!isAdmin &&
-            isProtected &&
-            (passwordHash == null || passwordHash.isEmpty)) {
-          return;
-        }
-        final activeCount =
-            (listing['active_users_count'] as num?)?.toInt() ?? 1;
-        final maxUsers = (listing['max_users'] as num?)?.toInt() ?? 50;
-        if (!isAdmin && activeCount >= maxUsers) return;
-
-        transaction.set(memberReference, {
-          'password_hash': passwordHash ?? '',
-          'joined_at': FieldValue.serverTimestamp(),
-        });
-        transaction.update(reference, {
-          'member_ids': FieldValue.arrayUnion([userId]),
-          'active_users_count': FieldValue.increment(1),
-          'active_users': '${activeCount + 1} kişi',
-          'updated_at': FieldValue.serverTimestamp(),
-        });
-        transaction.update(listingReference, {
-          'active_users_count': FieldValue.increment(1),
-          'active_users': '${activeCount + 1} kişi',
-          'updated_at': FieldValue.serverTimestamp(),
-        });
-        allowed = true;
-      });
-      return allowed;
+      final result = await FirebaseFunctions.instanceFor(region: 'europe-west1')
+          .httpsCallable('joinChatRoom')
+          .call<Map<String, dynamic>>({
+            'roomId': roomId,
+            'passwordHash': passwordHash ?? '',
+          });
+      return result.data['joined'] == true;
     } catch (error) {
       debugPrint('Odaya giriş başarısız: $error');
-      if (mounted) _showTrackingMessage('Şifre hatalı veya oda dolu.');
+      if (mounted) {
+        final message = error is FirebaseFunctionsException
+            ? error.message
+            : null;
+        _showTrackingMessage(
+          message?.isNotEmpty == true
+              ? message!
+              : 'Odaya giriş yapılamadı. Bağlantınızı kontrol edin.',
+        );
+      }
       return false;
     }
   }
@@ -8642,7 +8600,7 @@ out center tags;
   }
 
   void _showAboutSupportSheet() {
-    const supportEmail = 'destek@navora.app';
+    const supportEmail = 'navora.map@gmail.com';
 
     showModalBottomSheet(
       context: context,

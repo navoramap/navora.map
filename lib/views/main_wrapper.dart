@@ -53,34 +53,28 @@ Sözleşmeye veya yürürlükteki mevzuata aykırı kullanım tespit edilirse he
 Uygulamanın yazılımı, tasarımı, adı ve içerikleri, kanunen izin verilen ölçüde Navora Map'e veya ilgili hak sahiplerine aittir. İzinsiz kopyalanamaz veya dağıtılamaz.
 
 7. Değişiklikler ve İletişim
-Hizmetlerde veya bu sözleşmede değişiklik yapilabilir. Önemli değişiklikler uygulama veya e-posta yoluyla bildirilebilir. Sorularınız için: destek@navoramap.com.
+Hizmetlerde veya bu sözleşmede değişiklik yapılabilir. Önemli değişiklikler uygulama veya e-posta yoluyla bildirilebilir. Sorularınız için: navora.map@gmail.com.
 
 Son güncelleme: 03.09.2026
 ''';
 
   static const String _privacyText = '''
-1. Veri Sorumlusu
-Kişisel verileriniz, Navora Map hizmetinin işletmecisi olan Navora Map tarafından veri sorumlusu sıfatıyla işlenir. İletişim: Navora Map - destek@navoramap.com.
+1. İşlenen Veriler
+Hesap ve profil bilgileri (ad, e-posta, isteğe bağlı telefon, fotoğraf ve tercihler); harita, arama, kayıtlı yer ve rota kullanımı; uygulama açıkken alınan konum; kullanıcı tarafından oluşturulan sohbet, oda, ilan, fotoğraf ve raporlar işlenebilir. Şifreli oda giriş denemeleri kötüye kullanımı önlemek için sayılır ve geçici olarak saklanır.
 
-2. İşlenen Veriler
-Hesap oluştururken ad soyad, e-posta adresi ve telefon numarası; uygulamayı kullanırken ise tercihleriniz, kayıtlı adresleriniz, rota ve sürüş verileriniz işlenebilir.
+2. Konum ve Harita Hizmetleri
+Konum, haritada bulunduğun yeri göstermek, yakındaki arama ve rota özelliklerini sunmak ve sen başlattığında sürüş kaydı oluşturmak için kullanılır. Uygulama arka planda sürekli konum takibi yapmaz. Yer arama ve rota istekleri, arama metni veya gerekli konum bilgisiyle Google Maps Platform ve OpenStreetMap hizmetlerine gönderilebilir. Yolculuk paylaşımı yalnızca düğmeye bastığında sistem paylaşım menüsünü açar; canlı konum takibi başlatmaz. Sesli arama için mikrofon ve işletim sisteminin konuşma tanıma hizmeti kullanılır; konuşma tanıma sağlayıcısının veriyi nasıl işlediği cihazın işletim sistemi ayarlarına ve sağlayıcı politikasına bağlıdır.
 
-3. İşleme Amaçları
-Verileriniz; hesap oluşturma ve doğrulama, profil yönetimi, uygulama hizmetlerinin sunulması, güvenliğin sağlanması, destek taleplerinin yanıtlanması ve yasal yükümlülüklerin yerine getirilmesi amaçlarıyla işlenir.
+3. Sohbet, İlanlar ve Yapay Zekâ
+Sohbet ve ilan içeriğin hizmetin çalışması, diğer kullanıcılara gösterilmesi ve moderasyon için Navora altyapısında saklanabilir. Yapay zekâ özelliğine yazdığın mesajlar yanıt üretmek amacıyla ilgili Firebase AI hizmetine iletilir. İlan oluştururken eklediğin adres, konum, telefon ve fotoğraflar, seçtiğin paylaşım ve ilan ayarlarına göre diğer kullanıcılara gösterilebilir.
 
-4. Hukuki Sebep
-Kişisel verileriniz, sözleşmenin kurulması ve ifası, hukuki yükümlülüklerin yerine getirilmesi, meşru menfaat ve gerekli olduğu durumlarda açık rıza hukuki sebeplerine dayanılarak işlenir.
+4. Hizmet Sağlayıcılar ve Saklama
+Hesap, veritabanı, dosya ve sunucu işlevleri için Firebase; harita, yer ve rota özellikleri için Google Maps Platform; bazı yer aramaları için OpenStreetMap altyapısı kullanılır. Sohbet odaları 24 saat, genel sohbet mesajları 30 gün sonra temizlenir. Yeni sürüş ve rota geçmişi kayıtları 30 gün sonra temizlenmek üzere işaretlenir; temizleme hizmetinin çalışması için sunucu işlevlerinin etkin olması gerekir. Arama geçmişi açıksa en fazla beş arama hesabında tutulur. Arama geçmişini kapatabilir veya silebilir, hesabını uygulamadaki hesap silme seçeneğiyle kaldırabilirsin. İlan ve kullanıcı içerikleri, silinene veya ilgili hizmetin saklama süresi dolana kadar saklanabilir.
 
-5. Aktarım ve Saklama
-Verileriniz, hizmetin sunulması için kullanılan güvenli altyapı ve teknoloji hizmet sağlayıcılarına, yalnızca gerekli ölçüde aktarılabilir. Veriler, işleme amacı için gerekli süre boyunca ve yasal saklama sürelerine uygun olarak saklanır.
+5. Seçimler ve İletişim
+Hesap oluşturma sırasında gerekli sözleşme ve gizlilik bilgilendirmeleri gösterilir. E-posta kampanya tercihi ayrıdır ve isteğe bağlıdır. Gizlilik ve kişisel veri talepleri için navora.map@gmail.com adresine yazabilirsin.
 
-6. Haklarınız
-KVKK'nin 11. maddesi kapsamındaki haklarınız için destek@navoramap.com üzerinden başvurabilirsiniz. Başvurunuzda kimliğinizi doğrulamaya yarayacak bilgileri ve talebinizi açıkça belirtmeniz gerekir.
-
-7. Açık Rıza
-Açık rıza verdiğiniz durumlarda bu rızayı her zaman geri çekebilirsiniz. Rızanın geri çekilmesi, geri çekme tarihinden önceki işlemlerin hukuka uygunluğunu etkilemez.
-
-Son güncelleme: 03.09.2026
+Bu uygulama içi açıklama, işletmecinin yasal unvanı, adresi, güncel saklama süreleri ve hizmet sağlayıcı sözleşmeleriyle birlikte yayına çıkmadan önce doğrulanmalıdır.
 ''';
 
   @override

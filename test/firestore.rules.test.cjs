@@ -831,20 +831,13 @@ async function joinBatch(
   return batch.commit();
 }
 
-test('a protected-room password hash is required to become a member', async () => {
-  const firestore = testEnvironment.authenticatedContext('intruder').firestore();
+test('clients cannot bypass the trusted room-join callable with a password hash', async () => {
+  const firestore = testEnvironment.authenticatedContext('member').firestore();
+  await assertFails(joinBatch(firestore, 'member', 'a'.repeat(64)));
   await assertFails(joinBatch(firestore, 'intruder', 'b'.repeat(64)));
 });
 
-test('a matching password hash can create a member and update room counts', async () => {
-  const firestore = testEnvironment.authenticatedContext('member').firestore();
-  await assertSucceeds(joinBatch(firestore, 'member', 'a'.repeat(64)));
-  await assertSucceeds(
-    getDoc(doc(firestore, 'chat_rooms/room-1/messages/message-1')),
-  );
-});
-
-test('admin can join a protected full room without its password', async () => {
+test('admin clients cannot bypass the trusted room-join callable', async () => {
   await testEnvironment.withSecurityRulesDisabled(async (context) => {
     const firestore = context.firestore();
     const room = {
@@ -871,9 +864,21 @@ test('admin can join a protected full room without its password', async () => {
   const firestore = testEnvironment
     .authenticatedContext('admin', { admin: true })
     .firestore();
-  await assertSucceeds(joinBatch(firestore, 'admin', '', ['owner', 'member']));
-  await assertSucceeds(
-    getDoc(doc(firestore, 'chat_rooms/room-1/messages/message-1')),
+  await assertFails(joinBatch(firestore, 'admin', '', ['owner', 'member']));
+});
+
+test('room join rate-limit records are server-managed and private', async () => {
+  const firestore = testEnvironment.authenticatedContext('member').firestore();
+  const attemptReference = doc(
+    firestore,
+    'users/member/room_join_attempts/room-1',
+  );
+  await assertFails(getDoc(attemptReference));
+  await assertFails(
+    setDoc(attemptReference, {
+      failed_count: 0,
+      locked_until: null,
+    }),
   );
 });
 

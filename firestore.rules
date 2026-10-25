@@ -242,7 +242,8 @@ service cloud.firestore {
 
     function isServerManagedUserSubcollection(subcollection) {
       return subcollection in [
-        'daily_usage', 'point_ledger', 'quota_reservations'
+        'daily_usage', 'point_ledger', 'quota_reservations',
+        'room_join_attempts'
       ];
     }
 
@@ -458,7 +459,9 @@ service cloud.firestore {
       allow delete: if isUser(uid);
 
       match /{subcollection}/{documentId} {
-        allow read: if isUser(uid) && subcollection != 'quota_reservations';
+        allow read: if isUser(uid)
+            && subcollection != 'quota_reservations'
+            && subcollection != 'room_join_attempts';
         allow create: if isUser(uid)
             && !isServerManagedUserSubcollection(subcollection)
             && validOwnedDocument(request.resource.data)
@@ -867,33 +870,7 @@ service cloud.firestore {
           && roomListingMatchesRoom(
             getAfter(listingPath(roomId)).data,
             request.resource.data
-          )
-          || (signedIn()
-              && request.resource.data.owner_id == resource.data.owner_id
-              && validRoom(request.resource.data)
-              && request.resource.data.diff(resource.data).affectedKeys().hasOnly([
-                'member_ids', 'active_users_count', 'active_users', 'updated_at'
-              ])
-              && request.resource.data.member_ids is list
-              && request.resource.data.member_ids.size() ==
-                  resource.data.member_ids.size() + 1
-              && request.resource.data.member_ids.hasAll(resource.data.member_ids)
-              && !(request.auth.uid in resource.data.member_ids)
-              && request.auth.uid in request.resource.data.member_ids
-              && (request.resource.data.member_ids.size() <= resource.data.max_users
-                  || isChatAdmin())
-              && request.resource.data.active_users_count ==
-                  resource.data.active_users_count + 1
-              && request.resource.data.active_users_count <= 51
-              && request.resource.data.active_users_count ==
-                  request.resource.data.member_ids.size()
-              && request.resource.data.updated_at == request.time
-              && roomListingMatchesRoom(
-                getAfter(listingPath(roomId)).data,
-                request.resource.data
-              )
-              && !exists(memberPath(roomId, request.auth.uid))
-              && getAfter(memberPath(roomId, request.auth.uid)).data.joined_at == request.time);
+          );
       allow delete: if isRoomOwner(roomId) || isChatAdmin();
 
       match /members/{memberId} {
@@ -904,6 +881,7 @@ service cloud.firestore {
         allow list: if isRoomOwner(roomId) || isChatAdmin();
         allow create: if signedIn()
             && memberId == request.auth.uid
+            && !exists(roomPath(roomId))
             && request.resource.data.keys().hasOnly(['password_hash', 'joined_at'])
             && request.resource.data.keys().hasAll(['password_hash', 'joined_at'])
             && request.resource.data.password_hash is string
@@ -912,10 +890,10 @@ service cloud.firestore {
             && request.resource.data.joined_at is timestamp
             && request.resource.data.joined_at == request.time
             && existsAfter(roomPath(roomId))
+            && getAfter(roomPath(roomId)).data.owner_id == request.auth.uid
             && request.auth.uid in getAfter(roomPath(roomId)).data.member_ids
             && existsAfter(listingPath(roomId))
-            && (isChatAdmin() ||
-                !getAfter(roomPath(roomId)).data.is_protected ||
+            && (!getAfter(roomPath(roomId)).data.is_protected ||
                 (request.resource.data.password_hash.size() == 64
                  && existsAfter(accessPath(roomId))
                  && getAfter(accessPath(roomId)).data.password_hash ==

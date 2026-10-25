@@ -56,7 +56,7 @@ The apply mode uses one atomic batch per room, skips schema-v2 rooms and rooms w
 
 Legacy `is_pro` and `plan` profile values are not trusted because older clients could write them. Treat existing accounts as Standard until a trusted billing backend verifies their subscription; remove or quarantine unverified legacy values before restoring Pro access.
 
-Room documents and listing documents expire after 24 hours. The scheduled `cleanupExpiredChatData` function runs hourly, recursively deleting expired rooms and their `messages`, `members`, and `private` subcollections, plus expired discovery listings. It also deletes general chat messages older than 30 days. Deploy the function before relying on these retention periods.
+Room documents and listing documents expire after 24 hours. The scheduled `cleanupExpiredChatData` function runs hourly, recursively deleting expired rooms and their `messages`, `members`, and `private` subcollections, plus expired discovery listings. It also deletes general chat messages older than 30 days and user driving/route history after each record's `expires_at`. Deploy the function before relying on these retention periods.
 
 ## Account Deletion
 
@@ -75,5 +75,8 @@ firebase deploy --only functions --project navoramapa
 - Pro purchase and cancellation are intentionally unavailable until app-store billing and trusted server-side receipt verification are implemented. Client writes cannot grant Pro.
 - Authenticated room and AI requests reserve quotas through Cloud Functions; room creation also requires a server-issued reservation in Firestore rules. Guest AI usage remains device-local. Pro purchases are unavailable; only a trusted `pro` custom claim can raise server limits.
 - Point balances and redemptions are server-managed. Completed GPS drive records award idempotent points, capped at 100 per Istanbul calendar day. Legacy local balances and unversioned ledger entries are intentionally not trusted or migrated. City-visit awards are not active because the app has no server-verifiable location proof.
-- Protected-room password checks use salted PBKDF2 verifiers, but joining has no server-side attempt throttling. Add a trusted join endpoint/rate limiter before exposing password-protected rooms to abuse.
-- Firestore security rules are prototypes. The emulator suite could not run with the installed Java 8 runtime; use a supported JDK and complete emulator testing before production release.
+- Protected-room admission uses an App Check-enforced callable, salted PBKDF2 verifiers, and a per-account/per-room lock after five failed attempts in a 15-minute window. Register production App Check providers and deploy `joinChatRoom` before shipping clients that use the callable.
+- Public release is blocked until the legal operator name/address and public privacy-policy URL are supplied, the privacy notice and consent flow are legally reviewed, and Google Play Console and Apple Developer accounts are available. The current in-app notice describes implemented data flows but is not a substitute for the published policy or store privacy declarations.
+- Pro is deferred; no store products or billing integration are configured. Keep purchases unavailable until product IDs/pricing and trusted receipt verification are ready.
+- Firestore and Storage rules currently pass the local emulator suites, and the room migration passes both unit and emulator tests. Production rules must not be deployed until legacy production rooms have a verified backup, migration dry-run review, and completed migration; no production data has been changed by local tests.
+- The installed Temurin JDK 17 can run the current emulator tests, but Firebase CLI warns that Java 21 will be required by a future CLI major version. Use JDK 21 for future emulator/toolchain upgrades.
