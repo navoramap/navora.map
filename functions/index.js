@@ -13,6 +13,7 @@ const { onSchedule } = require('firebase-functions/v2/scheduler');
 const { setGlobalOptions } = require('firebase-functions/v2');
 const { hasRecentAuthentication } = require('./account_deletion_policy');
 const { deleteExpiredUserHistory } = require('./history_retention');
+const { deleteAllPublicChatMessages } = require('./public_chat_moderation');
 const {
   getDailyQuota,
   getDailyQuotaDate,
@@ -51,6 +52,29 @@ function requireUser(request) {
   }
   return request.auth.uid;
 }
+
+exports.clearPublicChat = onCall(
+    {
+      ...PUBLIC_CALLABLE_OPTIONS,
+      timeoutSeconds: 540,
+      memory: '1GiB',
+    },
+    async (request) => {
+      requireUser(request);
+      if (request.auth.token.admin !== true) {
+        throw new HttpsError(
+            'permission-denied',
+            'Genel sohbeti sıfırlamak için yönetici yetkisi gerekiyor.',
+        );
+      }
+
+      const deletedCount = await deleteAllPublicChatMessages(
+          getFirestore(),
+          450,
+      );
+      return { deletedCount };
+    },
+);
 
 function validateReservationId(reservationId) {
   if (typeof reservationId !== 'string' ||

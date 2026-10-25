@@ -1778,34 +1778,42 @@ class _HomePageState extends State<HomePage> {
     setState(() => _isResettingPublicChat = true);
     var deletedCount = 0;
     try {
-      final collection = FirebaseFirestore.instance.collection(
-        'public_chat_messages',
-      );
-      final latestSnapshot = await collection
-          .orderBy(FieldPath.documentId, descending: true)
-          .limit(1)
-          .get();
-      if (latestSnapshot.docs.isNotEmpty) {
-        final upperBound = latestSnapshot.docs.single;
-        var query = collection
-            .orderBy(FieldPath.documentId)
-            .endAtDocument(upperBound)
-            .limit(450);
-
-        while (true) {
-          final snapshot = await query.get();
-          if (snapshot.docs.isEmpty) break;
-          final batch = FirebaseFirestore.instance.batch();
-          for (final document in snapshot.docs) {
-            batch.delete(document.reference);
-          }
-          await batch.commit();
-          deletedCount += snapshot.size;
-          query = query.startAfterDocument(snapshot.docs.last);
-        }
+      final user = FirebaseAuth.instance.currentUser;
+      if (user == null) {
+        throw FirebaseFunctionsException(
+          code: 'unauthenticated',
+          message: 'Oturum açmanız gerekiyor.',
+        );
+      }
+      await user.getIdToken(true);
+      final result = await FirebaseFunctions.instanceFor(
+        region: 'europe-west1',
+      ).httpsCallable('clearPublicChat').call();
+      final response = result.data;
+      if (response is Map && response['deletedCount'] is num) {
+        deletedCount = (response['deletedCount'] as num).toInt();
       }
       if (mounted) {
         _showTrackingMessage('$deletedCount genel sohbet mesajı silindi.');
+      }
+    } on FirebaseFunctionsException catch (error) {
+      debugPrint(
+        'Genel sohbet sıfırlanamadı ($deletedCount mesaj silindi): '
+        '${error.code} ${error.message}',
+      );
+      if (mounted) {
+        final message = switch (error.code) {
+          'permission-denied' =>
+            'Genel sohbeti sıfırlama yetkin yok. Yönetici hesabıyla tekrar giriş yap.',
+          'unauthenticated' =>
+            'Oturum doğrulanamadı. Tekrar giriş yapıp yeniden dene.',
+          'unavailable' || 'deadline-exceeded' =>
+            'Sunucuya ulaşılamadı. Bağlantını kontrol edip yeniden dene.',
+          _ => deletedCount == 0
+              ? 'Genel sohbet sıfırlanamadı. Biraz sonra tekrar dene.'
+              : '$deletedCount mesaj silindi, işlem tamamlanamadı.',
+        };
+        _showTrackingMessage(message);
       }
     } catch (error) {
       debugPrint(
