@@ -23,12 +23,9 @@ dependencies:
   crypto: ^3.0.7
   flutter_svg: ^2.3.0
   shared_preferences: ^2.5.5
-  provider: ^6.1.2
   geolocator: ^14.0.3
   geocoding: ^4.0.0
   google_maps_flutter: ^2.12.0
-  flutter_map: ^8.3.2
-  latlong2: ^0.10.1
   sensors_plus: ^7.1.0
   http: ^1.5.0
   flutter_tts: ^4.2.3
@@ -39,7 +36,7 @@ dependencies:
   firebase_storage: ^12.4.10
   image_picker: ^1.2.3
   font_awesome_flutter: ^11.0.0
-  share_plus: ^13.3.1
+  firebase_crashlytics: ^4.3.10
 dev_dependencies:
   flutter_test:
     sdk: flutter

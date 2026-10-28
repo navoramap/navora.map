@@ -1,5 +1,5 @@
 const { initializeApp } = require('firebase-admin/app');
-const { timingSafeEqual } = require('node:crypto');
+const { createHash, timingSafeEqual } = require('node:crypto');
 const { getAuth } = require('firebase-admin/auth');
 const {
   FieldPath,
@@ -25,6 +25,12 @@ const {
   getRoomJoinFailureState,
   isValidRoomPasswordHash,
 } = require('./room_join_policy');
+const {
+  CHAT_ADMIN_ACTION_RETENTION_MS,
+  CHAT_MESSAGE_MIN_INTERVAL_MS,
+  CHAT_USER_MUTE_MS,
+  checkChatMessagePolicy,
+} = require('./chat_moderation_policy');
 
 const storageBucket = process.env.FIREBASE_STORAGE_BUCKET
   || 'navoramapa.firebasestorage.app';
@@ -52,6 +58,324 @@ function requireUser(request) {
   }
   return request.auth.uid;
 }
+
+function requireChatAdmin(request) {
+  const uid = requireUser(request);
+  if (request.auth.token.admin !== true) {
+    throw new HttpsError(
+        'permission-denied',
+        'Bu işlem için yönetici yetkisi gerekiyor.',
+    );
+  }
+  return uid;
+}
+
+function moderationEventReference(db, messageReference) {
+  const eventId = createHash('sha256')
+      .update(messageReference.path)
+      .digest('hex');
+  return db.collection('chat_message_moderation_events').doc(eventId);
+}
+
+function validateChatText(value) {
+  if (typeof value !== 'string') return null;
+  const text = value.trim();
+  return text.length > 0 && text.length <= 2000 ? text : null;
+}
+
+exports.sendChatMessage = onCall(PUBLIC_CALLABLE_OPTIONS, async (request) => {
+  const uid = requireUser(request);
+  const { messageType, roomId, senderName } = request.data ?? {};
+  const text = validateChatText(request.data?.text);
+  if (
+    (messageType !== 'public' && messageType !== 'room') ||
+    text === null ||
+    typeof senderName !== 'string' ||
+    senderName.trim().length === 0 ||
+    senderName.trim().length > 120
+  ) {
+    throw new HttpsError('invalid-argument', 'Geçersiz sohbet mesajı.');
+  }
+
+  const latitude = request.data?.latitude;
+  const longitude = request.data?.longitude;
+  if (
+    (latitude != null &&
+      (typeof latitude !== 'number' || latitude < -90 || latitude > 90)) ||
+    (longitude != null &&
+      (typeof longitude !== 'number' || longitude < -180 || longitude > 180))
+  ) {
+    throw new HttpsError('invalid-argument', 'Geçersiz konum bilgisi.');
+  }
+  if (
+    messageType === 'room' &&
+    (typeof roomId !== 'string' || !/^[A-Za-z0-9_-]{1,128}$/.test(roomId))
+  ) {
+    throw new HttpsError('invalid-argument', 'Geçersiz sohbet odası.');
+  }
+
+  const db = getFirestore();
+  const messageReference = messageType === 'public'
+    ? db.collection('public_chat_messages').doc()
+    : db.collection('chat_rooms').doc(roomId).collection('messages').doc();
+  const moderationEvent = moderationEventReference(db, messageReference);
+  const rateReference = db.collection('chat_message_rate_limits').doc(uid);
+  const userModerationReference = db
+      .collection('chat_user_moderation')
+      .doc(uid);
+  const roomReference = messageType === 'room'
+    ? db.collection('chat_rooms').doc(roomId)
+    : null;
+  const memberReference = roomReference
+    ? roomReference.collection('members').doc(uid)
+    : null;
+  const now = new Date();
+
+  await db.runTransaction(async (transaction) => {
+    const [rateSnapshot, moderationSnapshot, roomSnapshot, memberSnapshot] =
+      await Promise.all([
+        transaction.get(rateReference),
+        transaction.get(userModerationReference),
+        roomReference ? transaction.get(roomReference) : Promise.resolve(null),
+        memberReference ? transaction.get(memberReference) : Promise.resolve(null),
+      ]);
+
+    if (roomReference) {
+      const room = roomSnapshot.data();
+      const isSchemaV2Member = memberSnapshot.exists;
+      const isLegacyMember = Array.isArray(room?.member_ids) &&
+        room.member_ids.includes(uid);
+      if (!roomSnapshot.exists || (!isSchemaV2Member && !isLegacyMember)) {
+        throw new HttpsError(
+            'permission-denied',
+            'Bu sohbet odasına mesaj gönderme yetkin yok.',
+        );
+      }
+    }
+
+    const policy = checkChatMessagePolicy({
+      now,
+      rateState: rateSnapshot.data() ?? {},
+      moderationState: moderationSnapshot.data() ?? {},
+    });
+    if (!policy.allowed) {
+      if (policy.reason === 'muted') {
+        throw new HttpsError(
+            'permission-denied',
+            'Sohbet yazma yetkin 1 saatliğine kısıtlandı.',
+        );
+      }
+      if (policy.reason === 'too-fast') {
+        throw new HttpsError(
+            'resource-exhausted',
+            `Yeni mesaj göndermeden önce ${Math.ceil(CHAT_MESSAGE_MIN_INTERVAL_MS / 1000)} saniye bekle.`,
+        );
+      }
+      throw new HttpsError(
+          'resource-exhausted',
+          'Dakikadaki mesaj sınırına ulaştın. Biraz sonra tekrar dene.',
+      );
+    }
+
+    const timestamp = FieldValue.serverTimestamp();
+    const messageData = messageType === 'public'
+      ? {
+        senderId: uid,
+        senderName: senderName.trim(),
+        text,
+        ...(latitude != null ? { latitude } : {}),
+        ...(longitude != null ? { longitude } : {}),
+        createdAt: timestamp,
+      }
+      : {
+        sender: senderName.trim(),
+        sender_id: uid,
+        text,
+        time: 'Şimdi',
+        created_at: timestamp,
+      };
+
+    transaction.create(messageReference, messageData);
+    transaction.set(rateReference, {
+      last_message_at: timestamp,
+      message_count: policy.nextRateState.message_count,
+      window_started_at: policy.nextRateState.window_started_at,
+      updated_at: timestamp,
+    });
+    transaction.create(moderationEvent, {
+      expires_at: new Date(now.getTime() + 7 * 24 * 60 * 60 * 1000),
+      created_at: timestamp,
+    });
+  });
+
+  return { messageId: messageReference.id };
+});
+
+async function moderateCreatedChatMessage(event) {
+  const messageSnapshot = event.data;
+  if (!messageSnapshot) return;
+  const message = messageSnapshot.data();
+  const uid = message.senderId ?? message.sender_id;
+  if (typeof uid !== 'string' || uid.length === 0) {
+    await messageSnapshot.ref.delete();
+    return;
+  }
+
+  const db = getFirestore();
+  const eventReference = moderationEventReference(db, messageSnapshot.ref);
+  const rateReference = db.collection('chat_message_rate_limits').doc(uid);
+  const userModerationReference = db
+      .collection('chat_user_moderation')
+      .doc(uid);
+  const now = new Date();
+
+  await db.runTransaction(async (transaction) => {
+    const [eventState, rateState, moderationState] = await Promise.all([
+      transaction.get(eventReference),
+      transaction.get(rateReference),
+      transaction.get(userModerationReference),
+    ]);
+    if (eventState.exists) return;
+
+    const policy = checkChatMessagePolicy({
+      now,
+      rateState: rateState.data() ?? {},
+      moderationState: moderationState.data() ?? {},
+    });
+    transaction.create(eventReference, {
+      expires_at: new Date(now.getTime() + 7 * 24 * 60 * 60 * 1000),
+      created_at: FieldValue.serverTimestamp(),
+    });
+    if (!policy.allowed) {
+      transaction.delete(messageSnapshot.ref);
+      return;
+    }
+
+    transaction.set(rateReference, {
+      last_message_at: now,
+      message_count: policy.nextRateState.message_count,
+      window_started_at: policy.nextRateState.window_started_at,
+      updated_at: FieldValue.serverTimestamp(),
+    });
+  });
+}
+
+exports.moderatePublicChatMessage = onDocumentCreated(
+    'public_chat_messages/{messageId}',
+    moderateCreatedChatMessage,
+);
+
+exports.moderateRoomChatMessage = onDocumentCreated(
+    'chat_rooms/{roomId}/messages/{messageId}',
+    moderateCreatedChatMessage,
+);
+
+exports.reviewChatMessageReport = onCall(
+    PUBLIC_CALLABLE_OPTIONS,
+    async (request) => {
+      const adminUid = requireChatAdmin(request);
+      const { reportId, action } = request.data ?? {};
+      if (
+        typeof reportId !== 'string' ||
+        !/^[A-Za-z0-9_-]{1,128}$/.test(reportId) ||
+        !['dismiss', 'delete', 'mute'].includes(action)
+      ) {
+        throw new HttpsError('invalid-argument', 'Geçersiz moderasyon işlemi.');
+      }
+
+      const db = getFirestore();
+      const reportReference = db.collection('chat_message_reports').doc(reportId);
+      const logReference = db.collection('chat_admin_actions').doc();
+      const now = new Date();
+      await db.runTransaction(async (transaction) => {
+        const reportSnapshot = await transaction.get(reportReference);
+        if (!reportSnapshot.exists || reportSnapshot.data().status !== 'open') {
+          throw new HttpsError(
+              'failed-precondition',
+              'Şikayet artık açık değil.',
+          );
+        }
+
+        const report = reportSnapshot.data();
+        const targetUid = report.sender_id;
+        if (typeof targetUid !== 'string' || targetUid.length === 0) {
+          throw new HttpsError(
+              'failed-precondition',
+              'Şikayette geçerli kullanıcı bilgisi bulunamadı.',
+          );
+        }
+
+        if (action === 'delete') {
+          const messageReference = report.message_type === 'public'
+            ? db.collection('public_chat_messages').doc(report.message_id)
+            : db.collection('chat_rooms')
+                .doc(report.room_id)
+                .collection('messages')
+                .doc(report.message_id);
+          transaction.delete(messageReference);
+        } else if (action === 'mute') {
+          transaction.set(
+              db.collection('chat_user_moderation').doc(targetUid),
+              {
+                muted_until: new Date(now.getTime() + CHAT_USER_MUTE_MS),
+                muted_by: adminUid,
+                updated_at: FieldValue.serverTimestamp(),
+              },
+          );
+        }
+
+        transaction.update(reportReference, {
+          status: action === 'dismiss' ? 'dismissed' : 'resolved',
+          reviewed_by: adminUid,
+          reviewed_at: FieldValue.serverTimestamp(),
+        });
+        transaction.create(logReference, {
+          actor_uid: adminUid,
+          action: action === 'mute'
+            ? 'user_muted_1_hour'
+            : action === 'delete'
+              ? 'message_deleted'
+              : 'report_dismissed',
+          target_uid: targetUid,
+          report_id: reportId,
+          message_type: report.message_type ?? 'room',
+          room_id: report.room_id,
+          message_id: report.message_id,
+          created_at: FieldValue.serverTimestamp(),
+          expires_at: new Date(
+              now.getTime() + CHAT_ADMIN_ACTION_RETENTION_MS,
+          ),
+        });
+      });
+
+      return { completed: true };
+    },
+);
+
+exports.getChatAdminActions = onCall(
+    PUBLIC_CALLABLE_OPTIONS,
+    async (request) => {
+      requireChatAdmin(request);
+      const snapshot = await getFirestore()
+          .collection('chat_admin_actions')
+          .orderBy('created_at', 'desc')
+          .limit(100)
+          .get();
+      return {
+        actions: snapshot.docs.map((document) => {
+          const data = document.data();
+          return {
+            id: document.id,
+            actorUid: data.actor_uid,
+            action: data.action,
+            targetUid: data.target_uid,
+            reportId: data.report_id,
+            createdAt: data.created_at?.toDate?.().toISOString() ?? null,
+          };
+        }),
+      };
+    },
+);
 
 exports.clearPublicChat = onCall(
     {
@@ -990,6 +1314,18 @@ async function cleanupExpiredChatData(db = getFirestore(), now = new Date()) {
       now,
       PAGE_SIZE,
   );
+  const expiredChatModerationEvents = await deleteExpiredDocuments(
+      db,
+      'chat_message_moderation_events',
+      'expires_at',
+      now,
+  );
+  const expiredChatAdminActions = await deleteExpiredDocuments(
+      db,
+      'chat_admin_actions',
+      'expires_at',
+      now,
+  );
   const expiredQuotaReservations = await cleanupExpiredQuotaReservations(db, now);
 
   return {
@@ -998,6 +1334,8 @@ async function cleanupExpiredChatData(db = getFirestore(), now = new Date()) {
     oldPublicMessages,
     expiredDrivingHistory,
     expiredRouteHistory,
+    expiredChatModerationEvents,
+    expiredChatAdminActions,
     expiredQuotaReservations,
   };
 }

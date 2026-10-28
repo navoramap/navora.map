@@ -17,6 +17,41 @@ void main() {
     expect(navoraFormatNavigationDuration(null), '-');
   });
 
+  test('navigation arrival time updates from remaining duration', () {
+    final now = DateTime(2026, 10, 28, 22, 30);
+    expect(navoraFormatArrivalTime(now, 45), '23:15');
+    expect(navoraFormatArrivalTime(now, 120), '00:30');
+    expect(navoraFormatArrivalTime(now, null), isNull);
+  });
+
+  test('route length sums remaining polyline segment distances', () {
+    const points = [LatLng(41.0, 29.0), LatLng(41.0, 29.01)];
+    expect(navoraRouteLengthKm(points), inInclusiveRange(0.8, 0.9));
+    expect(navoraRouteLengthKm(const []), 0);
+  });
+
+  test('navigation zoom increases as the next maneuver approaches', () {
+    expect(navoraNavigationZoomForManeuverDistance(500), 17);
+    expect(navoraNavigationZoomForManeuverDistance(300), 18);
+    expect(navoraNavigationZoomForManeuverDistance(100), 19);
+    expect(navoraNavigationZoomForManeuverDistance(null), 17);
+  });
+
+  test('slow or unavailable internet is flagged for navigation', () {
+    expect(navoraIsNetworkDegraded(const Duration(seconds: 2), 204), isFalse);
+    expect(navoraIsNetworkDegraded(const Duration(seconds: 4), 204), isTrue);
+    expect(
+      navoraIsNetworkDegraded(const Duration(milliseconds: 100), 503),
+      isTrue,
+    );
+  });
+
+  test('navigation speed is converted from meters per second to km/h', () {
+    expect(navoraSpeedKmh(10), 36);
+    expect(navoraSpeedKmh(-1), 0);
+    expect(navoraSpeedKmh(double.nan), 0);
+  });
+
   test('long walking routes use a realistic daily walking estimate', () {
     expect(
       navoraWalkingDurationMinutes(distanceKm: 500, routeDurationMinutes: 960),
@@ -50,6 +85,12 @@ void main() {
     expect(navoraIsWithinArrivalRadius(100), isTrue);
     expect(navoraIsWithinArrivalRadius(100.1), isFalse);
     expect(navoraIsWithinArrivalRadius(double.infinity), isFalse);
+  });
+
+  test('navigation completion waits until the destination is reached', () {
+    expect(navoraIsWithinNavigationCompletionRadius(35), isTrue);
+    expect(navoraIsWithinNavigationCompletionRadius(35.1), isFalse);
+    expect(navoraIsWithinNavigationCompletionRadius(double.infinity), isFalse);
   });
 
   test(

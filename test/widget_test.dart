@@ -72,7 +72,6 @@ void main() {
 
     expect(find.text('Standart plan'), findsOneWidget);
     expect(find.text('Pro plan'), findsNothing);
-
   });
 
   test(
@@ -134,11 +133,11 @@ void main() {
       const LatLng(41.0052, 28.9753),
     );
 
-    expect(remaining.length, 3);
-    expect(remaining.first, const LatLng(41.005, 28.975));
+    expect(remaining.length, 4);
+    expect(remaining.first, const LatLng(41.0052, 28.9753));
     expect(remaining.last, const LatLng(41.015, 28.985));
+    expect(remaining, isNot(contains(const LatLng(41.001, 28.970))));
   });
-
 }
 
 class _FirebaseCoreHostApi implements TestFirebaseCoreHostApi {

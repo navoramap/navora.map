@@ -27,6 +27,14 @@ verifies protected-room hashes server-side, updates membership and discovery
 counts atomically, and locks an account out of a room for 15 minutes after five
 failed password attempts in a 15-minute window.
 
+Public and room chat messages are created through the `sendChatMessage`
+callable, which enforces one message per three seconds and ten messages per
+minute across both chat types. Message-create triggers apply the same policy to
+direct writes during the staged rules rollout and remove messages from users
+with an active administrator mute. Chat-report review, one-hour mutes and
+administrator action-history reads are server-side callables; action records
+expire after 90 days.
+
 - `users/{uid}`: private profile, consent and quota metadata.
 - `users/{uid}/saved_routes`: saved routes.
 - `users/{uid}/saved_addresses`: saved addresses.
@@ -38,16 +46,20 @@ failed password attempts in a 15-minute window.
 - `users/{uid}/daily_usage/{yyyy-MM-dd}`: server-maintained room, AI and daily points counters. Signed-in clients can read but cannot write.
 - `users/{uid}/quota_reservations/{reservationId}`: short-lived, server-created quota reservations for room creation and AI requests; clients cannot read or write.
 - `users/{uid}/room_join_attempts/{roomId}`: server-managed, unreadable protected-room password failure counters and temporary lock state.
+- `chat_message_rate_limits/{uid}`: server-managed shared public/room chat rate-limit state.
+- `chat_user_moderation/{uid}`: server-managed temporary chat mute state.
+- `chat_admin_actions/{actionId}`: server-managed moderation audit records with no copied message text; retained for 90 days.
+- `chat_message_moderation_events/{eventId}`: short-lived server-managed idempotency records for message moderation triggers.
 - `users/{uid}/ai_chats`: AI conversation history.
 - `community_places/{placeId}`: user-submitted map locations with a bounded
 	name, category, optional description/address/photo URL, coordinates and owner UID.
 - `chat_room_listings/{roomId}`: authenticated, non-sensitive room discovery data.
 - `chat_rooms/{roomId}`: private room metadata and member UID list; no password or messages.
 - `chat_rooms/{roomId}/members/{uid}`: member proof, readable only by that member or the owner.
-- `chat_message_reports/{reportId}`: validated room-message reports. Only admins can read the open queue and resolve reports, optionally deleting the reported message in the same batch.
-- `chat_rooms/{roomId}/messages/{messageId}`: append-only room messages.
+- `chat_message_reports/{reportId}`: validated chat-message reports. Only admins can read the open queue; report actions run through server callables.
+- `chat_rooms/{roomId}/messages/{messageId}`: append-only room messages created through the moderation callable.
 - `chat_rooms/{roomId}/private/access`: owner-readable salted password verifier.
-- `public_chat_messages/{messageId}`: public authenticated chat messages.
+- `public_chat_messages/{messageId}`: authenticated public chat messages created through the moderation callable.
 - `chat_message_reports/{reportId}`: moderation reports.
 
 The rules require authentication for shared data and restrict private paths to

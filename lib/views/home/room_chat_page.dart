@@ -1,6 +1,7 @@
 import 'dart:async';
 
 import 'package:cloud_firestore/cloud_firestore.dart';
+import 'package:cloud_functions/cloud_functions.dart';
 import 'package:flutter/material.dart';
 
 import '../../services/chat_room_service.dart';
@@ -110,9 +111,6 @@ class _RoomChatPageState extends State<RoomChatPage> {
     final text = _controller.text.trim();
     if (text.isEmpty || _isSending) return;
     setState(() => _isSending = true);
-    final roomReference = FirebaseFirestore.instance
-        .collection('chat_rooms')
-        .doc(widget.roomId);
     final localTempId = 'local-${DateTime.now().microsecondsSinceEpoch}';
     final optimisticMessage = <String, dynamic>{
       'sender': widget.userName,
@@ -136,13 +134,32 @@ class _RoomChatPageState extends State<RoomChatPage> {
     });
 
     try {
-      await roomReference.collection('messages').add({
-        'sender': widget.userName,
-        'sender_id': widget.userId,
-        'text': text,
-        'time': 'Şimdi',
-        'created_at': FieldValue.serverTimestamp(),
-      });
+      await FirebaseFunctions.instanceFor(region: 'europe-west1')
+          .httpsCallable('sendChatMessage')
+          .call({
+            'messageType': 'room',
+            'roomId': widget.roomId,
+            'senderName': widget.userName,
+            'text': text,
+          });
+    } on FirebaseFunctionsException catch (error) {
+      if (mounted) {
+        setState(() {
+          _pendingRoomMessages.removeWhere(
+            (message) => message['_localTempId'] == localTempId,
+          );
+        });
+        final message = switch (error.code) {
+          'permission-denied' =>
+            error.message ?? 'Bu odaya mesaj gönderme yetkin yok.',
+          'resource-exhausted' =>
+            error.message ??
+                'Çok sık mesaj gönderiyorsun. Biraz bekleyip tekrar dene.',
+          _ => 'Mesaj gönderilemedi.',
+        };
+        ScaffoldMessenger.of(context)
+            .showSnackBar(SnackBar(content: Text(message)));
+      }
     } catch (error) {
       if (mounted) {
         setState(() {

@@ -200,6 +200,7 @@ Bu uygulama içi açıklama, işletmecinin yasal unvanı, adresi, güncel saklam
         _isLoggedIn = true;
       });
     } on FirebaseAuthException catch (error) {
+      debugPrint('E-posta kimlik doğrulaması başarısız: ${error.code}');
       final message = switch (error.code) {
         'email-already-in-use' =>
           'Bu e-posta ile kayitli bir kullanici zaten var.',
@@ -208,7 +209,19 @@ Bu uygulama içi açıklama, işletmecinin yasal unvanı, adresi, güncel saklam
         'invalid-credential' ||
         'user-not-found' => 'E-posta veya şifre hatalı.',
         'weak-password' => 'Şifre en az 6 karakter olmalı.',
-        _ => 'İşlem gerçekleştirilemedi. Lütfen tekrar deneyin.',
+        'operation-not-allowed' =>
+          'E-posta ve şifre ile giriş Firebase projesinde etkin değil.',
+        'user-disabled' => 'Bu hesap devre dışı bırakılmış.',
+        'too-many-requests' =>
+          'Çok fazla deneme yapıldı. Bir süre bekleyip tekrar deneyin.',
+        'network-request-failed' =>
+          'Bağlantı kurulamadı. İnternet bağlantınızı kontrol edin.',
+        'invalid-api-key' ||
+        'app-not-authorized' ||
+        'configuration-not-found' =>
+          'Uygulamanın Firebase yapılandırması doğrulanamadı.',
+        _ =>
+          'İşlem tamamlanamadı (Firebase: ${error.code}). Lütfen tekrar deneyin.',
       };
       _showSnackBar(message);
     } finally {
@@ -309,10 +322,8 @@ Bu uygulama içi açıklama, işletmecinin yasal unvanı, adresi, güncel saklam
       if (provider == 'Google') {
         final googleSignIn = GoogleSignIn.instance;
         await googleSignIn.initialize(
-          clientId:
-              '348191564859-5midietfkrqldc6l8f1r9vv30o4q89rh.apps.googleusercontent.com',
-          serverClientId:
-              '348191564859-m4ocm1b28056eshf92p0pib6oalr6m29.apps.googleusercontent.com',
+          clientId: '348191564859-5midietfkrqldc6l8f1r9vv30o4q89rh.apps.googleusercontent.com',
+          serverClientId: '348191564859-m4ocm1b28056eshf92p0pib6oalr6m29.apps.googleusercontent.com',
         );
 
         final googleUser = await googleSignIn.authenticate();

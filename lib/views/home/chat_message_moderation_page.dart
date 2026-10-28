@@ -1,4 +1,5 @@
 import 'package:cloud_firestore/cloud_firestore.dart';
+import 'package:cloud_functions/cloud_functions.dart';
 import 'package:firebase_auth/firebase_auth.dart';
 import 'package:flutter/material.dart';
 
@@ -15,25 +16,27 @@ class _ChatMessageModerationPageState extends State<ChatMessageModerationPage> {
 
   Future<void> _reviewReport({
     required QueryDocumentSnapshot<Map<String, dynamic>> report,
-    required bool deleteMessage,
+    required String action,
   }) async {
     final data = report.data();
-    final roomId = data['room_id']?.toString() ?? '';
     final messageId = data['message_id']?.toString() ?? '';
-    final isPublicMessage = data['message_type'] == 'public';
-    if (deleteMessage && (roomId.isEmpty || messageId.isEmpty)) return;
+    if (action == 'delete' && messageId.isEmpty) return;
+    final title = switch (action) {
+      'delete' => 'Mesaj silinsin mi?',
+      'mute' => 'Kullanıcı 1 saat susturulsun mu?',
+      _ => 'Şikayet kapatılsın mı?',
+    };
+    final description = switch (action) {
+      'delete' => 'Mesaj kalıcı olarak silinir ve şikayet kapatılır.',
+      'mute' => 'Kullanıcı 1 saat boyunca genel sohbete ve sohbet odalarına mesaj gönderemez. İşlem yönetici kaydına eklenir.',
+      _ => 'Mesaj silinmeden şikayet kapatılır.',
+    };
 
     final confirmed = await showDialog<bool>(
       context: context,
       builder: (dialogContext) => AlertDialog(
-        title: Text(
-          deleteMessage ? 'Mesaj silinsin mi?' : 'Şikayet kapatılsın mı?',
-        ),
-        content: Text(
-          deleteMessage
-              ? 'Mesaj kalıcı olarak silinir ve şikayet kapatılır.'
-              : 'Mesaj silinmeden şikayet kapatılır.',
-        ),
+        title: Text(title),
+        content: Text(description),
         actions: [
           TextButton(
             onPressed: () => Navigator.pop(dialogContext, false),
@@ -42,11 +45,15 @@ class _ChatMessageModerationPageState extends State<ChatMessageModerationPage> {
           FilledButton(
             onPressed: () => Navigator.pop(dialogContext, true),
             style: FilledButton.styleFrom(
-              backgroundColor: deleteMessage
-                  ? Colors.redAccent
-                  : const Color(0xFFFF7A00),
+              backgroundColor: action == 'dismiss'
+                  ? const Color(0xFFFF7A00)
+                  : Colors.redAccent,
             ),
-            child: Text(deleteMessage ? 'Sil ve kapat' : 'Kapat'),
+            child: Text(switch (action) {
+              'delete' => 'Sil ve kapat',
+              'mute' => 'Sustur ve kapat',
+              _ => 'Kapat',
+            }),
           ),
         ],
       ),
@@ -55,32 +62,40 @@ class _ChatMessageModerationPageState extends State<ChatMessageModerationPage> {
 
     setState(() => _processingReports.add(report.id));
     try {
-      final firestore = FirebaseFirestore.instance;
-      final batch = firestore.batch();
-      if (deleteMessage) {
-        final messageReference = isPublicMessage
-            ? firestore.collection('public_chat_messages').doc(messageId)
-            : firestore
-                  .collection('chat_rooms')
-                  .doc(roomId)
-                  .collection('messages')
-                  .doc(messageId);
-        batch.delete(messageReference);
+      final user = FirebaseAuth.instance.currentUser;
+      if (user == null) {
+        throw FirebaseFunctionsException(
+          code: 'unauthenticated',
+          message: 'Yönetici oturumu bulunamadı.',
+        );
       }
-      batch.update(report.reference, {
-        'status': deleteMessage ? 'resolved' : 'dismissed',
-        'reviewed_by': FirebaseAuth.instance.currentUser!.uid,
-        'reviewed_at': FieldValue.serverTimestamp(),
-      });
-      await batch.commit();
+      await user.getIdToken(true);
+      await FirebaseFunctions.instanceFor(region: 'europe-west1')
+          .httpsCallable('reviewChatMessageReport')
+          .call({'reportId': report.id, 'action': action});
 
       if (mounted) {
         ScaffoldMessenger.of(context).showSnackBar(
           SnackBar(
+            content: Text(switch (action) {
+              'delete' => 'Mesaj silindi, şikayet kapatıldı.',
+              'mute' => 'Kullanıcı 1 saat susturuldu, şikayet kapatıldı.',
+              _ => 'Şikayet kapatıldı.',
+            }),
+          ),
+        );
+      }
+    } on FirebaseFunctionsException catch (error) {
+      debugPrint(
+        'Sohbet şikayeti işlenemedi (${error.code}): ${error.message}',
+      );
+      if (mounted) {
+        ScaffoldMessenger.of(context).showSnackBar(
+          SnackBar(
             content: Text(
-              deleteMessage
-                  ? 'Mesaj silindi, şikayet kapatıldı.'
-                  : 'Şikayet kapatıldı.',
+              error.code == 'permission-denied'
+                  ? 'Bu işlem için yönetici yetkisi gerekiyor.'
+                  : 'İşlem başarısız oldu. Bağlantını kontrol edip tekrar dene.',
             ),
           ),
         );
@@ -99,6 +114,72 @@ class _ChatMessageModerationPageState extends State<ChatMessageModerationPage> {
     }
   }
 
+  Future<void> _showAdminActions() async {
+    final user = FirebaseAuth.instance.currentUser;
+    if (user == null) return;
+    try {
+      await user.getIdToken(true);
+      final result = await FirebaseFunctions.instanceFor(region: 'europe-west1')
+          .httpsCallable('getChatAdminActions')
+          .call();
+      final data = result.data;
+      final actions = data is Map && data['actions'] is List
+          ? (data['actions'] as List)
+          : const [];
+      if (!mounted) return;
+      await showDialog<void>(
+        context: context,
+        builder: (dialogContext) => AlertDialog(
+          title: const Text('Yönetici işlem geçmişi'),
+          content: SizedBox(
+            width: 420,
+            child: actions.isEmpty
+                ? const Text('Son 90 günde kayıtlı işlem yok.')
+                : ListView.separated(
+                    shrinkWrap: true,
+                    itemCount: actions.length,
+                    separatorBuilder: (_, _) => const Divider(),
+                    itemBuilder: (context, index) {
+                      final item = actions[index];
+                      if (item is! Map) return const SizedBox.shrink();
+                      final action = switch (item['action']) {
+                        'user_muted_1_hour' => 'Kullanıcı 1 saat susturuldu',
+                        'message_deleted' => 'Sohbet mesajı silindi',
+                        'report_dismissed' => 'Şikayet kapatıldı',
+                        _ => 'Moderasyon işlemi',
+                      };
+                      return ListTile(
+                        dense: true,
+                        title: Text(action),
+                        subtitle: Text(
+                          'Yönetici: ${item['actorUid'] ?? '-'}\n'
+                          'Kullanıcı: ${item['targetUid'] ?? '-'}\n'
+                          '${item['createdAt'] ?? ''}',
+                        ),
+                      );
+                    },
+                  ),
+          ),
+          actions: [
+            TextButton(
+              onPressed: () => Navigator.pop(dialogContext),
+              child: const Text('Kapat'),
+            ),
+          ],
+        ),
+      );
+    } on FirebaseFunctionsException catch (error) {
+      debugPrint(
+        'Yönetici işlem kayıtları alınamadı (${error.code}): ${error.message}',
+      );
+      if (mounted) {
+        ScaffoldMessenger.of(context).showSnackBar(
+          const SnackBar(content: Text('İşlem geçmişi yüklenemedi.')),
+        );
+      }
+    }
+  }
+
   @override
   Widget build(BuildContext context) {
     return Scaffold(
@@ -107,6 +188,13 @@ class _ChatMessageModerationPageState extends State<ChatMessageModerationPage> {
         backgroundColor: const Color(0xFF111111),
         foregroundColor: Colors.white,
         title: const Text('Sohbet şikayetleri'),
+        actions: [
+          IconButton(
+            onPressed: _showAdminActions,
+            tooltip: 'Yönetici işlem geçmişi',
+            icon: const Icon(Icons.history_rounded),
+          ),
+        ],
       ),
       body: StreamBuilder<QuerySnapshot<Map<String, dynamic>>>(
         stream: FirebaseFirestore.instance
@@ -212,45 +300,52 @@ class _ChatMessageModerationPageState extends State<ChatMessageModerationPage> {
                           ),
                         ),
                         const SizedBox(height: 12),
-                        Row(
+                        Wrap(
+                          spacing: 8,
+                          runSpacing: 4,
+                          alignment: WrapAlignment.end,
                           children: [
-                            Expanded(
-                              child: OutlinedButton(
+                            OutlinedButton(
+                              onPressed: processing
+                                  ? null
+                                  : () => _reviewReport(
+                                      report: report,
+                                      action: 'dismiss',
+                                    ),
+                              child: const Text('Kapat'),
+                            ),
+                            if (messageId.isNotEmpty)
+                              OutlinedButton(
                                 onPressed: processing
                                     ? null
                                     : () => _reviewReport(
                                         report: report,
-                                        deleteMessage: false,
+                                        action: 'mute',
                                       ),
-                                child: const Text('Kapat'),
+                                child: const Text('1 saat sustur'),
                               ),
-                            ),
-                            if (messageId.isNotEmpty) ...[
-                              const SizedBox(width: 10),
-                              Expanded(
-                                child: FilledButton(
-                                  onPressed: processing
-                                      ? null
-                                      : () => _reviewReport(
-                                          report: report,
-                                          deleteMessage: true,
-                                        ),
-                                  style: FilledButton.styleFrom(
-                                    backgroundColor: Colors.redAccent,
-                                  ),
-                                  child: processing
-                                      ? const SizedBox(
-                                          width: 18,
-                                          height: 18,
-                                          child: CircularProgressIndicator(
-                                            strokeWidth: 2,
-                                            color: Colors.white,
-                                          ),
-                                        )
-                                      : const Text('Mesajı sil'),
+                            if (messageId.isNotEmpty)
+                              FilledButton(
+                                onPressed: processing
+                                    ? null
+                                    : () => _reviewReport(
+                                        report: report,
+                                        action: 'delete',
+                                      ),
+                                style: FilledButton.styleFrom(
+                                  backgroundColor: Colors.redAccent,
                                 ),
+                                child: processing
+                                    ? const SizedBox(
+                                        width: 18,
+                                        height: 18,
+                                        child: CircularProgressIndicator(
+                                          strokeWidth: 2,
+                                          color: Colors.white,
+                                        ),
+                                      )
+                                    : const Text('Mesajı sil'),
                               ),
-                            ],
                           ],
                         ),
                       ],

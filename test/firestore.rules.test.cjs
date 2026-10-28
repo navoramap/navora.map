@@ -739,13 +739,6 @@ test('owner can atomically create a protected room without plaintext password', 
     password_hash: 'a'.repeat(64),
     updated_at: serverTimestamp(),
   });
-  batch.set(doc(firestore, 'chat_rooms/new-room/messages/welcome'), {
-    sender: 'Owner',
-    sender_id: 'owner',
-    text: 'Welcome',
-    time: 'Şimdi',
-    created_at: serverTimestamp(),
-  });
   await assertSucceeds(batch.commit());
   const createdRoom = await assertSucceeds(getDoc(room));
   if ('password' in createdRoom.data() || 'messages' in createdRoom.data()) {
@@ -882,7 +875,7 @@ test('room join rate-limit records are server-managed and private', async () => 
   );
 });
 
-test('room member can read messages but cannot forge sender identity', async () => {
+test('room messages are writable only through the moderation callable', async () => {
   await testEnvironment.withSecurityRulesDisabled(async (context) => {
     await setDoc(
       doc(context.firestore(), 'chat_rooms/room-1/members/member'),
@@ -895,9 +888,9 @@ test('room member can read messages but cannot forge sender identity', async () 
   );
   await assertFails(
     setDoc(doc(firestore, 'chat_rooms/room-1/messages/forged'), {
-      sender: 'Owner',
-      sender_id: 'owner',
-      text: 'forged message',
+      sender: 'Member',
+      sender_id: 'member',
+      text: 'A valid looking message',
       time: 'Şimdi',
       created_at: Timestamp.now(),
     }),
@@ -914,8 +907,16 @@ test('room member can read messages but cannot forge sender identity', async () 
   );
 });
 
-test('public chat does not accept a client-authored Pro badge', async () => {
+test('public chat messages are writable only through the moderation callable', async () => {
   const firestore = testEnvironment.authenticatedContext('owner').firestore();
+  await assertFails(
+    setDoc(doc(firestore, 'public_chat_messages/direct'), {
+      senderId: 'owner',
+      senderName: 'Owner',
+      text: 'Direct message',
+      createdAt: serverTimestamp(),
+    }),
+  );
   await assertFails(
     setDoc(doc(firestore, 'public_chat_messages/fake-pro'), {
       senderId: 'owner',

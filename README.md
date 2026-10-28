@@ -67,15 +67,32 @@ The backend is deployed in `europe-west1`. The Firebase project uses the Blaze b
 ```powershell
 npm ci --prefix functions
 npm test --prefix functions
-firebase deploy --only functions --project navoramapa
+firebase deploy --only functions:deleteAccount --project navoramapa
 ```
+
+## Chat Moderation
+
+The current client sends public and room messages through `sendChatMessage`, which enforces a shared per-user limit of one message every three seconds and ten messages per minute. Firestore create triggers also check direct writes during the staged migration period, removing messages from muted users or messages over the rate limit. Administrator moderation requires the Firebase Auth `admin: true` custom claim. From the report queue, admins can dismiss a report, delete its message, or mute the author for one hour. Admin actions are recorded without message text and expire after 90 days.
+
+The local Firestore rules deny direct client message creation. Do not deploy those rules until legacy production chat rooms have a verified backup and completed migration; server callables and message triggers are deployed independently of that rules migration.
+
+```powershell
+npm test --prefix functions
+firebase deploy --only functions:sendChatMessage,functions:reviewChatMessageReport,functions:getChatAdminActions,functions:moderatePublicChatMessage,functions:moderateRoomChatMessage,functions:cleanupExpiredChatData --project navoramapa
+```
+
+## Crash Reports and Backups
+
+Android and iOS release builds send fatal Flutter/framework errors to Firebase Crashlytics. Debug builds do not collect reports. Verify Crashlytics is enabled in the Firebase console before release. iOS dSYM symbol upload and physical-device validation require macOS/Xcode.
+
+No scheduled Firestore backup is configured. Production currently has no listed managed Firestore backups. Choose a backup frequency and retention only after reviewing Firestore database size and the resulting storage/operation costs; do not treat data export as a substitute for a verified restorable backup.
 
 ## Important Limitations
 
 - Pro purchase and cancellation are intentionally unavailable until app-store billing and trusted server-side receipt verification are implemented. Client writes cannot grant Pro.
 - Authenticated room and AI requests reserve quotas through Cloud Functions; room creation also requires a server-issued reservation in Firestore rules. Guest AI usage remains device-local. Pro purchases are unavailable; only a trusted `pro` custom claim can raise server limits.
 - Point balances and redemptions are server-managed. Completed GPS drive records award idempotent points, capped at 100 per Istanbul calendar day. Legacy local balances and unversioned ledger entries are intentionally not trusted or migrated. City-visit awards are not active because the app has no server-verifiable location proof.
-- Protected-room admission uses an App Check-enforced callable, salted PBKDF2 verifiers, and a per-account/per-room lock after five failed attempts in a 15-minute window. Register production App Check providers and deploy `joinChatRoom` before shipping clients that use the callable.
+- Protected-room admission uses an App Check-enforced callable, salted PBKDF2 verifiers, and a per-account/per-room lock after five failed attempts in a 15-minute window. `joinChatRoom` is deployed; verify Play Integrity and Apple App Attest/DeviceCheck registrations and enforcement in Firebase App Check before release.
 - General chat reset runs through the `clearPublicChat` callable, which verifies the Firebase Auth `admin: true` custom claim and deletes messages in server-side batches. Deploy the callable before using the updated reset action.
 - Public release is blocked until the legal operator name/address and public privacy-policy URL are supplied, the privacy notice and consent flow are legally reviewed, and Google Play Console and Apple Developer accounts are available. The current in-app notice describes implemented data flows but is not a substitute for the published policy or store privacy declarations.
 - Pro is deferred; no store products or billing integration are configured. Keep purchases unavailable until product IDs/pricing and trusted receipt verification are ready.

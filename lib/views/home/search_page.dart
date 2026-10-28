@@ -656,23 +656,15 @@ class _MapSearchPageState extends State<MapSearchPage> {
             if (_history.isNotEmpty && !isShowingSuggestions)
               Padding(
                 padding: const EdgeInsets.fromLTRB(14, 4, 14, 2),
-                child: Row(
-                  children: [
-                    const Expanded(
-                      child: Text(
-                        'Son aramalar',
-                        style: TextStyle(
-                          color: Colors.white,
-                          fontWeight: FontWeight.w600,
-                        ),
-                      ),
+                child: Align(
+                  alignment: Alignment.centerLeft,
+                  child: const Text(
+                    'Son aramalar',
+                    style: TextStyle(
+                      color: Colors.white,
+                      fontWeight: FontWeight.w600,
                     ),
-                    TextButton.icon(
-                      onPressed: _showHistoryPrivacySheet,
-                      icon: const Icon(Icons.privacy_tip_outlined, size: 17),
-                      label: const Text('Gizlilik'),
-                    ),
-                  ],
+                  ),
                 ),
               ),
             if (isShowingSuggestions)

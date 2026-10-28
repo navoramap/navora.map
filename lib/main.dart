@@ -10,6 +10,7 @@ import 'package:crypto/crypto.dart';
 import 'package:firebase_app_check/firebase_app_check.dart';
 import 'package:firebase_auth/firebase_auth.dart';
 import 'package:firebase_core/firebase_core.dart';
+import 'package:firebase_crashlytics/firebase_crashlytics.dart';
 import 'package:google_sign_in/google_sign_in.dart';
 import 'package:shared_preferences/shared_preferences.dart';
 import 'package:sign_in_with_apple/sign_in_with_apple.dart';
@@ -46,6 +47,23 @@ void main() async {
           ? AppleProvider.debug
           : AppleProvider.appAttestWithDeviceCheckFallback,
     );
+  }
+
+  if (defaultTargetPlatform == TargetPlatform.android ||
+      defaultTargetPlatform == TargetPlatform.iOS) {
+    await FirebaseCrashlytics.instance.setCrashlyticsCollectionEnabled(
+      !kDebugMode,
+    );
+    FlutterError.onError = (details) {
+      FlutterError.presentError(details);
+      unawaited(FirebaseCrashlytics.instance.recordFlutterFatalError(details));
+    };
+    PlatformDispatcher.instance.onError = (error, stack) {
+      unawaited(
+        FirebaseCrashlytics.instance.recordError(error, stack, fatal: true),
+      );
+      return true;
+    };
   }
 
   runApp(const NavoraMapApp());
