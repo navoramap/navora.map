@@ -419,8 +419,7 @@ Bu uygulama içi açıklama, işletmecinin yasal unvanı, adresi, güncel saklam
 
   void _showSnackBar(String message) {
     if (!mounted) return;
-    ScaffoldMessenger.of(context)
-        .showSnackBar(SnackBar(content: Text(message)));
+    AppNotificationService.show(message);
   }
 
   @override

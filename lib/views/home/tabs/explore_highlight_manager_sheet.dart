@@ -1,5 +1,6 @@
 import 'package:flutter/material.dart';
 
+import '../../../services/app_notification_service.dart';
 import '../../../services/explore_highlight_service.dart';
 
 class ExploreHighlightManagerSheet extends StatelessWidget {
@@ -65,9 +66,7 @@ class ExploreHighlightManagerSheet extends StatelessWidget {
       await service.delete(highlight.id);
     } catch (error) {
       if (!context.mounted) return;
-      ScaffoldMessenger.of(context).showSnackBar(
-        const SnackBar(content: Text('Kart silinemedi. Tekrar dene.')),
-      );
+      AppNotificationService.show('Kart silinemedi. Tekrar dene.');
     }
   }
 
@@ -382,11 +381,7 @@ class _ExploreHighlightEditorDialogState
       if (mounted) Navigator.pop(context);
     } catch (error) {
       if (!mounted) return;
-      ScaffoldMessenger.of(context).showSnackBar(
-        const SnackBar(
-          content: Text('Kart kaydedilemedi. Yetkini kontrol et.'),
-        ),
-      );
+      AppNotificationService.show('Kart kaydedilemedi. Yetkini kontrol et.');
     } finally {
       if (mounted) setState(() => _isSaving = false);
     }

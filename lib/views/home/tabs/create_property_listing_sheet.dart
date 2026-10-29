@@ -5,6 +5,7 @@ import 'package:geocoding/geocoding.dart' as geo_coding;
 import 'package:google_maps_flutter/google_maps_flutter.dart';
 import 'package:image_picker/image_picker.dart';
 
+import '../../../services/app_notification_service.dart';
 import '../../../services/property_listing_service.dart';
 
 class CreatePropertyListingSheet extends StatefulWidget {
@@ -206,12 +207,8 @@ class _CreatePropertyListingSheetState
       _errorMessage = null;
     });
     if (addedPhotos.length != files.length) {
-      ScaffoldMessenger.of(context).showSnackBar(
-        const SnackBar(
-          content: Text(
-            'Yalnızca JPG, PNG veya WebP ve 5 MB altı fotoğraflar eklenebilir.',
-          ),
-        ),
+      AppNotificationService.show(
+        'Yalnızca JPG, PNG veya WebP ve 5 MB altı fotoğraflar eklenebilir.',
       );
     }
   }
@@ -406,13 +403,14 @@ class _CreatePropertyListingSheetState
   Widget build(BuildContext context) {
     final bottomInset = MediaQuery.viewInsetsOf(context).bottom;
     return SafeArea(
+      bottom: false,
       child: Padding(
         padding: EdgeInsets.only(bottom: bottomInset),
         child: DraggableScrollableSheet(
           expand: false,
           initialChildSize: 0.92,
           minChildSize: 0.65,
-          maxChildSize: 0.96,
+          maxChildSize: 1,
           builder: (context, scrollController) => Material(
             color: const Color(0xFF171817),
             borderRadius: const BorderRadius.vertical(top: Radius.circular(22)),

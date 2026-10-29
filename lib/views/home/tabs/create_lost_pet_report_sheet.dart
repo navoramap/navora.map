@@ -6,6 +6,8 @@ import 'package:flutter/services.dart';
 import 'package:geocoding/geocoding.dart' as geo_coding;
 import 'package:image_picker/image_picker.dart';
 
+import '../../../services/app_notification_service.dart';
+
 class CreateLostPetReportSheet extends StatefulWidget {
   final bool isAdoption;
 
@@ -94,12 +96,8 @@ class _CreateLostPetReportSheetState extends State<CreateLostPetReportSheet> {
         _errorMessage = null;
       });
       if (addedPhotos.length != files.length) {
-        ScaffoldMessenger.of(context).showSnackBar(
-          const SnackBar(
-            content: Text(
-              'En fazla 5 MB JPG, PNG veya WebP fotoğraf eklenebilir.',
-            ),
-          ),
+        AppNotificationService.show(
+          'En fazla 5 MB JPG, PNG veya WebP fotoğraf eklenebilir.',
         );
       }
     } catch (error) {
@@ -295,16 +293,16 @@ class _CreateLostPetReportSheetState extends State<CreateLostPetReportSheet> {
 
   @override
   Widget build(BuildContext context) {
+    final bottomInset = MediaQuery.viewInsetsOf(context).bottom;
     return SafeArea(
+      bottom: false,
       child: Padding(
-        padding: EdgeInsets.only(
-          bottom: MediaQuery.viewInsetsOf(context).bottom,
-        ),
+        padding: EdgeInsets.only(bottom: bottomInset),
         child: DraggableScrollableSheet(
           expand: false,
           initialChildSize: 0.92,
           minChildSize: 0.65,
-          maxChildSize: 0.96,
+          maxChildSize: 1,
           builder: (context, controller) => Material(
             color: const Color(0xFF171817),
             borderRadius: const BorderRadius.vertical(top: Radius.circular(22)),

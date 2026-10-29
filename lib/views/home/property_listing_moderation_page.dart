@@ -1,6 +1,8 @@
 import 'package:cloud_firestore/cloud_firestore.dart';
 import 'package:flutter/material.dart';
 
+import '../../services/app_notification_service.dart';
+
 class PropertyListingModerationPage extends StatefulWidget {
   const PropertyListingModerationPage({super.key});
 
@@ -70,31 +72,23 @@ class _PropertyListingModerationPageState
             'updated_at': FieldValue.serverTimestamp(),
           });
       if (!mounted) return;
-      ScaffoldMessenger.of(context).showSnackBar(
-        SnackBar(
-          content: Text(approving ? 'İlan yayınlandı.' : 'İlan reddedildi.'),
-        ),
+      AppNotificationService.show(
+        approving ? 'İlan yayınlandı.' : 'İlan reddedildi.',
       );
     } on FirebaseException catch (error) {
       debugPrint('İlan incelenemedi (${error.code}): ${error.message}');
       if (mounted) {
-        ScaffoldMessenger.of(context).showSnackBar(
-          SnackBar(
-            content: Text(
-              error.code == 'permission-denied'
-                  ? 'Bu ilan artık inceleme beklemiyor.'
-                  : 'İşlem başarısız oldu. Daha sonra tekrar deneyin.',
-            ),
-          ),
+        AppNotificationService.show(
+          error.code == 'permission-denied'
+              ? 'Bu ilan artık inceleme beklemiyor.'
+              : 'İşlem başarısız oldu. Daha sonra tekrar deneyin.',
         );
       }
     } catch (error) {
       debugPrint('İlan inceleme işlemi başarısız: $error');
       if (mounted) {
-        ScaffoldMessenger.of(context).showSnackBar(
-          const SnackBar(
-            content: Text('İşlem başarısız oldu. Daha sonra tekrar deneyin.'),
-          ),
+        AppNotificationService.show(
+          'İşlem başarısız oldu. Daha sonra tekrar deneyin.',
         );
       }
     } finally {

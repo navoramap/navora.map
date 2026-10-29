@@ -422,7 +422,7 @@ function quotaResult(usage, profile, date) {
 }
 
 exports.joinChatRoom = onCall(
-    { ...PUBLIC_CALLABLE_OPTIONS, enforceAppCheck: true },
+    PUBLIC_CALLABLE_OPTIONS,
     async (request) => {
       const uid = requireUser(request);
       const { roomId, passwordHash = '' } = request.data ?? {};

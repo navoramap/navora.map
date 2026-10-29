@@ -18,6 +18,7 @@ import 'package:firebase_auth/firebase_auth.dart';
 import 'package:firebase_ai/firebase_ai.dart';
 import 'package:cloud_firestore/cloud_firestore.dart';
 import 'package:firebase_storage/firebase_storage.dart';
+import 'package:crypto/crypto.dart';
 import 'package:geolocator/geolocator.dart' as geo;
 import 'package:geocoding/geocoding.dart' as geo_coding;
 import 'package:image_picker/image_picker.dart';
@@ -39,6 +40,7 @@ import 'chat_message_moderation_page.dart';
 import '../../services/places_service.dart';
 import '../../services/chat_room_service.dart';
 import '../../services/property_listing_service.dart';
+import '../../services/app_notification_service.dart';
 
 class NavoraTrafficService {
   static const String _googleRoutesApiKey = String.fromEnvironment(
@@ -206,6 +208,23 @@ bool navoraIsWithinArrivalRadius(double distanceMeters) =>
 
 bool navoraIsWithinNavigationCompletionRadius(double distanceMeters) =>
     distanceMeters.isFinite && distanceMeters <= 35;
+
+bool navoraHasCompletedRouteProgress({
+  required double traveledDistanceKm,
+  required double startDistanceToDestinationMeters,
+  required double completionDistanceToDestinationMeters,
+}) =>
+    traveledDistanceKm.isFinite &&
+    traveledDistanceKm >= 0.05 &&
+    startDistanceToDestinationMeters.isFinite &&
+    completionDistanceToDestinationMeters.isFinite &&
+    startDistanceToDestinationMeters - completionDistanceToDestinationMeters >=
+        25;
+
+bool navoraShouldSaveDriveHistory({
+  required bool startedForNavigation,
+  required bool hasCompletedNavigationProgress,
+}) => !startedForNavigation || hasCompletedNavigationProgress;
 
 double navoraSmoothBearing(
   double currentBearing,
@@ -576,6 +595,7 @@ class _HomePageState extends State<HomePage> {
   bool _hasMapBearing = false;
   bool _isOffRoute = false;
   bool _isCompletingNavigation = false;
+  double? _navigationStartDistanceToDestinationMeters;
   bool _isNetworkDegraded = false;
   bool _isCheckingNavigationNetwork = false;
   bool _isCheckingFasterRoute = false;
@@ -678,6 +698,7 @@ class _HomePageState extends State<HomePage> {
   geo.Position? _lastDrivePosition;
   DateTime? _driveStartedAt;
   bool _isDriveTracking = false;
+  bool _driveStartedForNavigation = false;
   double _driveDistanceKm = 0;
   DateTime? _lastCrashAlertAt;
 
@@ -722,6 +743,7 @@ class _HomePageState extends State<HomePage> {
   final List<Map<String, String>> _drivingHistory = [];
   final List<Map<String, String>> _liveDrivingHistory = [];
   final List<Map<String, String>> _liveRouteHistory = [];
+  final Set<String> _deletingHistoryEntryKeys = {};
 
   final TextEditingController _aiController = TextEditingController();
   final TextEditingController _routeTitleController = TextEditingController();
@@ -1377,28 +1399,24 @@ class _HomePageState extends State<HomePage> {
 
   Future<void> _showCreateLostPetReportSheet({bool isAdoption = false}) async {
     if (FirebaseAuth.instance.currentUser == null) {
-      ScaffoldMessenger.of(context).showSnackBar(
-        SnackBar(content: Text('Bildirim vermek için önce giriş yapmalısın.')),
+      AppNotificationService.show(
+        'Bildirim vermek için önce giriş yapmalısın.',
       );
       return;
     }
     final submitted = await showModalBottomSheet<bool>(
       context: context,
       isScrollControlled: true,
-      useSafeArea: true,
+      useSafeArea: false,
       showDragHandle: false,
-      backgroundColor: Colors.transparent,
+      backgroundColor: const Color(0xFF171817),
       builder: (context) => CreateLostPetReportSheet(isAdoption: isAdoption),
     );
     if (submitted == true && mounted) {
-      ScaffoldMessenger.of(context).showSnackBar(
-        SnackBar(
-          content: Text(
-            isAdoption
-                ? 'Sahiplendirme ilanı haritaya eklendi.'
-                : 'Kayıp dost bildirimin haritaya eklendi.',
-          ),
-        ),
+      AppNotificationService.show(
+        isAdoption
+            ? 'Sahiplendirme ilanı haritaya eklendi.'
+            : 'Kayıp dost bildirimin haritaya eklendi.',
       );
     }
   }
@@ -1577,9 +1595,7 @@ class _HomePageState extends State<HomePage> {
     try {
       final launched = await launchUrl(Uri(scheme: 'tel', path: phone));
       if (!launched && mounted) {
-        ScaffoldMessenger.of(context).showSnackBar(
-          const SnackBar(content: Text('Arama uygulaması açılamadı.')),
-        );
+        AppNotificationService.show('Arama uygulaması açılamadı.');
       }
     } catch (error) {
       debugPrint('İletişim numarası açılamadı: $error');
@@ -1600,21 +1616,15 @@ class _HomePageState extends State<HomePage> {
           });
       if (!mounted) return;
       Navigator.of(context).pop();
-      ScaffoldMessenger.of(context).showSnackBar(
-        SnackBar(
-          content: Text(
-            isAdoption
-                ? 'Sahiplendirme ilanı kapatıldı.'
-                : 'Bildirim bulundu olarak kapatıldı.',
-          ),
-        ),
+      AppNotificationService.show(
+        isAdoption
+            ? 'Sahiplendirme ilanı kapatıldı.'
+            : 'Bildirim bulundu olarak kapatıldı.',
       );
     } catch (error) {
       debugPrint('Kayıp dost bildirimi kapatılamadı: $error');
       if (!mounted) return;
-      ScaffoldMessenger.of(context).showSnackBar(
-        const SnackBar(content: Text('Bildirim kapatılamadı. Tekrar dene.')),
-      );
+      AppNotificationService.show('Bildirim kapatılamadı. Tekrar dene.');
     }
   }
 
@@ -3743,6 +3753,7 @@ class _HomePageState extends State<HomePage> {
     _mapBearing = 0;
     _isOffRoute = false;
     _isCompletingNavigation = false;
+    _navigationStartDistanceToDestinationMeters = null;
     _isNetworkDegraded = false;
     _isCheckingNavigationNetwork = false;
     _navigationConnectivityTimer?.cancel();
@@ -3957,32 +3968,40 @@ out center tags;
     return address;
   }
 
+  void _upsertSavedAddress(Map<String, String> address) {
+    final addressId = address['id'];
+    if (addressId == null || addressId.isEmpty || !mounted) return;
+    setState(() {
+      _savedAddresses
+        ..removeWhere((savedAddress) => savedAddress['id'] == addressId)
+        ..insert(0, address);
+    });
+  }
+
   Future<void> _saveSelectedPlace() async {
     final title = _selectedDestinationName?.trim();
     if (title == null || title.isEmpty) return;
     final address = await _showAddAddressDialog(
       initialTitle: title,
       initialAddress: _searchController.text.trim(),
+      initialCoordinate: _selectedDestinationCoordinate,
     );
     if (address == null || !mounted) return;
-    if (_selectedDestinationCoordinate != null) {
-      address['latitude'] = _selectedDestinationCoordinate!.latitude.toString();
-      address['longitude'] = _selectedDestinationCoordinate!.longitude
-          .toString();
-    }
     final resolvedAddress = await _resolveAddressCoordinates(address);
 
     final user = FirebaseAuth.instance.currentUser;
+    if (user == null) {
+      _showTrackingMessage('Adres kaydetmek için hesabına giriş yap.');
+      return;
+    }
     try {
-      if (user != null) {
-        final document = await FirebaseFirestore.instance
-            .collection('users')
-            .doc(user.uid)
-            .collection('saved_addresses')
-            .add(resolvedAddress);
-        resolvedAddress['id'] = document.id;
-      }
-      setState(() => _savedAddresses.add(resolvedAddress));
+      final document = await FirebaseFirestore.instance
+          .collection('users')
+          .doc(user.uid)
+          .collection('saved_addresses')
+          .add(resolvedAddress);
+      resolvedAddress['id'] = document.id;
+      _upsertSavedAddress(resolvedAddress);
       _showTrackingMessage('${resolvedAddress['title']} adreslere kaydedildi.');
     } catch (error) {
       debugPrint('Adres kaydedilemedi: $error');
@@ -5614,6 +5633,29 @@ out center tags;
     });
   }
 
+  Future<void> _finishChatRoomCreation(String roomId) async {
+    try {
+      await _callQuotaCallable('completeDailyQuotaReservation', {
+        'reservationId': roomId,
+      });
+    } catch (error) {
+      debugPrint('Sohbet odası kotası tamamlanamadı: $error');
+    }
+
+    try {
+      await FirebaseFunctions.instanceFor(region: 'europe-west1')
+          .httpsCallable('sendChatMessage')
+          .call({
+            'messageType': 'room',
+            'roomId': roomId,
+            'senderName': _userName,
+            'text': 'Oda oluşturuldu, herkese merhaba!',
+          });
+    } catch (error) {
+      debugPrint('Sohbet odası karşılama mesajı gönderilemedi: $error');
+    }
+  }
+
   Future<void> _subscribeToDailyQuota(String userId, String date) async {
     await _dailyQuotaSubscription?.cancel();
     if (!mounted || FirebaseAuth.instance.currentUser?.uid != userId) return;
@@ -5877,9 +5919,11 @@ out center tags;
               ..addAll(
                 snapshot.docs
                     .where((document) => !_isHistoryExpired(document.data()))
-                    .map((document) => document.data())
-                    .map(
-                      (history) => <String, String>{
+                    .map((document) {
+                      final history = document.data();
+                      return <String, String>{
+                        'id': document.id,
+                        'collection': 'driving_history',
                         'route':
                             history['route']?.toString() ?? 'Tamamlanan rota',
                         'date': _formatHistoryDate(
@@ -5887,8 +5931,8 @@ out center tags;
                         ),
                         'duration': '${history['duration_minutes'] ?? 0} dk',
                         'km': '${history['distance_km'] ?? 0} km',
-                      },
-                    ),
+                      };
+                    }),
               );
             setState(() {
               _drivingHistory
@@ -5916,9 +5960,11 @@ out center tags;
               ..addAll(
                 snapshot.docs
                     .where((document) => !_isHistoryExpired(document.data()))
-                    .map((document) => document.data())
-                    .map(
-                      (history) => <String, String>{
+                    .map((document) {
+                      final history = document.data();
+                      return <String, String>{
+                        'id': document.id,
+                        'collection': 'route_history',
                         'route':
                             history['title']?.toString() ?? 'Tamamlanan rota',
                         'date': _formatHistoryDate(
@@ -5926,8 +5972,8 @@ out center tags;
                         ),
                         'duration': '${history['duration_minutes'] ?? 0} dk',
                         'km': '${history['distance_km'] ?? 0} km',
-                      },
-                    ),
+                      };
+                    }),
               );
             setState(() {
               _drivingHistory
@@ -5950,20 +5996,27 @@ out center tags;
             if (!mounted || FirebaseAuth.instance.currentUser?.uid != userId) {
               return;
             }
+            final contacts = <Map<String, String>>[];
+            final seenPhoneNumbers = <String>{};
+            for (final document in snapshot.docs) {
+              final contact = document.data();
+              final phone = contact['phone']?.toString() ?? '';
+              final normalizedPhone = _normalizeSosPhone(phone);
+              if (normalizedPhone.isNotEmpty &&
+                  !seenPhoneNumbers.add(normalizedPhone)) {
+                continue;
+              }
+              contacts.add({
+                'id': document.id,
+                'name': contact['name']?.toString() ?? '',
+                'phone': phone,
+                'relation': contact['relation']?.toString() ?? '',
+              });
+            }
             setState(() {
               _sosContacts
                 ..clear()
-                ..addAll(
-                  snapshot.docs.map((document) {
-                    final contact = document.data();
-                    return <String, String>{
-                      'id': document.id,
-                      'name': contact['name']?.toString() ?? '',
-                      'phone': contact['phone']?.toString() ?? '',
-                      'relation': contact['relation']?.toString() ?? '',
-                    };
-                  }),
-                );
+                ..addAll(contacts);
             });
           },
           onError: (Object error) {
@@ -6121,31 +6174,35 @@ out center tags;
           ..addAll(savedAddresses);
         final drivingHistory = drivingHistorySnapshot.docs
             .where((document) => !_isHistoryExpired(document.data()))
-            .map((document) => document.data())
-            .map(
-              (history) => <String, String>{
+            .map((document) {
+              final history = document.data();
+              return <String, String>{
+                'id': document.id,
+                'collection': 'driving_history',
                 'route': history['route']?.toString() ?? 'Tamamlanan rota',
                 'date': _formatHistoryDate(
                   history['completed_at'] ?? history['date'],
                 ),
                 'duration': '${history['duration_minutes'] ?? 0} dk',
                 'km': '${history['distance_km'] ?? 0} km',
-              },
-            )
+              };
+            })
             .toList();
         final routeHistory = routeHistorySnapshot.docs
             .where((document) => !_isHistoryExpired(document.data()))
-            .map((document) => document.data())
-            .map(
-              (history) => <String, String>{
+            .map((document) {
+              final history = document.data();
+              return <String, String>{
+                'id': document.id,
+                'collection': 'route_history',
                 'route': history['title']?.toString() ?? 'Tamamlanan rota',
                 'date': _formatHistoryDate(
                   history['completed_at'] ?? history['date'],
                 ),
                 'duration': '${history['duration_minutes'] ?? 0} dk',
                 'km': '${history['distance_km'] ?? 0} km',
-              },
-            )
+              };
+            })
             .toList();
         drivingHistory.addAll(routeHistory);
         _drivingHistory
@@ -6247,10 +6304,19 @@ out center tags;
     final mapTopInset = _selectedIndex == 1
         ? MediaQuery.viewPaddingOf(context).top
         : 0.0;
+    final snackBarBottomInset =
+        bottomSafeInset +
+        _bottomNavigationBarHeight +
+        _bottomNavigationGap +
+        12;
 
     return Theme(
-      data: ThemeData.light().copyWith(
+      data: Theme.of(context).copyWith(
         scaffoldBackgroundColor: const Color(0xFF111111),
+        snackBarTheme: Theme.of(context).snackBarTheme.copyWith(
+          behavior: SnackBarBehavior.floating,
+          insetPadding: EdgeInsets.fromLTRB(16, 0, 16, snackBarBottomInset),
+        ),
       ),
       child: Scaffold(
         resizeToAvoidBottomInset: false,
@@ -6683,31 +6749,23 @@ out center tags;
     Map<String, dynamic>? listing,
   }) async {
     if (FirebaseAuth.instance.currentUser == null) {
-      ScaffoldMessenger.of(context).showSnackBar(
-        const SnackBar(
-          content: Text('İlan vermek için önce giriş yapmalısın.'),
-        ),
-      );
+      AppNotificationService.show('İlan vermek için önce giriş yapmalısın.');
       return;
     }
 
     final submitted = await showModalBottomSheet<bool>(
       context: context,
       isScrollControlled: true,
-      useSafeArea: true,
+      useSafeArea: false,
       showDragHandle: false,
-      backgroundColor: Colors.transparent,
+      backgroundColor: const Color(0xFF171817),
       builder: (context) => CreatePropertyListingSheet(listing: listing),
     );
     if (submitted == true && mounted) {
-      ScaffoldMessenger.of(context).showSnackBar(
-        SnackBar(
-          content: Text(
-            listing == null
-                ? 'İlanın incelemeye gönderildi.'
-                : 'Değişiklikler incelemeye gönderildi.',
-          ),
-        ),
+      AppNotificationService.show(
+        listing == null
+            ? 'İlanın incelemeye gönderildi.'
+            : 'Değişiklikler incelemeye gönderildi.',
       );
     }
   }
@@ -6740,30 +6798,22 @@ out center tags;
     try {
       await _propertyListingService.deleteListing(listing['id'].toString());
       if (mounted) {
-        ScaffoldMessenger.of(context)
-            .showSnackBar(const SnackBar(content: Text('İlan silindi.')));
+        AppNotificationService.show('İlan silindi.');
       }
     } on FirebaseFunctionsException catch (error) {
       debugPrint('İlan silinemedi (${error.code}): ${error.message}');
       if (mounted) {
-        ScaffoldMessenger.of(context).showSnackBar(
-          SnackBar(
-            content: Text(switch (error.code) {
-              'unauthenticated' =>
-                'Oturumun sona ermiş. Tekrar giriş yapıp dene.',
-              'permission-denied' => 'Bu ilanı silme yetkin yok.',
-              'not-found' => 'İlan silme servisi bulunamadı. Uygulamayı güncelleyip tekrar dene.',
-              _ => 'İlan silinemedi (${error.code}). Daha sonra tekrar dene.',
-            }),
-          ),
-        );
+        AppNotificationService.show(switch (error.code) {
+          'unauthenticated' => 'Oturumun sona ermiş. Tekrar giriş yapıp dene.',
+          'permission-denied' => 'Bu ilanı silme yetkin yok.',
+          'not-found' => 'İlan silme servisi bulunamadı. Uygulamayı güncelleyip tekrar dene.',
+          _ => 'İlan silinemedi (${error.code}). Daha sonra tekrar dene.',
+        });
       }
     } catch (error) {
       debugPrint('İlan silinemedi: $error');
       if (mounted) {
-        ScaffoldMessenger.of(context).showSnackBar(
-          const SnackBar(content: Text('İlan silinemedi. Tekrar dene.')),
-        );
+        AppNotificationService.show('İlan silinemedi. Tekrar dene.');
       }
     }
   }
@@ -9095,6 +9145,7 @@ out center tags;
     final TextEditingController roomPassController = TextEditingController();
     bool requiresPassword = false;
     bool showPassword = false;
+    bool isCreating = false;
 
     showModalBottomSheet(
       context: context,
@@ -9277,186 +9328,189 @@ out center tags;
                       borderRadius: BorderRadius.circular(14),
                     ),
                   ),
-                  onPressed: () async {
-                    if (roomNameController.text.trim().isEmpty) {
-                      ScaffoldMessenger.of(context).showSnackBar(
-                        const SnackBar(
-                          content: Text('Lütfen oda adını girin.'),
-                        ),
-                      );
-                      return;
-                    }
+                  onPressed: isCreating
+                      ? null
+                      : () async {
+                          if (roomNameController.text.trim().isEmpty) {
+                            AppNotificationService.show(
+                              'Lütfen oda adını girin.',
+                            );
+                            return;
+                          }
 
-                    final position = _currentPosition;
-                    if (position == null) {
-                      ScaffoldMessenger.of(context).showSnackBar(
-                        const SnackBar(
-                          content: Text(
-                            'Odayı haritada göstermek için konumunuz gerekli.',
+                          final position = _currentPosition;
+                          if (position == null) {
+                            AppNotificationService.show(
+                              'Odayı haritada göstermek için konumunuz gerekli.',
+                            );
+                            return;
+                          }
+
+                          final user = FirebaseAuth.instance.currentUser;
+                          if (user == null) {
+                            _showTrackingMessage(
+                              'Oda oluşturmak için önce hesabına giriş yap.',
+                            );
+                            return;
+                          }
+                          final password = roomPassController.text.trim();
+                          if (requiresPassword && password.length < 12) {
+                            _showTrackingMessage(
+                              'Oda şifresi en az 12 karakter olmalı.',
+                            );
+                            return;
+                          }
+
+                          setModalState(() => isCreating = true);
+                          final expiresAt = DateTime.now().add(
+                            _chatRoomLifetime,
+                          );
+                          String? quotaReservationId;
+                          var quotaReserved = false;
+                          try {
+                            final roomReference = FirebaseFirestore.instance
+                                .collection('chat_rooms')
+                                .doc();
+                            quotaReservationId = roomReference.id;
+                            final listingReference = FirebaseFirestore.instance
+                                .collection('chat_room_listings')
+                                .doc(roomReference.id);
+                            final salt = requiresPassword
+                                ? navoraGenerateRoomPasswordSalt()
+                                : '';
+                            final passwordHash = requiresPassword
+                                ? await navoraHashRoomPassword(password, salt)
+                                : null;
+                            await _reserveDailyQuota('room', roomReference.id);
+                            quotaReserved = true;
+                            final batch = FirebaseFirestore.instance.batch();
+                            batch.set(roomReference, {
+                              'schema_version': 2,
+                              'owner_id': user.uid,
+                              'name': roomNameController.text.trim(),
+                              'type': 'Sohbet Odası',
+                              'active_users': '1 kişi aktif',
+                              'active_users_count': 1,
+                              'member_ids': <String>[user.uid],
+                              'moderator_ids': <String>[],
+                              'latitude': position.latitude,
+                              'longitude': position.longitude,
+                              'is_protected': requiresPassword,
+                              'password_salt': salt,
+                              'created_at': FieldValue.serverTimestamp(),
+                              'updated_at': FieldValue.serverTimestamp(),
+                              'expires_at': Timestamp.fromDate(expiresAt),
+                              'max_users': 50,
+                            });
+                            batch.set(listingReference, {
+                              'owner_id': user.uid,
+                              'name': roomNameController.text.trim(),
+                              'type': 'Sohbet Odası',
+                              'active_users': '1 kişi aktif',
+                              'active_users_count': 1,
+                              'latitude': position.latitude,
+                              'longitude': position.longitude,
+                              'is_protected': requiresPassword,
+                              'password_salt': salt,
+                              'created_at': FieldValue.serverTimestamp(),
+                              'updated_at': FieldValue.serverTimestamp(),
+                              'expires_at': Timestamp.fromDate(expiresAt),
+                              'max_users': 50,
+                            });
+                            batch.set(
+                              roomReference.collection('members').doc(user.uid),
+                              {
+                                'password_hash': passwordHash ?? '',
+                                'joined_at': FieldValue.serverTimestamp(),
+                              },
+                            );
+                            if (passwordHash != null) {
+                              batch.set(
+                                roomReference
+                                    .collection('private')
+                                    .doc('access'),
+                                {
+                                  'password_hash': passwordHash,
+                                  'updated_at': FieldValue.serverTimestamp(),
+                                },
+                              );
+                            }
+                            await batch.commit();
+                            quotaReserved = false;
+                            unawaited(
+                              _finishChatRoomCreation(roomReference.id),
+                            );
+                            if (!context.mounted) return;
+                            Navigator.pop(context);
+                            AppNotificationService.show(
+                              'Sohbet odası başarıyla açıldı!',
+                            );
+                          } catch (error) {
+                            debugPrint('Sohbet odası oluşturulamadı: $error');
+                            if (quotaReserved && quotaReservationId != null) {
+                              try {
+                                await _callQuotaCallable(
+                                  'cancelDailyQuotaReservation',
+                                  {'reservationId': quotaReservationId},
+                                );
+                              } catch (releaseError) {
+                                debugPrint(
+                                  'Sohbet odası kotası geri alınamadı: $releaseError',
+                                );
+                              }
+                            }
+                            if (mounted) {
+                              final quotaExceeded =
+                                  error is FirebaseFunctionsException &&
+                                  error.code == 'resource-exhausted';
+                              if (quotaExceeded) {
+                                _showProUpgradeModal();
+                              } else if (error is FirebaseFunctionsException &&
+                                  error.code == 'unauthenticated') {
+                                _showTrackingMessage(
+                                  'Oturum doğrulanamadı. Lütfen çıkış yapıp tekrar giriş yapın.',
+                                );
+                              } else if (error is FirebaseAuthException) {
+                                _showTrackingMessage(
+                                  'Oturum doğrulanamadı. Lütfen tekrar giriş yapın.',
+                                );
+                              } else {
+                                _showTrackingMessage(
+                                  'Oda oluşturulamadı. Tekrar deneyin.',
+                                );
+                              }
+                            }
+                            return;
+                          } finally {
+                            if (context.mounted) {
+                              setModalState(() => isCreating = false);
+                            }
+                          }
+                        },
+                  child: isCreating
+                      ? const Row(
+                          mainAxisAlignment: MainAxisAlignment.center,
+                          children: [
+                            SizedBox(
+                              width: 18,
+                              height: 18,
+                              child: CircularProgressIndicator(
+                                strokeWidth: 2,
+                                color: Colors.white,
+                              ),
+                            ),
+                            SizedBox(width: 10),
+                            Text('Oda oluşturuluyor...'),
+                          ],
+                        )
+                      : const Text(
+                          'Odayı Kur ve Yayınla',
+                          style: TextStyle(
+                            color: Colors.white,
+                            fontSize: 16,
+                            fontWeight: FontWeight.bold,
                           ),
                         ),
-                      );
-                      return;
-                    }
-
-                    final user = FirebaseAuth.instance.currentUser;
-                    if (user == null) return;
-                    final password = roomPassController.text.trim();
-                    if (requiresPassword && password.length < 12) {
-                      _showTrackingMessage(
-                        'Oda şifresi en az 12 karakter olmalı.',
-                      );
-                      return;
-                    }
-
-                    final expiresAt = DateTime.now().add(_chatRoomLifetime);
-                    String? quotaReservationId;
-                    var quotaReserved = false;
-                    try {
-                      final roomReference = FirebaseFirestore.instance
-                          .collection('chat_rooms')
-                          .doc();
-                      quotaReservationId = roomReference.id;
-                      final listingReference = FirebaseFirestore.instance
-                          .collection('chat_room_listings')
-                          .doc(roomReference.id);
-                      final salt = requiresPassword
-                          ? navoraGenerateRoomPasswordSalt()
-                          : '';
-                      final passwordHash = requiresPassword
-                          ? await navoraHashRoomPassword(password, salt)
-                          : null;
-                      await _reserveDailyQuota('room', roomReference.id);
-                      quotaReserved = true;
-                      final batch = FirebaseFirestore.instance.batch();
-                      batch.set(roomReference, {
-                        'schema_version': 2,
-                        'owner_id': user.uid,
-                        'name': roomNameController.text.trim(),
-                        'type': 'Sohbet Odası',
-                        'active_users': '1 kişi aktif',
-                        'active_users_count': 1,
-                        'member_ids': <String>[user.uid],
-                        'moderator_ids': <String>[],
-                        'latitude': position.latitude,
-                        'longitude': position.longitude,
-                        'is_protected': requiresPassword,
-                        'password_salt': salt,
-                        'created_at': FieldValue.serverTimestamp(),
-                        'updated_at': FieldValue.serverTimestamp(),
-                        'expires_at': Timestamp.fromDate(expiresAt),
-                        'max_users': 50,
-                      });
-                      batch.set(listingReference, {
-                        'owner_id': user.uid,
-                        'name': roomNameController.text.trim(),
-                        'type': 'Sohbet Odası',
-                        'active_users': '1 kişi aktif',
-                        'active_users_count': 1,
-                        'latitude': position.latitude,
-                        'longitude': position.longitude,
-                        'is_protected': requiresPassword,
-                        'password_salt': salt,
-                        'created_at': FieldValue.serverTimestamp(),
-                        'updated_at': FieldValue.serverTimestamp(),
-                        'expires_at': Timestamp.fromDate(expiresAt),
-                        'max_users': 50,
-                      });
-                      batch.set(
-                        roomReference.collection('members').doc(user.uid),
-                        {
-                          'password_hash': passwordHash ?? '',
-                          'joined_at': FieldValue.serverTimestamp(),
-                        },
-                      );
-                      if (passwordHash != null) {
-                        batch.set(
-                          roomReference.collection('private').doc('access'),
-                          {
-                            'password_hash': passwordHash,
-                            'updated_at': FieldValue.serverTimestamp(),
-                          },
-                        );
-                      }
-                      await batch.commit();
-                      quotaReserved = false;
-                      try {
-                        await _callQuotaCallable(
-                          'completeDailyQuotaReservation',
-                          {'reservationId': roomReference.id},
-                        );
-                      } catch (error) {
-                        debugPrint('Sohbet odası kotası tamamlanamadı: $error');
-                      }
-                      try {
-                        await FirebaseFunctions.instanceFor(
-                          region: 'europe-west1',
-                        ).httpsCallable('sendChatMessage').call({
-                          'messageType': 'room',
-                          'roomId': roomReference.id,
-                          'senderName': _userName,
-                          'text': 'Oda oluşturuldu, herkese merhaba!',
-                        });
-                      } on FirebaseFunctionsException catch (error) {
-                        debugPrint(
-                          'Sohbet odası karşılama mesajı gönderilemedi: '
-                          '${error.code}',
-                        );
-                      }
-                    } catch (error) {
-                      debugPrint('Sohbet odası oluşturulamadı: $error');
-                      if (quotaReserved && quotaReservationId != null) {
-                        try {
-                          await _callQuotaCallable(
-                            'cancelDailyQuotaReservation',
-                            {'reservationId': quotaReservationId},
-                          );
-                        } catch (releaseError) {
-                          debugPrint(
-                            'Sohbet odası kotası geri alınamadı: $releaseError',
-                          );
-                        }
-                      }
-                      if (mounted) {
-                        final quotaExceeded =
-                            error is FirebaseFunctionsException &&
-                            error.code == 'resource-exhausted';
-                        if (quotaExceeded) {
-                          _showProUpgradeModal();
-                        } else if (error is FirebaseFunctionsException &&
-                            error.code == 'unauthenticated') {
-                          _showTrackingMessage(
-                            'Oturum doğrulanamadı. Lütfen çıkış yapıp tekrar giriş yapın.',
-                          );
-                        } else if (error is FirebaseAuthException) {
-                          _showTrackingMessage(
-                            'Oturum doğrulanamadı. Lütfen tekrar giriş yapın.',
-                          );
-                        } else {
-                          _showTrackingMessage(
-                            'Oda oluşturulamadı. Tekrar deneyin.',
-                          );
-                        }
-                      }
-                      return;
-                    }
-
-                    if (!context.mounted) return;
-                    Navigator.pop(context);
-                    ScaffoldMessenger.of(context).showSnackBar(
-                      const SnackBar(
-                        content: Text('Sohbet odası başarıyla açıldı!'),
-                      ),
-                    );
-                  },
-                  child: const Text(
-                    'Odayı Kur ve Yayınla',
-                    style: TextStyle(
-                      color: Colors.white,
-                      fontSize: 16,
-                      fontWeight: FontWeight.bold,
-                    ),
-                  ),
                 ),
               ),
             ],
@@ -9477,10 +9531,12 @@ out center tags;
     final user = FirebaseAuth.instance.currentUser;
     if (user == null) return;
 
-    final canEnter = await _joinRoom(roomId, passwordHash: passwordHash);
-    if (!canEnter || !mounted) return;
-
     final ownerId = (room['ownerId'] ?? room['owner_id'])?.toString() ?? '';
+    if (ownerId != user.uid) {
+      final canEnter = await _joinRoom(roomId, passwordHash: passwordHash);
+      if (!canEnter || !mounted) return;
+    }
+
     final moderatorIdsValue =
         room['moderatorIds'] ?? room['moderator_ids'] ?? const <String>[];
     final moderatorIds = moderatorIdsValue is Iterable
@@ -9656,9 +9712,7 @@ out center tags;
               final enteredPassword = passController.text.trim();
               final salt = room['passwordSalt']?.toString() ?? '';
               if (enteredPassword.length < 12 || salt.isEmpty) {
-                ScaffoldMessenger.of(context).showSnackBar(
-                  const SnackBar(content: Text('Oda şifresi geçersiz.')),
-                );
+                AppNotificationService.show('Oda şifresi geçersiz.');
                 return;
               }
               Navigator.of(dialogContext, rootNavigator: true).pop();
@@ -9683,16 +9737,16 @@ out center tags;
     );
   }
 
-  void _showAboutSupportSheet() {
+  Future<void> _showAboutSupportSheet() async {
     const supportEmail = 'navora.map@gmail.com';
 
-    showModalBottomSheet(
+    await showModalBottomSheet<void>(
       context: context,
       backgroundColor: const Color(0xFF191919),
       shape: const RoundedRectangleBorder(
         borderRadius: BorderRadius.vertical(top: Radius.circular(24)),
       ),
-      builder: (context) => Padding(
+      builder: (sheetContext) => Padding(
         padding: const EdgeInsets.fromLTRB(20, 22, 20, 28),
         child: Column(
           mainAxisSize: MainAxisSize.min,
@@ -9720,7 +9774,7 @@ out center tags;
                 ),
                 IconButton(
                   tooltip: 'Kapat',
-                  onPressed: () => Navigator.pop(context),
+                  onPressed: () => Navigator.pop(sheetContext),
                   icon: const Icon(Icons.close_rounded),
                 ),
               ],
@@ -9734,58 +9788,56 @@ out center tags;
                 height: 1.45,
               ),
             ),
-            const SizedBox(height: 18),
-            Container(
-              padding: const EdgeInsets.all(14),
-              decoration: BoxDecoration(
-                color: const Color(0xFF202020),
-                borderRadius: BorderRadius.circular(14),
-                border: Border.all(color: const Color(0xFF333333)),
-              ),
-              child: Row(
-                children: [
-                  const Icon(Icons.email_outlined, color: Color(0xFFFF6B00)),
-                  const SizedBox(width: 12),
-                  const Expanded(
-                    child: Column(
-                      crossAxisAlignment: CrossAxisAlignment.start,
-                      children: [
-                        Text(
-                          'Bize ulaşın',
-                          style: TextStyle(
-                            fontWeight: FontWeight.bold,
-                            fontSize: 13,
-                          ),
-                        ),
-                        SizedBox(height: 3),
-                        Text(
+            const SizedBox(height: 10),
+            Material(
+              color: Colors.transparent,
+              child: InkWell(
+                borderRadius: BorderRadius.circular(10),
+                onTap: () async {
+                  final emailUri = Uri(scheme: 'mailto', path: supportEmail);
+                  final opened = await launchUrl(
+                    emailUri,
+                    mode: LaunchMode.externalApplication,
+                  );
+                  if (!opened && mounted) {
+                    _showTrackingMessage(
+                      'Bu cihazda e-posta uygulaması bulunamadı.',
+                    );
+                  }
+                },
+                child: Padding(
+                  padding: const EdgeInsets.symmetric(
+                    vertical: 8,
+                    horizontal: 4,
+                  ),
+                  child: Row(
+                    children: [
+                      const Icon(
+                        Icons.email_outlined,
+                        color: Color(0xFFFF6B00),
+                        size: 19,
+                      ),
+                      const SizedBox(width: 10),
+                      const Expanded(
+                        child: Text(
                           supportEmail,
                           style: TextStyle(
                             color: Color(0xFFFF6B00),
                             fontSize: 13,
                           ),
                         ),
-                      ],
-                    ),
+                      ),
+                      const Icon(
+                        Icons.open_in_new_rounded,
+                        color: Colors.white54,
+                        size: 17,
+                      ),
+                    ],
                   ),
-                  IconButton(
-                    tooltip: 'E-posta adresini kopyala',
-                    onPressed: () {
-                      Clipboard.setData(
-                        const ClipboardData(text: supportEmail),
-                      );
-                      ScaffoldMessenger.of(context).showSnackBar(
-                        const SnackBar(
-                          content: Text('Destek e-posta adresi kopyalandı.'),
-                        ),
-                      );
-                    },
-                    icon: const Icon(Icons.copy_rounded, size: 20),
-                  ),
-                ],
+                ),
               ),
             ),
-            const SizedBox(height: 12),
+            const SizedBox(height: 6),
             Text(
               'Geri bildirimlerinizi, hata bildirimlerinizi ve önerilerinizi bizimle paylaşabilirsiniz.',
               style: TextStyle(color: Colors.grey.shade600, fontSize: 12),
@@ -10923,6 +10975,7 @@ out center tags;
   // --- MODAL PENCERELERİ ---
 
   void _showSavedAddressesDialog() {
+    var isSavingAddress = false;
     showModalBottomSheet(
       context: context,
       backgroundColor: const Color(0xFF191919),
@@ -10961,21 +11014,54 @@ out center tags;
                             Icons.add_location_alt_outlined,
                             color: Color(0xFFFFB066),
                           ),
-                          onPressed: () async {
-                            final address = await _showAddAddressDialog();
-                            if (address == null || !mounted) return;
-                            final user = FirebaseAuth.instance.currentUser;
-                            if (user != null) {
-                              final document = await FirebaseFirestore.instance
-                                  .collection('users')
-                                  .doc(user.uid)
-                                  .collection('saved_addresses')
-                                  .add(address);
-                              address['id'] = document.id;
-                            }
-                            setState(() => _savedAddresses.add(address));
-                            setModalState(() {});
-                          },
+                          onPressed: isSavingAddress
+                              ? null
+                              : () async {
+                                  if (isSavingAddress) {
+                                    return;
+                                  }
+                                  final address = await _showAddAddressDialog();
+                                  if (address == null || !context.mounted) {
+                                    return;
+                                  }
+                                  final user =
+                                      FirebaseAuth.instance.currentUser;
+                                  if (user == null) {
+                                    _showTrackingMessage(
+                                      'Adres kaydetmek için hesabına giriş yap.',
+                                    );
+                                    return;
+                                  }
+                                  setModalState(() => isSavingAddress = true);
+                                  try {
+                                    final document = await FirebaseFirestore
+                                        .instance
+                                        .collection('users')
+                                        .doc(user.uid)
+                                        .collection('saved_addresses')
+                                        .add(address);
+                                    address['id'] = document.id;
+                                    _upsertSavedAddress(address);
+                                    if (!context.mounted) return;
+                                    _showTrackingMessage(
+                                      '${address['title']} adreslere kaydedildi.',
+                                    );
+                                    setModalState(() {});
+                                  } catch (error) {
+                                    debugPrint('Adres kaydedilemedi: $error');
+                                    if (mounted) {
+                                      _showTrackingMessage(
+                                        'Adres kaydedilemedi. Lütfen tekrar deneyin.',
+                                      );
+                                    }
+                                  } finally {
+                                    if (context.mounted) {
+                                      setModalState(
+                                        () => isSavingAddress = false,
+                                      );
+                                    }
+                                  }
+                                },
                         ),
                         IconButton(
                           icon: const Icon(Icons.close, color: Colors.white70),
@@ -11075,18 +11161,40 @@ out center tags;
                                           final user =
                                               FirebaseAuth.instance.currentUser;
                                           final addressId = addr['id'];
-                                          if (user != null &&
-                                              addressId != null) {
+                                          if (user == null ||
+                                              addressId == null ||
+                                              addressId.isEmpty) {
+                                            _showTrackingMessage(
+                                              'Adres silinemedi. Tekrar deneyin.',
+                                            );
+                                            return;
+                                          }
+                                          try {
                                             await FirebaseFirestore.instance
                                                 .collection('users')
                                                 .doc(user.uid)
                                                 .collection('saved_addresses')
                                                 .doc(addressId)
                                                 .delete();
+                                            if (!mounted) return;
+                                            setState(() {
+                                              _savedAddresses.removeWhere(
+                                                (savedAddress) =>
+                                                    savedAddress['id'] ==
+                                                    addressId,
+                                              );
+                                            });
+                                            _showTrackingMessage(
+                                              'Adres silindi.',
+                                            );
+                                          } catch (error) {
+                                            debugPrint(
+                                              'Kayıtlı adres silinemedi: $error',
+                                            );
+                                            _showTrackingMessage(
+                                              'Adres silinemedi. Lütfen tekrar deneyin.',
+                                            );
                                           }
-                                          setState(
-                                            () => _savedAddresses.remove(addr),
-                                          );
                                         }
                                         setModalState(() {});
                                       },
@@ -11106,6 +11214,84 @@ out center tags;
     );
   }
 
+  Future<void> _deleteHistoryEntry(
+    Map<String, String> history, {
+    required VoidCallback refreshSheet,
+  }) async {
+    final entryId = history['id'];
+    final collectionName = history['collection'];
+    if (entryId == null ||
+        entryId.isEmpty ||
+        collectionName == null ||
+        (collectionName != 'driving_history' &&
+            collectionName != 'route_history')) {
+      _showTrackingMessage('Geçmiş kaydı silinemedi.');
+      return;
+    }
+
+    final shouldDelete = await showDialog<bool>(
+      context: context,
+      builder: (dialogContext) => AlertDialog(
+        title: const Text('Geçmiş kaydı silinsin mi?'),
+        content: Text(
+          '"${history['route'] ?? 'Bu kayıt'}" geçmişten silinecek.',
+        ),
+        actions: [
+          TextButton(
+            onPressed: () => Navigator.pop(dialogContext, false),
+            child: const Text('Vazgeç'),
+          ),
+          FilledButton(
+            style: FilledButton.styleFrom(backgroundColor: Colors.redAccent),
+            onPressed: () => Navigator.pop(dialogContext, true),
+            child: const Text('Sil'),
+          ),
+        ],
+      ),
+    );
+    if (shouldDelete != true || !mounted) return;
+
+    final entryKey = '$collectionName/$entryId';
+    if (!_deletingHistoryEntryKeys.add(entryKey)) return;
+    if (mounted) setState(() {});
+    refreshSheet();
+    try {
+      final user = FirebaseAuth.instance.currentUser;
+      if (user == null) {
+        throw StateError('Geçmişi silmek için oturum açmalısınız.');
+      }
+      await FirebaseFirestore.instance
+          .collection('users')
+          .doc(user.uid)
+          .collection(collectionName)
+          .doc(entryId)
+          .delete();
+      if (!mounted) return;
+      setState(() {
+        _liveDrivingHistory.removeWhere(
+          (entry) =>
+              entry['collection'] == collectionName && entry['id'] == entryId,
+        );
+        _liveRouteHistory.removeWhere(
+          (entry) =>
+              entry['collection'] == collectionName && entry['id'] == entryId,
+        );
+        _drivingHistory.removeWhere(
+          (entry) =>
+              entry['collection'] == collectionName && entry['id'] == entryId,
+        );
+      });
+      _showTrackingMessage('Geçmiş kaydı silindi.');
+    } catch (error) {
+      debugPrint('Geçmiş kaydı silinemedi: $error');
+      if (mounted) _showTrackingMessage('Geçmiş kaydı silinemedi.');
+    } finally {
+      _deletingHistoryEntryKeys.remove(entryKey);
+      if (mounted) setState(() {});
+      refreshSheet();
+    }
+  }
+
   void _showDrivingHistoryDialog() {
     showModalBottomSheet(
       context: context,
@@ -11113,120 +11299,174 @@ out center tags;
       shape: const RoundedRectangleBorder(
         borderRadius: BorderRadius.vertical(top: Radius.circular(24)),
       ),
-      builder: (context) => Container(
-        padding: const EdgeInsets.all(20),
-        height: MediaQuery.of(context).size.height * 0.55,
-        child: Column(
-          crossAxisAlignment: CrossAxisAlignment.start,
-          children: [
-            Row(
-              mainAxisAlignment: MainAxisAlignment.spaceBetween,
-              children: [
-                const Text(
-                  'Geçmiş Rotalar & Sürüşler',
-                  style: TextStyle(
-                    fontSize: 18,
-                    fontWeight: FontWeight.bold,
-                    color: Colors.white,
-                  ),
-                ),
-                IconButton(
-                  icon: const Icon(Icons.close, color: Colors.white70),
-                  onPressed: () => Navigator.pop(context),
-                ),
-              ],
-            ),
-            const SizedBox(height: 10),
-            Container(
-              width: double.infinity,
-              padding: const EdgeInsets.all(12),
-              decoration: BoxDecoration(
-                color: const Color(0xFF1A120D),
-                borderRadius: BorderRadius.circular(12),
-                border: Border.all(
-                  color: const Color(0xFFFF8A3D).withValues(alpha: 0.5),
-                ),
-              ),
-              child: const Row(
+      builder: (context) => StatefulBuilder(
+        builder: (context, setSheetState) => Container(
+          padding: const EdgeInsets.all(20),
+          height: MediaQuery.of(context).size.height * 0.55,
+          child: Column(
+            crossAxisAlignment: CrossAxisAlignment.start,
+            children: [
+              Row(
+                mainAxisAlignment: MainAxisAlignment.spaceBetween,
                 children: [
-                  Icon(Icons.info_outline, size: 18, color: Color(0xFFFFB066)),
-                  SizedBox(width: 8),
-                  Expanded(
-                    child: Text(
-                      'Geçmiş sürüş ve rota verileri 30 gün sonra otomatik olarak silinir.',
-                      style: TextStyle(fontSize: 12, color: Colors.white70),
+                  const Text(
+                    'Geçmiş Rotalar & Sürüşler',
+                    style: TextStyle(
+                      fontSize: 18,
+                      fontWeight: FontWeight.bold,
+                      color: Colors.white,
                     ),
+                  ),
+                  IconButton(
+                    icon: const Icon(Icons.close, color: Colors.white70),
+                    onPressed: () => Navigator.pop(context),
                   ),
                 ],
               ),
-            ),
-            const SizedBox(height: 10),
-            Expanded(
-              child: ListView.builder(
-                itemCount: _drivingHistory.length,
-                itemBuilder: (context, index) {
-                  final h = _drivingHistory[index];
-                  return Container(
-                    margin: const EdgeInsets.only(bottom: 10),
-                    padding: const EdgeInsets.all(12),
-                    decoration: BoxDecoration(
-                      color: const Color(0xFF1A1A1A),
-                      borderRadius: BorderRadius.circular(14),
-                      border: Border.all(
-                        color: const Color(0xFFFF8A3D).withValues(alpha: 0.3),
-                      ),
-                      boxShadow: [
-                        BoxShadow(
-                          color: Colors.black.withValues(alpha: 0.08),
-                          blurRadius: 10,
-                          offset: const Offset(0, 4),
-                        ),
-                      ],
+              const SizedBox(height: 10),
+              Container(
+                width: double.infinity,
+                padding: const EdgeInsets.all(12),
+                decoration: BoxDecoration(
+                  color: const Color(0xFF1A120D),
+                  borderRadius: BorderRadius.circular(12),
+                  border: Border.all(
+                    color: const Color(0xFFFF8A3D).withValues(alpha: 0.5),
+                  ),
+                ),
+                child: const Row(
+                  children: [
+                    Icon(
+                      Icons.info_outline,
+                      size: 18,
+                      color: Color(0xFFFFB066),
                     ),
-                    child: InkWell(
-                      borderRadius: BorderRadius.circular(14),
-                      onTap: () => _showHistoryDetails(h),
-                      child: Row(
-                        mainAxisAlignment: MainAxisAlignment.spaceBetween,
-                        children: [
-                          Row(
-                            children: [
-                              const Icon(
-                                Icons.alt_route,
-                                color: Color(0xFFFF8A3D),
+                    SizedBox(width: 8),
+                    Expanded(
+                      child: Text(
+                        'Geçmiş sürüş ve rota verileri 30 gün sonra otomatik olarak silinir.',
+                        style: TextStyle(fontSize: 12, color: Colors.white70),
+                      ),
+                    ),
+                  ],
+                ),
+              ),
+              const SizedBox(height: 10),
+              Expanded(
+                child: _drivingHistory.isEmpty
+                    ? const Center(
+                        child: Text(
+                          'Geçmiş kayıt bulunmuyor.',
+                          style: TextStyle(color: Colors.white70),
+                        ),
+                      )
+                    : ListView.builder(
+                        itemCount: _drivingHistory.length,
+                        itemBuilder: (context, index) {
+                          final h = _drivingHistory[index];
+                          final id = h['id'];
+                          final collection = h['collection'];
+                          final entryKey = id == null || collection == null
+                              ? null
+                              : '$collection/$id';
+                          final isDeleting =
+                              entryKey != null &&
+                              _deletingHistoryEntryKeys.contains(entryKey);
+                          return Container(
+                            margin: const EdgeInsets.only(bottom: 10),
+                            padding: const EdgeInsets.all(12),
+                            decoration: BoxDecoration(
+                              color: const Color(0xFF1A1A1A),
+                              borderRadius: BorderRadius.circular(14),
+                              border: Border.all(
+                                color: const Color(0xFFFF8A3D)
+                                    .withValues(alpha: 0.3),
                               ),
-                              const SizedBox(width: 12),
-                              Column(
-                                crossAxisAlignment: CrossAxisAlignment.start,
+                              boxShadow: [
+                                BoxShadow(
+                                  color: Colors.black.withValues(alpha: 0.08),
+                                  blurRadius: 10,
+                                  offset: const Offset(0, 4),
+                                ),
+                              ],
+                            ),
+                            child: InkWell(
+                              borderRadius: BorderRadius.circular(14),
+                              onTap: isDeleting
+                                  ? null
+                                  : () => _showHistoryDetails(h),
+                              child: Row(
                                 children: [
-                                  Text(
-                                    h['route']!,
-                                    style: const TextStyle(
-                                      fontWeight: FontWeight.bold,
-                                      fontSize: 13,
-                                      color: Colors.white,
+                                  const Icon(
+                                    Icons.alt_route,
+                                    color: Color(0xFFFF8A3D),
+                                  ),
+                                  const SizedBox(width: 12),
+                                  Expanded(
+                                    child: Column(
+                                      crossAxisAlignment:
+                                          CrossAxisAlignment.start,
+                                      children: [
+                                        Text(
+                                          h['route']!,
+                                          maxLines: 1,
+                                          overflow: TextOverflow.ellipsis,
+                                          style: const TextStyle(
+                                            fontWeight: FontWeight.bold,
+                                            fontSize: 13,
+                                            color: Colors.white,
+                                          ),
+                                        ),
+                                        const SizedBox(height: 2),
+                                        Text(
+                                          '${h['date']} • ${h['duration']} • ${h['km']}',
+                                          maxLines: 1,
+                                          overflow: TextOverflow.ellipsis,
+                                          style: const TextStyle(
+                                            fontSize: 11,
+                                            color: Colors.white70,
+                                          ),
+                                        ),
+                                      ],
                                     ),
                                   ),
-                                  const SizedBox(height: 2),
-                                  Text(
-                                    '${h['date']} • ${h['duration']} • ${h['km']}',
-                                    style: const TextStyle(
-                                      fontSize: 11,
-                                      color: Colors.white70,
-                                    ),
+                                  IconButton(
+                                    tooltip: 'Geçmiş kaydını sil',
+                                    onPressed:
+                                        isDeleting ||
+                                            id == null ||
+                                            collection == null
+                                        ? null
+                                        : () => _deleteHistoryEntry(
+                                            h,
+                                            refreshSheet: () {
+                                              if (context.mounted) {
+                                                setSheetState(() {});
+                                              }
+                                            },
+                                          ),
+                                    icon: isDeleting
+                                        ? const SizedBox(
+                                            width: 18,
+                                            height: 18,
+                                            child: CircularProgressIndicator(
+                                              strokeWidth: 2,
+                                            ),
+                                          )
+                                        : const Icon(
+                                            Icons.delete_outline,
+                                            color: Colors.redAccent,
+                                          ),
                                   ),
                                 ],
                               ),
-                            ],
-                          ),
-                        ],
+                            ),
+                          );
+                        },
                       ),
-                    ),
-                  );
-                },
               ),
-            ),
-          ],
+            ],
+          ),
         ),
       ),
     );
@@ -11307,139 +11547,363 @@ out center tags;
   Future<Map<String, String>?> _showAddAddressDialog({
     String initialTitle = '',
     String initialAddress = '',
+    LatLng? initialCoordinate,
   }) async {
     final titleController = TextEditingController(text: initialTitle);
     final addressController = TextEditingController(text: initialAddress);
     String selectedType = 'favorite';
+    LatLng? selectedCoordinate = initialCoordinate;
 
-    final result = await showDialog<Map<String, String>>(
+    final result = await showModalBottomSheet<Map<String, String>>(
       context: context,
-      builder: (context) => StatefulBuilder(
-        builder: (context, setDialogState) => AlertDialog(
-          backgroundColor: const Color(0xFF171717),
-          title: const Text(
-            'Yeni Adres Ekle',
-            style: TextStyle(color: Colors.white),
-          ),
-          content: Column(
-            mainAxisSize: MainAxisSize.min,
-            children: [
-              TextField(
-                controller: titleController,
-                style: const TextStyle(color: Colors.white),
-                decoration: InputDecoration(
-                  labelText: 'Adres adı',
-                  hintText: 'Ev, İş veya Favori',
-                  labelStyle: const TextStyle(color: Color(0xFFBDBDBD)),
-                  hintStyle: const TextStyle(color: Color(0xFF8F8F8F)),
-                  filled: true,
-                  fillColor: const Color(0xFF1F1F1F),
-                  enabledBorder: OutlineInputBorder(
-                    borderRadius: BorderRadius.circular(12),
-                    borderSide: const BorderSide(color: Color(0xFF333333)),
-                  ),
-                  focusedBorder: OutlineInputBorder(
-                    borderRadius: BorderRadius.circular(12),
-                    borderSide: const BorderSide(color: Color(0xFFFF7A00)),
-                  ),
-                ),
-              ),
-              const SizedBox(height: 12),
-              TextField(
-                controller: addressController,
-                maxLines: 2,
-                style: const TextStyle(color: Colors.white),
-                decoration: InputDecoration(
-                  labelText: 'Adres',
-                  hintText: 'Adres bilgisini yazın',
-                  labelStyle: const TextStyle(color: Color(0xFFBDBDBD)),
-                  hintStyle: const TextStyle(color: Color(0xFF8F8F8F)),
-                  filled: true,
-                  fillColor: const Color(0xFF1F1F1F),
-                  enabledBorder: OutlineInputBorder(
-                    borderRadius: BorderRadius.circular(12),
-                    borderSide: const BorderSide(color: Color(0xFF333333)),
-                  ),
-                  focusedBorder: OutlineInputBorder(
-                    borderRadius: BorderRadius.circular(12),
-                    borderSide: const BorderSide(color: Color(0xFFFF7A00)),
-                  ),
-                ),
-              ),
-              const SizedBox(height: 12),
-              DropdownButtonFormField<String>(
-                initialValue: selectedType,
-                dropdownColor: const Color(0xFF242424),
-                style: const TextStyle(color: Colors.white),
-                iconEnabledColor: const Color(0xFFFF7A00),
-                decoration: InputDecoration(
-                  labelText: 'Adres türü',
-                  labelStyle: const TextStyle(color: Color(0xFFBDBDBD)),
-                  filled: true,
-                  fillColor: const Color(0xFF1F1F1F),
-                  enabledBorder: OutlineInputBorder(
-                    borderRadius: BorderRadius.circular(12),
-                    borderSide: const BorderSide(color: Color(0xFF333333)),
-                  ),
-                  focusedBorder: OutlineInputBorder(
-                    borderRadius: BorderRadius.circular(12),
-                    borderSide: const BorderSide(color: Color(0xFFFF7A00)),
-                  ),
-                ),
-                items: const [
-                  DropdownMenuItem(
-                    value: 'home',
-                    child: Text('Ev', style: TextStyle(color: Colors.white)),
-                  ),
-                  DropdownMenuItem(
-                    value: 'work',
-                    child: Text('İş', style: TextStyle(color: Colors.white)),
-                  ),
-                  DropdownMenuItem(
-                    value: 'favorite',
-                    child: Text(
-                      'Favori',
-                      style: TextStyle(color: Colors.white),
+      isScrollControlled: true,
+      backgroundColor: const Color(0xFF171717),
+      shape: const RoundedRectangleBorder(
+        borderRadius: BorderRadius.vertical(top: Radius.circular(24)),
+      ),
+      builder: (sheetContext) => StatefulBuilder(
+        builder: (context, setSheetState) {
+          final keyboardInset = MediaQuery.viewInsetsOf(context).bottom;
+          final availableHeight =
+              MediaQuery.sizeOf(context).height - keyboardInset - 24;
+          final sheetHeight = availableHeight < 360
+              ? availableHeight
+              : MediaQuery.sizeOf(context).height * 0.72;
+          return AnimatedPadding(
+            duration: const Duration(milliseconds: 180),
+            padding: EdgeInsets.only(bottom: keyboardInset),
+            child: SafeArea(
+              top: false,
+              child: SizedBox(
+                height: sheetHeight,
+                child: Column(
+                  children: [
+                    Padding(
+                      padding: const EdgeInsets.fromLTRB(20, 20, 12, 12),
+                      child: Row(
+                        children: [
+                          const Expanded(
+                            child: Text(
+                              'Yeni Adres Ekle',
+                              style: TextStyle(
+                                color: Colors.white,
+                                fontSize: 19,
+                                fontWeight: FontWeight.bold,
+                              ),
+                            ),
+                          ),
+                          IconButton(
+                            onPressed: () => Navigator.pop(sheetContext),
+                            icon: const Icon(
+                              Icons.close_rounded,
+                              color: Colors.white70,
+                            ),
+                          ),
+                        ],
+                      ),
                     ),
-                  ),
-                ],
-                onChanged: (value) {
-                  if (value != null) setDialogState(() => selectedType = value);
-                },
-              ),
-            ],
-          ),
-          actions: [
-            TextButton(
-              onPressed: () => Navigator.pop(context),
-              child: const Text(
-                'Vazgeç',
-                style: TextStyle(color: Colors.white70),
+                    Expanded(
+                      child: SingleChildScrollView(
+                        padding: const EdgeInsets.fromLTRB(20, 0, 20, 16),
+                        child: Column(
+                          children: [
+                            TextField(
+                              controller: titleController,
+                              style: const TextStyle(color: Colors.white),
+                              textInputAction: TextInputAction.next,
+                              decoration: _addressFormDecoration(
+                                label: 'Adres adı',
+                                hint: 'Ev, İş veya Favori',
+                              ),
+                            ),
+                            const SizedBox(height: 12),
+                            TextField(
+                              controller: addressController,
+                              maxLines: 2,
+                              style: const TextStyle(color: Colors.white),
+                              decoration: _addressFormDecoration(
+                                label: 'Adres',
+                                hint: 'Adres bilgisini yazın veya haritadan seçin',
+                              ),
+                            ),
+                            const SizedBox(height: 10),
+                            OutlinedButton.icon(
+                              onPressed: () async {
+                                FocusManager.instance.primaryFocus?.unfocus();
+                                final coordinate = await _showAddressMapPicker(
+                                  initialCoordinate: selectedCoordinate,
+                                );
+                                if (coordinate == null || !mounted) return;
+                                final address = await _routeCoordinateLabel(
+                                  coordinate,
+                                );
+                                if (!mounted) return;
+                                setSheetState(() {
+                                  selectedCoordinate = coordinate;
+                                  addressController.text = address;
+                                });
+                              },
+                              icon: const Icon(Icons.map_outlined),
+                              label: Text(
+                                selectedCoordinate == null
+                                    ? 'Haritadan seç'
+                                    : 'Haritadaki konumu değiştir',
+                              ),
+                              style: OutlinedButton.styleFrom(
+                                foregroundColor: const Color(0xFFFFB066),
+                                minimumSize: const Size.fromHeight(46),
+                                side: const BorderSide(
+                                  color: Color(0xFFFF7A00),
+                                ),
+                              ),
+                            ),
+                            if (selectedCoordinate != null) ...[
+                              const SizedBox(height: 6),
+                              const Align(
+                                alignment: Alignment.centerLeft,
+                                child: Text(
+                                  'Harita konumu seçildi',
+                                  style: TextStyle(
+                                    color: Colors.white60,
+                                    fontSize: 12,
+                                  ),
+                                ),
+                              ),
+                            ],
+                            const SizedBox(height: 12),
+                            DropdownButtonFormField<String>(
+                              initialValue: selectedType,
+                              dropdownColor: const Color(0xFF242424),
+                              style: const TextStyle(color: Colors.white),
+                              iconEnabledColor: const Color(0xFFFF7A00),
+                              decoration: _addressFormDecoration(
+                                label: 'Adres türü',
+                              ),
+                              items: const [
+                                DropdownMenuItem(
+                                  value: 'home',
+                                  child: Text(
+                                    'Ev',
+                                    style: TextStyle(color: Colors.white),
+                                  ),
+                                ),
+                                DropdownMenuItem(
+                                  value: 'work',
+                                  child: Text(
+                                    'İş',
+                                    style: TextStyle(color: Colors.white),
+                                  ),
+                                ),
+                                DropdownMenuItem(
+                                  value: 'favorite',
+                                  child: Text(
+                                    'Favori',
+                                    style: TextStyle(color: Colors.white),
+                                  ),
+                                ),
+                              ],
+                              onChanged: (value) {
+                                if (value != null) {
+                                  setSheetState(() => selectedType = value);
+                                }
+                              },
+                            ),
+                          ],
+                        ),
+                      ),
+                    ),
+                    Padding(
+                      padding: const EdgeInsets.fromLTRB(20, 8, 20, 16),
+                      child: Row(
+                        children: [
+                          Expanded(
+                            child: TextButton(
+                              onPressed: () => Navigator.pop(sheetContext),
+                              child: const Text(
+                                'Vazgeç',
+                                style: TextStyle(color: Colors.white70),
+                              ),
+                            ),
+                          ),
+                          const SizedBox(width: 12),
+                          Expanded(
+                            child: FilledButton(
+                              onPressed: () {
+                                final title = titleController.text.trim();
+                                final address = addressController.text.trim();
+                                if (title.isEmpty || address.isEmpty) {
+                                  _showTrackingMessage(
+                                    'Adres adı ve adres bilgisi gerekli.',
+                                  );
+                                  return;
+                                }
+                                Navigator.pop(sheetContext, {
+                                  'title': title,
+                                  'address': address,
+                                  'type': selectedType,
+                                  if (selectedCoordinate != null) ...{
+                                    'latitude': selectedCoordinate!.latitude
+                                        .toString(),
+                                    'longitude': selectedCoordinate!.longitude
+                                        .toString(),
+                                  },
+                                });
+                              },
+                              style: FilledButton.styleFrom(
+                                backgroundColor: const Color(0xFFFF7A00),
+                                foregroundColor: Colors.white,
+                              ),
+                              child: const Text('Kaydet'),
+                            ),
+                          ),
+                        ],
+                      ),
+                    ),
+                  ],
+                ),
               ),
             ),
-            FilledButton(
-              onPressed: () {
-                final title = titleController.text.trim();
-                final address = addressController.text.trim();
-                if (title.isEmpty || address.isEmpty) return;
-                Navigator.pop(context, {
-                  'title': title,
-                  'address': address,
-                  'type': selectedType,
-                });
-              },
-              style: FilledButton.styleFrom(
-                backgroundColor: const Color(0xFFFF7A00),
-                foregroundColor: Colors.white,
-              ),
-              child: const Text('Kaydet'),
-            ),
-          ],
-        ),
+          );
+        },
       ),
     );
 
+    titleController.dispose();
+    addressController.dispose();
     return result;
+  }
+
+  InputDecoration _addressFormDecoration({
+    required String label,
+    String? hint,
+  }) {
+    return InputDecoration(
+      labelText: label,
+      hintText: hint,
+      labelStyle: const TextStyle(color: Color(0xFFBDBDBD)),
+      hintStyle: const TextStyle(color: Color(0xFF8F8F8F)),
+      filled: true,
+      fillColor: const Color(0xFF1F1F1F),
+      enabledBorder: OutlineInputBorder(
+        borderRadius: BorderRadius.circular(12),
+        borderSide: const BorderSide(color: Color(0xFF333333)),
+      ),
+      focusedBorder: OutlineInputBorder(
+        borderRadius: BorderRadius.circular(12),
+        borderSide: const BorderSide(color: Color(0xFFFF7A00)),
+      ),
+    );
+  }
+
+  Future<LatLng?> _showAddressMapPicker({LatLng? initialCoordinate}) {
+    final startCoordinate =
+        initialCoordinate ??
+        (_currentPosition == null
+            ? const LatLng(41.0082, 28.9784)
+            : LatLng(_currentPosition!.latitude, _currentPosition!.longitude));
+    LatLng? selectedCoordinate = initialCoordinate;
+
+    return showModalBottomSheet<LatLng>(
+      context: context,
+      isScrollControlled: true,
+      backgroundColor: const Color(0xFF171717),
+      shape: const RoundedRectangleBorder(
+        borderRadius: BorderRadius.vertical(top: Radius.circular(24)),
+      ),
+      builder: (sheetContext) => StatefulBuilder(
+        builder: (context, setSheetState) => SizedBox(
+          height: MediaQuery.sizeOf(context).height * 0.82,
+          child: SafeArea(
+            top: false,
+            child: Column(
+              children: [
+                Padding(
+                  padding: const EdgeInsets.fromLTRB(20, 18, 12, 12),
+                  child: Row(
+                    children: [
+                      const Expanded(
+                        child: Text(
+                          'Haritadan konum seç',
+                          style: TextStyle(
+                            color: Colors.white,
+                            fontSize: 18,
+                            fontWeight: FontWeight.bold,
+                          ),
+                        ),
+                      ),
+                      IconButton(
+                        onPressed: () => Navigator.pop(sheetContext),
+                        icon: const Icon(
+                          Icons.close_rounded,
+                          color: Colors.white70,
+                        ),
+                      ),
+                    ],
+                  ),
+                ),
+                const Padding(
+                  padding: EdgeInsets.fromLTRB(20, 0, 20, 12),
+                  child: Align(
+                    alignment: Alignment.centerLeft,
+                    child: Text(
+                      'Haritada kaydetmek istediğiniz noktaya dokunun.',
+                      style: TextStyle(color: Colors.white70, fontSize: 13),
+                    ),
+                  ),
+                ),
+                Expanded(
+                  child: GoogleMap(
+                    initialCameraPosition: CameraPosition(
+                      target: startCoordinate,
+                      zoom: initialCoordinate == null ? 14 : 16,
+                    ),
+                    cameraTargetBounds: CameraTargetBounds(
+                      LatLngBounds(
+                        southwest: const LatLng(35.8, 25.6),
+                        northeast: const LatLng(42.2, 44.8),
+                      ),
+                    ),
+                    style: _darkGoogleMapStyle,
+                    myLocationEnabled: _locationPermissionGranted,
+                    myLocationButtonEnabled: true,
+                    zoomControlsEnabled: false,
+                    markers: selectedCoordinate == null
+                        ? const <Marker>{}
+                        : {
+                            Marker(
+                              markerId: const MarkerId('saved-address-picker'),
+                              position: selectedCoordinate!,
+                            ),
+                          },
+                    onTap: (coordinate) =>
+                        setSheetState(() => selectedCoordinate = coordinate),
+                  ),
+                ),
+                Padding(
+                  padding: const EdgeInsets.fromLTRB(20, 12, 20, 18),
+                  child: SizedBox(
+                    width: double.infinity,
+                    child: FilledButton.icon(
+                      onPressed: selectedCoordinate == null
+                          ? null
+                          : () =>
+                                Navigator.pop(sheetContext, selectedCoordinate),
+                      icon: const Icon(Icons.check_rounded),
+                      label: const Text('Bu konumu kullan'),
+                      style: FilledButton.styleFrom(
+                        backgroundColor: const Color(0xFFFF7A00),
+                        foregroundColor: Colors.white,
+                        minimumSize: const Size.fromHeight(48),
+                      ),
+                    ),
+                  ),
+                ),
+              ],
+            ),
+          ),
+        ),
+      ),
+    );
   }
 
   void _startRoutePlanning() {
@@ -11932,12 +12396,8 @@ out center tags;
       route['id'] = document.id;
     }
     if (!mounted) return;
-    ScaffoldMessenger.of(context).showSnackBar(
-      SnackBar(
-        content: Text(
-          'Rota kaydedildi: ${route['distance_km']} km • ${route['duration_minutes']} dk',
-        ),
-      ),
+    AppNotificationService.show(
+      'Rota kaydedildi: ${route['distance_km']} km • ${route['duration_minutes']} dk',
     );
   }
 
@@ -12220,6 +12680,7 @@ out center tags;
 
       if (!await _ensureLocationPermission()) return;
 
+      final startedForNavigation = _isNavigationActive;
       await _locationPositionSubscription?.cancel();
       _locationPositionSubscription = null;
       _isLocationTracking = false;
@@ -12233,6 +12694,17 @@ out center tags;
       _currentPosition = position;
       _driveStartedAt = DateTime.now();
       _driveDistanceKm = 0;
+      _driveStartedForNavigation = startedForNavigation;
+      final destination = _selectedDestinationCoordinate;
+      _navigationStartDistanceToDestinationMeters =
+          startedForNavigation && destination != null
+          ? geo.Geolocator.distanceBetween(
+              position.latitude,
+              position.longitude,
+              destination.latitude,
+              destination.longitude,
+            )
+          : null;
       _positionSubscription = geo.Geolocator.getPositionStream(
         locationSettings: const geo.LocationSettings(
           accuracy: geo.LocationAccuracy.high,
@@ -12512,14 +12984,22 @@ out center tags;
     if (_selectedVehicle == 'Araba' || _selectedVehicle == 'Motosiklet') {
       await _saveParkedVehicleLocation(position);
     }
-    await _stopDriveTracking();
+    await _stopDriveTracking(
+      navigationCompleted: true,
+      completionPosition: position,
+      completionDistanceToDestinationMeters: distanceMeters,
+    );
     await _speakNavigation(
       'Varış noktanıza ulaştınız. Navigasyon sonlandırıldı.',
     );
     return true;
   }
 
-  Future<void> _stopDriveTracking() async {
+  Future<void> _stopDriveTracking({
+    bool navigationCompleted = false,
+    geo.Position? completionPosition,
+    double? completionDistanceToDestinationMeters,
+  }) async {
     await _positionSubscription?.cancel();
     _positionSubscription = null;
     await _stopCompassTracking();
@@ -12528,12 +13008,30 @@ out center tags;
     final durationMinutes = startedAt == null
         ? 0
         : DateTime.now().difference(startedAt).inMinutes;
+    final hasCompletedNavigationProgress =
+        navigationCompleted &&
+        completionPosition != null &&
+        completionDistanceToDestinationMeters != null &&
+        navoraHasCompletedRouteProgress(
+          traveledDistanceKm: _driveDistanceKm,
+          startDistanceToDestinationMeters:
+              _navigationStartDistanceToDestinationMeters ?? double.nan,
+          completionDistanceToDestinationMeters:
+              completionDistanceToDestinationMeters,
+        );
+    final shouldSaveDriveHistory = navoraShouldSaveDriveHistory(
+      startedForNavigation: _driveStartedForNavigation,
+      hasCompletedNavigationProgress: hasCompletedNavigationProgress,
+    );
 
-    if (FirebaseAuth.instance.currentUser != null && distance > 0) {
+    if (FirebaseAuth.instance.currentUser != null &&
+        distance > 0 &&
+        shouldSaveDriveHistory) {
       try {
         await _saveCompletedDrive(
           distance: distance,
           durationMinutes: durationMinutes,
+          navigationCompleted: hasCompletedNavigationProgress,
         );
       } catch (error) {
         debugPrint('Tamamlanan sürüş kaydedilemedi: $error');
@@ -12548,6 +13046,7 @@ out center tags;
     if (!mounted) return;
     setState(() {
       _isDriveTracking = false;
+      _driveStartedForNavigation = false;
       _clearRouteState();
     });
     await _resetNavigationCamera();
@@ -12790,14 +13289,9 @@ out center tags;
     final location = position == null
         ? ''
         : '\nKonum: https://maps.google.com/?q=${position.latitude},${position.longitude}';
-    final uri = Uri(
-      scheme: 'sms',
-      path: phone,
-      queryParameters: {
-        'body':
-            'Navora acil durum bildirimi. Lütfen beni kontrol edin.$location',
-      },
-    );
+    final message =
+        'Navora acil durum bildirimi. Lütfen beni kontrol edin.$location';
+    final uri = Uri.parse('sms:$phone?body=${Uri.encodeComponent(message)}');
     if (!await launchUrl(uri)) {
       _showTrackingMessage('Mesaj ekranı açılamadı.');
     }
@@ -12806,6 +13300,7 @@ out center tags;
   Future<void> _saveCompletedDrive({
     required double distance,
     required int durationMinutes,
+    bool navigationCompleted = false,
   }) async {
     final user = FirebaseAuth.instance.currentUser!;
     final userReference = FirebaseFirestore.instance
@@ -12822,7 +13317,7 @@ out center tags;
         DateTime.now().add(const Duration(days: 30)),
       ),
     });
-    if (_activeNavigationDestination != null) {
+    if (navigationCompleted && _activeNavigationDestination != null) {
       await userReference.collection('route_history').add({
         'title': _activeNavigationTitle ?? 'Tamamlanan rota',
         'destination': _activeNavigationDestination,
@@ -13013,19 +13508,30 @@ out center tags;
     VoidCallback? onAction,
   }) {
     if (!mounted) return;
-    ScaffoldMessenger.of(context).showSnackBar(
-      SnackBar(
-        content: Text(message),
-        action: actionLabel != null && onAction != null
-            ? SnackBarAction(label: actionLabel, onPressed: onAction)
-            : null,
-      ),
+    AppNotificationService.show(
+      message,
+      actionLabel: actionLabel,
+      onAction: onAction,
     );
+  }
+
+  String _normalizeSosPhone(String phone) {
+    var digits = phone.replaceAll(RegExp(r'\D'), '');
+    if (digits.startsWith('0090')) {
+      digits = digits.substring(2);
+    } else if (digits.length == 11 && digits.startsWith('0')) {
+      digits = '90${digits.substring(1)}';
+    } else if (digits.length == 10 && digits.startsWith('5')) {
+      digits = '90$digits';
+    }
+    return digits;
   }
 
   Future<void> _showSosContactsDialog() async {
     var isAddingContact = false;
     var isSavingContact = false;
+    String? contactSaveMessage;
+    final deletingContactKeys = <String>{};
     final nameController = TextEditingController();
     final phoneController = TextEditingController();
     final relationController = TextEditingController();
@@ -13033,12 +13539,23 @@ out center tags;
 
     await showModalBottomSheet<void>(
       context: context,
+      isScrollControlled: true,
       backgroundColor: const Color(0xFF191919),
       shape: const RoundedRectangleBorder(
         borderRadius: BorderRadius.vertical(top: Radius.circular(24)),
       ),
       builder: (context) => StatefulBuilder(
         builder: (context, setModalState) {
+          final mediaQuery = MediaQuery.of(context);
+          final keyboardInset = mediaQuery.viewInsets.bottom;
+          final sheetHeight = math.min(
+            mediaQuery.size.height * 0.55,
+            mediaQuery.size.height -
+                keyboardInset -
+                mediaQuery.viewPadding.top -
+                24,
+          );
+
           Future<void> saveContact() async {
             if (!formKey.currentState!.validate() || isSavingContact) return;
             final user = FirebaseAuth.instance.currentUser;
@@ -13048,23 +13565,44 @@ out center tags;
               );
               return;
             }
+            final phone = phoneController.text.trim();
+            final normalizedPhone = _normalizeSosPhone(phone);
             final contact = <String, String>{
               'name': nameController.text.trim(),
-              'phone': phoneController.text.trim(),
+              'phone': phone,
               'relation': relationController.text.trim().isEmpty
                   ? 'Yakın kişi'
                   : relationController.text.trim(),
             };
-            setModalState(() => isSavingContact = true);
+            setModalState(() {
+              isSavingContact = true;
+              contactSaveMessage = null;
+            });
             try {
-              final document = await FirebaseFirestore.instance
+              final contactsReference = FirebaseFirestore.instance
                   .collection('users')
                   .doc(user.uid)
-                  .collection('sos_contacts')
-                  .add(contact);
-              contact['id'] = document.id;
-              if (!mounted) return;
-              setState(() => _sosContacts.add(contact));
+                  .collection('sos_contacts');
+              final existingContacts = await contactsReference.get();
+              if (existingContacts.docs.any(
+                (document) =>
+                    _normalizeSosPhone(
+                      document.data()['phone']?.toString() ?? '',
+                    ) ==
+                    normalizedPhone,
+              )) {
+                if (!context.mounted) return;
+                setModalState(() {
+                  isSavingContact = false;
+                  contactSaveMessage = 'Bu telefon numarası zaten acil durum kişilerine eklenmiş.';
+                });
+                return;
+              }
+              final contactId = sha256
+                  .convert(utf8.encode(normalizedPhone))
+                  .toString();
+              await contactsReference.doc(contactId).set(contact);
+              if (!context.mounted || !mounted) return;
               nameController.clear();
               phoneController.clear();
               relationController.clear();
@@ -13074,291 +13612,417 @@ out center tags;
               });
             } catch (error) {
               debugPrint('Acil durum kişisi kaydedilemedi: $error');
-              if (mounted) {
+              if (context.mounted && mounted) {
                 _showTrackingMessage('Acil durum kişisi kaydedilemedi.');
                 setModalState(() => isSavingContact = false);
               }
             }
           }
 
-          return Container(
-            padding: const EdgeInsets.all(20),
-            height: MediaQuery.of(context).size.height * 0.55,
-            child: Column(
-              crossAxisAlignment: CrossAxisAlignment.start,
-              children: [
-                Row(
-                  mainAxisAlignment: MainAxisAlignment.spaceBetween,
-                  children: [
-                    Text(
-                      isAddingContact
-                          ? 'Acil durum kişisi ekle'
-                          : 'Acil Durum (SOS) Kişileri',
-                      style: const TextStyle(
-                        fontSize: 18,
-                        fontWeight: FontWeight.bold,
-                        color: Colors.white,
-                      ),
-                    ),
-                    if (!isAddingContact)
-                      Row(
-                        children: [
-                          IconButton(
-                            tooltip: 'Kişi ekle',
-                            icon: const Icon(
-                              Icons.person_add_alt_1,
-                              color: Color(0xFFFFB066),
-                            ),
-                            onPressed: () {
-                              if (FirebaseAuth.instance.currentUser == null) {
-                                _showTrackingMessage(
-                                  'Acil durum kişilerini kaydetmek için giriş yapmalısınız.',
-                                );
-                                return;
-                              }
-                              setModalState(() => isAddingContact = true);
-                            },
-                          ),
-                          IconButton(
-                            icon: const Icon(
-                              Icons.close,
-                              color: Colors.white70,
-                            ),
-                            onPressed: () => Navigator.pop(context),
-                          ),
-                        ],
-                      ),
-                  ],
-                ),
-                if (isAddingContact) ...[
-                  const SizedBox(height: 6),
-                  const Text(
-                    'Kaza durumunda ulaşılabilecek bir kişiyi ekleyin.',
-                    style: TextStyle(fontSize: 12, color: Colors.white70),
-                  ),
-                  const SizedBox(height: 14),
-                  Expanded(
-                    child: SingleChildScrollView(
-                      child: Form(
-                        key: formKey,
-                        child: Column(
-                          children: [
-                            TextFormField(
-                              controller: nameController,
-                              textCapitalization: TextCapitalization.words,
-                              textInputAction: TextInputAction.next,
-                              style: const TextStyle(color: Colors.white),
-                              decoration: _sosContactInputDecoration(
-                                label: 'Ad soyad',
-                                icon: Icons.person_outline_rounded,
-                              ),
-                              validator: (value) =>
-                                  value == null || value.trim().isEmpty
-                                  ? 'Ad soyad alanını doldurun.'
-                                  : null,
-                            ),
-                            const SizedBox(height: 12),
-                            TextFormField(
-                              controller: phoneController,
-                              keyboardType: TextInputType.phone,
-                              textInputAction: TextInputAction.next,
-                              style: const TextStyle(color: Colors.white),
-                              decoration: _sosContactInputDecoration(
-                                label: 'Telefon numarası',
-                                icon: Icons.phone_outlined,
-                                hint: '+90 5XX XXX XX XX',
-                              ),
-                              validator: (value) {
-                                final digits =
-                                    value?.replaceAll(RegExp(r'\D'), '') ?? '';
-                                if (digits.isEmpty) {
-                                  return 'Telefon numarasını doldurun.';
-                                }
-                                if (digits.length < 7) {
-                                  return 'Geçerli bir telefon numarası girin.';
-                                }
-                                return null;
-                              },
-                            ),
-                            const SizedBox(height: 12),
-                            TextFormField(
-                              controller: relationController,
-                              textCapitalization: TextCapitalization.sentences,
-                              textInputAction: TextInputAction.done,
-                              style: const TextStyle(color: Colors.white),
-                              decoration: _sosContactInputDecoration(
-                                label: 'Yakınlık (isteğe bağlı)',
-                                icon: Icons.people_outline_rounded,
-                                hint: 'Örn. Aile, arkadaş',
-                              ),
-                              onFieldSubmitted: (_) => saveContact(),
-                            ),
-                          ],
-                        ),
-                      ),
-                    ),
-                  ),
-                  const SizedBox(height: 12),
-                  Row(
+          return AnimatedPadding(
+            duration: const Duration(milliseconds: 180),
+            curve: Curves.easeOut,
+            padding: EdgeInsets.only(bottom: keyboardInset),
+            child: SafeArea(
+              top: false,
+              bottom: keyboardInset == 0,
+              child: SizedBox(
+                height: sheetHeight,
+                child: Container(
+                  padding: const EdgeInsets.all(20),
+                  child: Column(
+                    crossAxisAlignment: CrossAxisAlignment.start,
                     children: [
-                      Expanded(
-                        child: OutlinedButton(
-                          onPressed: isSavingContact
-                              ? null
-                              : () {
-                                  FocusScope.of(context).unfocus();
-                                  setModalState(() {
-                                    isAddingContact = false;
-                                    formKey.currentState?.reset();
-                                  });
-                                },
-                          style: OutlinedButton.styleFrom(
-                            foregroundColor: Colors.white70,
-                            side: const BorderSide(color: Colors.white24),
-                            padding: const EdgeInsets.symmetric(vertical: 14),
-                          ),
-                          child: const Text('Vazgeç'),
-                        ),
-                      ),
-                      const SizedBox(width: 12),
-                      Expanded(
-                        child: FilledButton.icon(
-                          onPressed: isSavingContact ? null : saveContact,
-                          icon: isSavingContact
-                              ? const SizedBox(
-                                  width: 18,
-                                  height: 18,
-                                  child: CircularProgressIndicator(
-                                    strokeWidth: 2,
-                                  ),
-                                )
-                              : const Icon(Icons.person_add_alt_1, size: 18),
-                          label: Text(
-                            isSavingContact ? 'Kaydediliyor' : 'Kişiyi ekle',
-                          ),
-                          style: FilledButton.styleFrom(
-                            backgroundColor: const Color(0xFFFF7A00),
-                            foregroundColor: Colors.white,
-                            padding: const EdgeInsets.symmetric(vertical: 14),
-                          ),
-                        ),
-                      ),
-                    ],
-                  ),
-                ] else ...[
-                  const SizedBox(height: 6),
-                  const Text(
-                    'Kaza veya acil durumlarda otomatik bilgilendirilecek kişiler.',
-                    style: TextStyle(fontSize: 12, color: Colors.white70),
-                  ),
-                  const SizedBox(height: 14),
-                  Expanded(
-                    child: ListView.builder(
-                      itemCount: _sosContacts.length,
-                      itemBuilder: (context, index) {
-                        final sos = _sosContacts[index];
-                        return Card(
-                          margin: const EdgeInsets.only(bottom: 10),
-                          color: const Color(0xFF1A1A1A),
-                          shape: RoundedRectangleBorder(
-                            borderRadius: BorderRadius.circular(14),
-                            side: const BorderSide(
-                              color: Color(0xFFFF8A3D),
-                              width: 1,
+                      Row(
+                        mainAxisAlignment: MainAxisAlignment.spaceBetween,
+                        children: [
+                          Text(
+                            isAddingContact
+                                ? 'Acil durum kişisi ekle'
+                                : 'Acil Durum (SOS) Kişileri',
+                            style: const TextStyle(
+                              fontSize: 18,
+                              fontWeight: FontWeight.bold,
+                              color: Colors.white,
                             ),
                           ),
-                          child: ListTile(
-                            leading: const CircleAvatar(
-                              backgroundColor: Color(0xFFFF8A3D),
-                              child: Icon(
-                                Icons.phone_in_talk,
-                                color: Colors.white,
-                                size: 20,
-                              ),
-                            ),
-                            title: Text(
-                              sos['name']!,
-                              style: const TextStyle(
-                                fontWeight: FontWeight.bold,
-                                fontSize: 13,
-                                color: Colors.white,
-                              ),
-                            ),
-                            subtitle: Text(
-                              '${sos['phone']} • ${sos['relation']}',
-                              style: const TextStyle(
-                                fontSize: 11,
-                                color: Colors.white70,
-                              ),
-                            ),
-                            trailing: Row(
-                              mainAxisSize: MainAxisSize.min,
+                          if (!isAddingContact)
+                            Row(
                               children: [
                                 IconButton(
-                                  tooltip: 'Ara',
+                                  tooltip: 'Kişi ekle',
                                   icon: const Icon(
-                                    Icons.call,
+                                    Icons.person_add_alt_1,
                                     color: Color(0xFFFFB066),
                                   ),
-                                  onPressed: () => _callSosContact(sos),
-                                ),
-                                IconButton(
-                                  tooltip: 'Mesaj hazırla',
-                                  icon: const Icon(
-                                    Icons.sms_outlined,
-                                    color: Color(0xFFFF8A3D),
-                                  ),
-                                  onPressed: () => _messageSosContact(sos),
-                                ),
-                                IconButton(
-                                  tooltip: 'Kişiyi sil',
-                                  icon: const Icon(
-                                    Icons.delete_outline,
-                                    color: Colors.redAccent,
-                                  ),
-                                  onPressed: () async {
-                                    final user =
-                                        FirebaseAuth.instance.currentUser;
-                                    final contactId = sos['id'];
-                                    if (user == null || contactId == null) {
+                                  onPressed: () {
+                                    if (FirebaseAuth.instance.currentUser ==
+                                        null) {
                                       _showTrackingMessage(
-                                        'Kaydedilmiş SOS kişisi bulunamadı.',
+                                        'Acil durum kişilerini kaydetmek için giriş yapmalısınız.',
                                       );
                                       return;
                                     }
-                                    try {
-                                      await FirebaseFirestore.instance
-                                          .collection('users')
-                                          .doc(user.uid)
-                                          .collection('sos_contacts')
-                                          .doc(contactId)
-                                          .delete();
-                                    } catch (error) {
-                                      debugPrint(
-                                        'Acil durum kişisi silinemedi: $error',
-                                      );
-                                      if (mounted) {
-                                        _showTrackingMessage(
-                                          'Acil durum kişisi silinemedi.',
-                                        );
-                                      }
-                                      return;
-                                    }
-                                    setState(
-                                      () => _sosContacts.removeAt(index),
-                                    );
-                                    setModalState(() {});
+                                    setModalState(() => isAddingContact = true);
                                   },
+                                ),
+                                IconButton(
+                                  icon: const Icon(
+                                    Icons.close,
+                                    color: Colors.white70,
+                                  ),
+                                  onPressed: () => Navigator.pop(context),
                                 ),
                               ],
                             ),
+                        ],
+                      ),
+                      if (contactSaveMessage != null) ...[
+                        const SizedBox(height: 8),
+                        Text(
+                          contactSaveMessage!,
+                          style: const TextStyle(
+                            color: Color(0xFFFFB066),
+                            fontSize: 12,
                           ),
-                        );
-                      },
-                    ),
+                        ),
+                      ],
+                      if (isAddingContact) ...[
+                        const SizedBox(height: 6),
+                        const Text(
+                          'Kaza durumunda ulaşılabilecek bir kişiyi ekleyin.',
+                          style: TextStyle(fontSize: 12, color: Colors.white70),
+                        ),
+                        const SizedBox(height: 14),
+                        Expanded(
+                          child: SingleChildScrollView(
+                            child: Form(
+                              key: formKey,
+                              child: Column(
+                                children: [
+                                  TextFormField(
+                                    controller: nameController,
+                                    textCapitalization:
+                                        TextCapitalization.words,
+                                    textInputAction: TextInputAction.next,
+                                    style: const TextStyle(color: Colors.white),
+                                    decoration: _sosContactInputDecoration(
+                                      label: 'Ad soyad',
+                                      icon: Icons.person_outline_rounded,
+                                    ),
+                                    onChanged: (_) {
+                                      if (contactSaveMessage != null) {
+                                        setModalState(
+                                          () => contactSaveMessage = null,
+                                        );
+                                      }
+                                    },
+                                    validator: (value) =>
+                                        value == null || value.trim().isEmpty
+                                        ? 'Ad soyad alanını doldurun.'
+                                        : null,
+                                  ),
+                                  const SizedBox(height: 12),
+                                  TextFormField(
+                                    controller: phoneController,
+                                    keyboardType: TextInputType.phone,
+                                    textInputAction: TextInputAction.next,
+                                    style: const TextStyle(color: Colors.white),
+                                    decoration: _sosContactInputDecoration(
+                                      label: 'Telefon numarası',
+                                      icon: Icons.phone_outlined,
+                                      hint: '+90 5XX XXX XX XX',
+                                    ),
+                                    onChanged: (_) {
+                                      if (contactSaveMessage != null) {
+                                        setModalState(
+                                          () => contactSaveMessage = null,
+                                        );
+                                      }
+                                    },
+                                    validator: (value) {
+                                      final digits =
+                                          value?.replaceAll(
+                                            RegExp(r'\D'),
+                                            '',
+                                          ) ??
+                                          '';
+                                      if (digits.isEmpty) {
+                                        return 'Telefon numarasını doldurun.';
+                                      }
+                                      if (digits.length < 7) {
+                                        return 'Geçerli bir telefon numarası girin.';
+                                      }
+                                      return null;
+                                    },
+                                  ),
+                                  const SizedBox(height: 12),
+                                  TextFormField(
+                                    controller: relationController,
+                                    textCapitalization:
+                                        TextCapitalization.sentences,
+                                    textInputAction: TextInputAction.done,
+                                    style: const TextStyle(color: Colors.white),
+                                    decoration: _sosContactInputDecoration(
+                                      label: 'Yakınlık (isteğe bağlı)',
+                                      icon: Icons.people_outline_rounded,
+                                      hint: 'Örn. Aile, arkadaş',
+                                    ),
+                                    onChanged: (_) {
+                                      if (contactSaveMessage != null) {
+                                        setModalState(
+                                          () => contactSaveMessage = null,
+                                        );
+                                      }
+                                    },
+                                    onFieldSubmitted: (_) => saveContact(),
+                                  ),
+                                ],
+                              ),
+                            ),
+                          ),
+                        ),
+                        const SizedBox(height: 12),
+                        Row(
+                          children: [
+                            Expanded(
+                              child: OutlinedButton(
+                                onPressed: isSavingContact
+                                    ? null
+                                    : () {
+                                        FocusScope.of(context).unfocus();
+                                        setModalState(() {
+                                          isAddingContact = false;
+                                          formKey.currentState?.reset();
+                                        });
+                                      },
+                                style: OutlinedButton.styleFrom(
+                                  foregroundColor: Colors.white70,
+                                  side: const BorderSide(color: Colors.white24),
+                                  padding: const EdgeInsets.symmetric(
+                                    vertical: 14,
+                                  ),
+                                ),
+                                child: const Text('Vazgeç'),
+                              ),
+                            ),
+                            const SizedBox(width: 12),
+                            Expanded(
+                              child: FilledButton.icon(
+                                onPressed: isSavingContact ? null : saveContact,
+                                icon: isSavingContact
+                                    ? const SizedBox(
+                                        width: 18,
+                                        height: 18,
+                                        child: CircularProgressIndicator(
+                                          strokeWidth: 2,
+                                        ),
+                                      )
+                                    : const Icon(
+                                        Icons.person_add_alt_1,
+                                        size: 18,
+                                      ),
+                                label: Text(
+                                  isSavingContact
+                                      ? 'Kaydediliyor'
+                                      : 'Kişiyi ekle',
+                                ),
+                                style: FilledButton.styleFrom(
+                                  backgroundColor: const Color(0xFFFF7A00),
+                                  foregroundColor: Colors.white,
+                                  padding: const EdgeInsets.symmetric(
+                                    vertical: 14,
+                                  ),
+                                ),
+                              ),
+                            ),
+                          ],
+                        ),
+                      ] else ...[
+                        const SizedBox(height: 6),
+                        const Text(
+                          'Kaza veya acil durumlarda otomatik bilgilendirilecek kişiler.',
+                          style: TextStyle(fontSize: 12, color: Colors.white70),
+                        ),
+                        const SizedBox(height: 14),
+                        Expanded(
+                          child: ListView.builder(
+                            itemCount: _sosContacts.length,
+                            itemBuilder: (context, index) {
+                              final sos = _sosContacts[index];
+                              return Card(
+                                margin: const EdgeInsets.only(bottom: 10),
+                                color: const Color(0xFF1A1A1A),
+                                shape: RoundedRectangleBorder(
+                                  borderRadius: BorderRadius.circular(14),
+                                  side: const BorderSide(
+                                    color: Color(0xFFFF8A3D),
+                                    width: 1,
+                                  ),
+                                ),
+                                child: ListTile(
+                                  leading: const CircleAvatar(
+                                    backgroundColor: Color(0xFFFF8A3D),
+                                    child: Icon(
+                                      Icons.phone_in_talk,
+                                      color: Colors.white,
+                                      size: 20,
+                                    ),
+                                  ),
+                                  title: Text(
+                                    sos['name']!,
+                                    style: const TextStyle(
+                                      fontWeight: FontWeight.bold,
+                                      fontSize: 13,
+                                      color: Colors.white,
+                                    ),
+                                  ),
+                                  subtitle: Text(
+                                    '${sos['phone']} • ${sos['relation']}',
+                                    style: const TextStyle(
+                                      fontSize: 11,
+                                      color: Colors.white70,
+                                    ),
+                                  ),
+                                  trailing: Row(
+                                    mainAxisSize: MainAxisSize.min,
+                                    children: [
+                                      IconButton(
+                                        tooltip: 'Ara',
+                                        icon: const Icon(
+                                          Icons.call,
+                                          color: Color(0xFFFFB066),
+                                        ),
+                                        onPressed: () => _callSosContact(sos),
+                                      ),
+                                      IconButton(
+                                        tooltip: 'Mesaj hazırla',
+                                        icon: const Icon(
+                                          Icons.sms_outlined,
+                                          color: Color(0xFFFF8A3D),
+                                        ),
+                                        onPressed: () =>
+                                            _messageSosContact(sos),
+                                      ),
+                                      IconButton(
+                                        tooltip: 'Kişiyi sil',
+                                        icon:
+                                            deletingContactKeys.contains(
+                                              _normalizeSosPhone(sos['phone']!)
+                                                      .isEmpty
+                                                  ? sos['id']!
+                                                  : _normalizeSosPhone(
+                                                      sos['phone']!,
+                                                    ),
+                                            )
+                                            ? const SizedBox(
+                                                width: 18,
+                                                height: 18,
+                                                child:
+                                                    CircularProgressIndicator(
+                                                      strokeWidth: 2,
+                                                    ),
+                                              )
+                                            : const Icon(
+                                                Icons.delete_outline,
+                                                color: Colors.redAccent,
+                                              ),
+                                        onPressed: () async {
+                                          final user =
+                                              FirebaseAuth.instance.currentUser;
+                                          final contactId = sos['id'];
+                                          if (user == null ||
+                                              contactId == null) {
+                                            _showTrackingMessage(
+                                              'Kaydedilmiş SOS kişisi bulunamadı.',
+                                            );
+                                            return;
+                                          }
+                                          final normalizedPhone =
+                                              _normalizeSosPhone(sos['phone']!);
+                                          final deleteKey =
+                                              normalizedPhone.isEmpty
+                                              ? contactId
+                                              : normalizedPhone;
+                                          if (!deletingContactKeys.add(
+                                            deleteKey,
+                                          )) {
+                                            return;
+                                          }
+                                          setModalState(() {});
+                                          try {
+                                            final contactsReference =
+                                                FirebaseFirestore.instance
+                                                    .collection('users')
+                                                    .doc(user.uid)
+                                                    .collection('sos_contacts');
+                                            final contactsSnapshot =
+                                                await contactsReference.get();
+                                            final documentsToDelete =
+                                                contactsSnapshot.docs.where((
+                                                  document,
+                                                ) {
+                                                  if (normalizedPhone.isEmpty) {
+                                                    return document.id ==
+                                                        contactId;
+                                                  }
+                                                  return _normalizeSosPhone(
+                                                        document
+                                                                .data()['phone']
+                                                                ?.toString() ??
+                                                            '',
+                                                      ) ==
+                                                      normalizedPhone;
+                                                }).toList();
+                                            for (
+                                              var offset = 0;
+                                              offset < documentsToDelete.length;
+                                              offset += 450
+                                            ) {
+                                              final batch = FirebaseFirestore
+                                                  .instance
+                                                  .batch();
+                                              for (final document
+                                                  in documentsToDelete
+                                                      .skip(offset)
+                                                      .take(450)) {
+                                                batch.delete(
+                                                  document.reference,
+                                                );
+                                              }
+                                              await batch.commit();
+                                            }
+                                          } catch (error) {
+                                            debugPrint(
+                                              'Acil durum kişisi silinemedi: $error',
+                                            );
+                                            if (context.mounted && mounted) {
+                                              _showTrackingMessage(
+                                                'Acil durum kişisi silinemedi.',
+                                              );
+                                            }
+                                          } finally {
+                                            if (context.mounted) {
+                                              deletingContactKeys.remove(
+                                                deleteKey,
+                                              );
+                                              setModalState(() {});
+                                            }
+                                          }
+                                        },
+                                      ),
+                                    ],
+                                  ),
+                                ),
+                              );
+                            },
+                          ),
+                        ),
+                      ],
+                    ],
                   ),
-                ],
-              ],
+                ),
+              ),
             ),
           );
         },
@@ -13779,24 +14443,18 @@ out center tags;
                     final user = FirebaseAuth.instance.currentUser;
                     final name = nameController.text.trim();
                     final email = emailController.text.trim();
-                    final messenger = ScaffoldMessenger.maybeOf(context);
-
                     if (name.isEmpty) {
                       if (!mounted) return;
-                      messenger?.showSnackBar(
-                        const SnackBar(
-                          content: Text('Ad Soyad alanı boş bırakılamaz.'),
-                        ),
+                      AppNotificationService.show(
+                        'Ad Soyad alanı boş bırakılamaz.',
                       );
                       return;
                     }
 
                     if (email.isEmpty || !email.contains('@')) {
                       if (!mounted) return;
-                      messenger?.showSnackBar(
-                        const SnackBar(
-                          content: Text('Geçerli bir e-posta adresi girin.'),
-                        ),
+                      AppNotificationService.show(
+                        'Geçerli bir e-posta adresi girin.',
                       );
                       return;
                     }
@@ -13836,19 +14494,13 @@ out center tags;
                       });
 
                       if (!mounted) return;
-                      messenger?.showSnackBar(
-                        const SnackBar(
-                          content: Text('Profil bilgileri güncellendi!'),
-                        ),
+                      AppNotificationService.show(
+                        'Profil bilgileri güncellendi!',
                       );
                     } catch (_) {
                       if (!mounted) return;
-                      messenger?.showSnackBar(
-                        const SnackBar(
-                          content: Text(
-                            'Profil kaydedilemedi. Lütfen tekrar deneyin.',
-                          ),
-                        ),
+                      AppNotificationService.show(
+                        'Profil kaydedilemedi. Lütfen tekrar deneyin.',
                       );
                     }
                   },
@@ -14201,9 +14853,7 @@ $text''';
     if (_isRedeemingReward) return false;
     if (reward.id == 'pro_discount' && _proDiscountUnlocked) return false;
     if (_navoraPoints < reward.cost) {
-      ScaffoldMessenger.of(context).showSnackBar(
-        const SnackBar(content: Text('Bu takas için puanın yetersiz.')),
-      );
+      AppNotificationService.show('Bu takas için puanın yetersiz.');
       return false;
     }
 
@@ -14232,9 +14882,7 @@ $text''';
           _proDiscountUnlocked =
               data['proDiscountUnlocked'] == true || _proDiscountUnlocked;
         });
-        ScaffoldMessenger.of(context).showSnackBar(
-          SnackBar(content: Text('${reward.title} hesabına eklendi.')),
-        );
+        AppNotificationService.show('${reward.title} hesabına eklendi.');
       }
       return true;
     } on FirebaseFunctionsException catch (error) {

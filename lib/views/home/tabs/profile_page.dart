@@ -3,6 +3,7 @@ import 'package:firebase_auth/firebase_auth.dart';
 import 'package:flutter/material.dart';
 
 import '../../../main.dart';
+import '../../../services/app_notification_service.dart';
 
 class ProfilePage extends StatefulWidget {
   const ProfilePage({super.key});
@@ -61,7 +62,7 @@ class _ProfilePageState extends State<ProfilePage> {
           'title': data['route']?.toString() ?? 'Rota',
           'detail':
               '${data['distance_km'] ?? 0} km • '
-            '${data['duration_minutes'] ?? 0} dk',
+              '${data['duration_minutes'] ?? 0} dk',
         };
       }).toList();
       final locations = locationSnapshot.docs.map((document) {
@@ -123,8 +124,8 @@ class _ProfilePageState extends State<ProfilePage> {
                 );
               } catch (_) {
                 if (!context.mounted) return;
-                ScaffoldMessenger.of(context).showSnackBar(
-                  SnackBar(content: Text('Çıkış yapılırken bir hata oluştu.')),
+                AppNotificationService.show(
+                  'Çıkış yapılırken bir hata oluştu.',
                 );
               }
             },

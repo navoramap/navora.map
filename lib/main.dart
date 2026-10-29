@@ -15,6 +15,7 @@ import 'package:google_sign_in/google_sign_in.dart';
 import 'package:shared_preferences/shared_preferences.dart';
 import 'package:sign_in_with_apple/sign_in_with_apple.dart';
 
+import 'services/app_notification_service.dart';
 import 'views/home/home_page.dart';
 import 'firebase_options.dart';
 
@@ -72,8 +73,6 @@ void main() async {
 class NavoraMapApp extends StatelessWidget {
   const NavoraMapApp({super.key});
 
-  static final _navigatorKey = GlobalKey<NavigatorState>();
-
   @override
   Widget build(BuildContext context) {
     const brand = Color(0xFFFF6B00);
@@ -114,7 +113,7 @@ class NavoraMapApp extends StatelessWidget {
         );
 
     return MaterialApp(
-      navigatorKey: _navigatorKey,
+      navigatorKey: AppNotificationService.navigatorKey,
       debugShowCheckedModeBanner: false,
       title: 'Navora Map',
       locale: const Locale('tr', 'TR'),
@@ -272,7 +271,7 @@ class NavoraMapApp extends StatelessWidget {
           backgroundColor: raisedSurface,
           contentTextStyle: const TextStyle(color: Colors.white, fontSize: 14),
           behavior: SnackBarBehavior.floating,
-          insetPadding: const EdgeInsets.fromLTRB(16, 0, 16, 16),
+          insetPadding: const EdgeInsets.fromLTRB(16, 0, 16, 100),
           shape: RoundedRectangleBorder(
             borderRadius: BorderRadius.circular(12),
             side: const BorderSide(color: outline),
@@ -428,13 +427,17 @@ class NavoraMapApp extends StatelessWidget {
           ),
         ),
       ),
-      builder: (context, child) {
-        return GestureDetector(
-          behavior: HitTestBehavior.translucent,
-          onTap: () => FocusManager.instance.primaryFocus?.unfocus(),
-          child: child ?? const SizedBox.shrink(),
-        );
-      },
+      builder: (context, child) => GestureDetector(
+        behavior: HitTestBehavior.translucent,
+        onTap: () => FocusManager.instance.primaryFocus?.unfocus(),
+        child: Stack(
+          fit: StackFit.expand,
+          children: [
+            ?child,
+            const Positioned.fill(child: AppNotificationLayer()),
+          ],
+        ),
+      ),
       home: const MainWrapper(),
     );
   }

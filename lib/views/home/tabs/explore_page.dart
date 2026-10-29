@@ -2,6 +2,7 @@ import 'package:flutter/material.dart';
 import 'package:font_awesome_flutter/font_awesome_flutter.dart';
 import 'package:url_launcher/url_launcher.dart';
 
+import '../../../services/app_notification_service.dart';
 import '../../../services/explore_highlight_service.dart';
 import 'explore_highlight_manager_sheet.dart';
 
@@ -383,8 +384,7 @@ class _ExplorePageState extends State<ExplorePage> {
         mode: LaunchMode.externalApplication,
       );
       if (!launched && context.mounted) {
-        ScaffoldMessenger.of(context)
-            .showSnackBar(const SnackBar(content: Text('Bağlantı açılamadı.')));
+        AppNotificationService.show('Bağlantı açılamadı.');
       }
       return;
     }
@@ -427,13 +427,11 @@ class _ExplorePageState extends State<ExplorePage> {
         mode: LaunchMode.externalApplication,
       );
       if (!opened && context.mounted) {
-        ScaffoldMessenger.of(context)
-            .showSnackBar(const SnackBar(content: Text('Profil açılamadı.')));
+        AppNotificationService.show('Profil açılamadı.');
       }
     } catch (error) {
       if (!context.mounted) return;
-      ScaffoldMessenger.of(context)
-          .showSnackBar(const SnackBar(content: Text('Profil açılamadı.')));
+      AppNotificationService.show('Profil açılamadı.');
     }
   }
 }

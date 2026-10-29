@@ -3,6 +3,8 @@ import 'package:cloud_functions/cloud_functions.dart';
 import 'package:firebase_auth/firebase_auth.dart';
 import 'package:flutter/material.dart';
 
+import '../../services/app_notification_service.dart';
+
 class ChatMessageModerationPage extends StatefulWidget {
   const ChatMessageModerationPage({super.key});
 
@@ -75,39 +77,27 @@ class _ChatMessageModerationPageState extends State<ChatMessageModerationPage> {
           .call({'reportId': report.id, 'action': action});
 
       if (mounted) {
-        ScaffoldMessenger.of(context).showSnackBar(
-          SnackBar(
-            content: Text(switch (action) {
-              'delete' => 'Mesaj silindi, şikayet kapatıldı.',
-              'mute' => 'Kullanıcı 1 saat susturuldu, şikayet kapatıldı.',
-              _ => 'Şikayet kapatıldı.',
-            }),
-          ),
-        );
+        AppNotificationService.show(switch (action) {
+          'delete' => 'Mesaj silindi, şikayet kapatıldı.',
+          'mute' => 'Kullanıcı 1 saat susturuldu, şikayet kapatıldı.',
+          _ => 'Şikayet kapatıldı.',
+        });
       }
     } on FirebaseFunctionsException catch (error) {
       debugPrint(
         'Sohbet şikayeti işlenemedi (${error.code}): ${error.message}',
       );
       if (mounted) {
-        ScaffoldMessenger.of(context).showSnackBar(
-          SnackBar(
-            content: Text(
-              error.code == 'permission-denied'
-                  ? 'Bu işlem için yönetici yetkisi gerekiyor.'
-                  : 'İşlem başarısız oldu. Bağlantını kontrol edip tekrar dene.',
-            ),
-          ),
+        AppNotificationService.show(
+          error.code == 'permission-denied'
+              ? 'Bu işlem için yönetici yetkisi gerekiyor.'
+              : 'İşlem başarısız oldu. Bağlantını kontrol edip tekrar dene.',
         );
       }
     } catch (error) {
       debugPrint('Sohbet şikayeti işlenemedi: $error');
       if (mounted) {
-        ScaffoldMessenger.of(context).showSnackBar(
-          const SnackBar(
-            content: Text('İşlem başarısız oldu. Tekrar deneyin.'),
-          ),
-        );
+        AppNotificationService.show('İşlem başarısız oldu. Tekrar deneyin.');
       }
     } finally {
       if (mounted) setState(() => _processingReports.remove(report.id));
@@ -173,9 +163,7 @@ class _ChatMessageModerationPageState extends State<ChatMessageModerationPage> {
         'Yönetici işlem kayıtları alınamadı (${error.code}): ${error.message}',
       );
       if (mounted) {
-        ScaffoldMessenger.of(context).showSnackBar(
-          const SnackBar(content: Text('İşlem geçmişi yüklenemedi.')),
-        );
+        AppNotificationService.show('İşlem geçmişi yüklenemedi.');
       }
     }
   }

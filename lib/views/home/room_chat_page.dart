@@ -4,6 +4,7 @@ import 'package:cloud_firestore/cloud_firestore.dart';
 import 'package:cloud_functions/cloud_functions.dart';
 import 'package:flutter/material.dart';
 
+import '../../services/app_notification_service.dart';
 import '../../services/chat_room_service.dart';
 
 Future<void> navoraDeleteChatRoom(
@@ -157,8 +158,7 @@ class _RoomChatPageState extends State<RoomChatPage> {
                 'Çok sık mesaj gönderiyorsun. Biraz bekleyip tekrar dene.',
           _ => 'Mesaj gönderilemedi.',
         };
-        ScaffoldMessenger.of(context)
-            .showSnackBar(SnackBar(content: Text(message)));
+        AppNotificationService.show(message);
       }
     } catch (error) {
       if (mounted) {
@@ -167,9 +167,7 @@ class _RoomChatPageState extends State<RoomChatPage> {
             return message['_localTempId'] == localTempId;
           });
         });
-        ScaffoldMessenger.of(
-          context,
-        ).showSnackBar(const SnackBar(content: Text('Mesaj gönderilemedi.')));
+        AppNotificationService.show('Mesaj gönderilemedi.');
       }
     } finally {
       if (mounted) setState(() => _isSending = false);
@@ -203,18 +201,12 @@ class _RoomChatPageState extends State<RoomChatPage> {
         'status': 'open',
       });
       if (mounted) {
-        ScaffoldMessenger.of(context).showSnackBar(
-          const SnackBar(content: Text('Mesaj moderasyona bildirildi.')),
-        );
+        AppNotificationService.show('Mesaj moderasyona bildirildi.');
       }
     } catch (error) {
       debugPrint('Mesaj şikayeti gönderilemedi: $error');
       if (mounted) {
-        ScaffoldMessenger.of(context).showSnackBar(
-          const SnackBar(
-            content: Text('Şikayet gönderilemedi. Tekrar deneyin.'),
-          ),
-        );
+        AppNotificationService.show('Şikayet gönderilemedi. Tekrar deneyin.');
       }
     }
   }
@@ -400,12 +392,8 @@ class _RoomChatPageState extends State<RoomChatPage> {
                           !wasProtected &&
                           enteredPassword.length < 12) {
                         if (!baseContext.mounted) return;
-                        ScaffoldMessenger.maybeOf(baseContext)?.showSnackBar(
-                          const SnackBar(
-                            content: Text(
-                              'Yeni şifre en az 12 karakter olmalı.',
-                            ),
-                          ),
+                        AppNotificationService.show(
+                          'Yeni şifre en az 12 karakter olmalı.',
                         );
                         return;
                       }
@@ -453,10 +441,8 @@ class _RoomChatPageState extends State<RoomChatPage> {
                         await batch.commit();
                       } catch (_) {
                         if (!baseContext.mounted) return;
-                        ScaffoldMessenger.maybeOf(baseContext)?.showSnackBar(
-                          const SnackBar(
-                            content: Text('Oda bilgileri kaydedilemedi.'),
-                          ),
+                        AppNotificationService.show(
+                          'Oda bilgileri kaydedilemedi.',
                         );
                         return;
                       }
@@ -522,9 +508,7 @@ class _RoomChatPageState extends State<RoomChatPage> {
                         );
                       } catch (_) {
                         if (!baseContext.mounted) return;
-                        ScaffoldMessenger.maybeOf(baseContext)?.showSnackBar(
-                          const SnackBar(content: Text('Oda silinemedi.')),
-                        );
+                        AppNotificationService.show('Oda silinemedi.');
                         return;
                       }
 

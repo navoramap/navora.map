@@ -93,6 +93,65 @@ void main() {
     expect(navoraIsWithinNavigationCompletionRadius(double.infinity), isFalse);
   });
 
+  test('route history requires arrival and measurable travel progress', () {
+    expect(
+      navoraHasCompletedRouteProgress(
+        traveledDistanceKm: 0.2,
+        startDistanceToDestinationMeters: 500,
+        completionDistanceToDestinationMeters: 20,
+      ),
+      isTrue,
+    );
+    expect(
+      navoraHasCompletedRouteProgress(
+        traveledDistanceKm: 0,
+        startDistanceToDestinationMeters: 500,
+        completionDistanceToDestinationMeters: 20,
+      ),
+      isFalse,
+    );
+    expect(
+      navoraHasCompletedRouteProgress(
+        traveledDistanceKm: 0.03,
+        startDistanceToDestinationMeters: 500,
+        completionDistanceToDestinationMeters: 20,
+      ),
+      isFalse,
+    );
+    expect(
+      navoraHasCompletedRouteProgress(
+        traveledDistanceKm: 0.2,
+        startDistanceToDestinationMeters: 100,
+        completionDistanceToDestinationMeters: 80,
+      ),
+      isFalse,
+    );
+  });
+
+  test('incomplete navigation does not create drive-history entries', () {
+    expect(
+      navoraShouldSaveDriveHistory(
+        startedForNavigation: true,
+        hasCompletedNavigationProgress: false,
+      ),
+      isFalse,
+    );
+    expect(
+      navoraShouldSaveDriveHistory(
+        startedForNavigation: true,
+        hasCompletedNavigationProgress: true,
+      ),
+      isTrue,
+    );
+    expect(
+      navoraShouldSaveDriveHistory(
+        startedForNavigation: false,
+        hasCompletedNavigationProgress: false,
+      ),
+      isTrue,
+    );
+  });
+
   test(
     'search filters apply category and distance without dropping unknowns',
     () {
