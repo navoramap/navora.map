@@ -3,7 +3,6 @@ import 'package:google_maps_flutter/google_maps_flutter.dart';
 import 'package:navora_map/views/home/home_page.dart';
 import 'package:navora_map/views/home/search_page.dart';
 import 'package:navora_map/services/chat_room_service.dart';
-import 'package:navora_map/views/home/vehicle_gltf_model.dart';
 
 void main() {
   TestWidgetsFlutterBinding.ensureInitialized();
@@ -92,16 +91,6 @@ void main() {
       );
     },
   );
-
-  test('authored GLTF contains all four map transport models', () async {
-    final models = await GltfVehicleModel.load();
-    expect(
-      models.keys,
-      containsAll(['Araba', 'Motosiklet', 'Bisiklet', 'Yürüyüş']),
-    );
-    expect(models.values.every((faces) => faces.isNotEmpty), isTrue);
-    expect(models['Araba']!.length, greaterThan(100));
-  });
 
   test('chat rooms cluster at wide zoom and separate when zoomed in', () {
     final rooms = [
@@ -235,11 +224,11 @@ void main() {
   });
 
   test(
-    'search filters apply category and distance without dropping unknowns',
+    'search filters categories, keeps distant results, and prioritizes nearby',
     () {
       final results = [
         {'name': 'Yakın kafe', 'type': 'cafe', 'distanceMeters': 1200},
-        {'name': 'Uzak kafe', 'type': 'cafe', 'distanceMeters': 9000},
+        {'name': 'Uzak kafe', 'type': 'cafe', 'distanceMeters': 25000},
         {'name': 'Yakın market', 'type': 'supermarket', 'distanceMeters': 800},
         {'name': 'Konum sonucu', 'type': 'place'},
       ];
@@ -247,21 +236,18 @@ void main() {
       final filtered = navoraFilterMapSearchResults(
         results,
         category: 'Kafe',
-        radiusKm: 5,
       );
 
-      expect(filtered.map((result) => result['name']), ['Yakın kafe']);
+      expect(filtered.map((result) => result['name']), [
+        'Yakın kafe',
+        'Uzak kafe',
+      ]);
       expect(
         navoraFilterMapSearchResults(
           results,
           category: 'Tümü',
-          radiusKm: 5,
         ).map((result) => result['name']),
-        ['Yakın kafe', 'Yakın market', 'Konum sonucu'],
-      );
-      expect(
-        navoraFilterMapSearchResults(results, category: 'Tümü', radiusKm: null),
-        hasLength(4),
+        ['Yakın market', 'Yakın kafe', 'Uzak kafe', 'Konum sonucu'],
       );
     },
   );

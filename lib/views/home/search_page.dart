@@ -13,13 +13,11 @@ import '../../services/places_service.dart';
 List<Map<String, dynamic>> navoraFilterMapSearchResults(
   Iterable<Map<String, dynamic>> results, {
   required String category,
-  required int? radiusKm,
 }) {
   final categoryKeywords = switch (category) {
     'Kafe' => ['cafe', 'coffee'],
     'Restoran' => ['restaurant', 'fast_food', 'meal_takeaway', 'meal_delivery'],
     'Market' => ['supermarket', 'grocery', 'convenience', 'market'],
-    'Benzinlik' => ['gas_station', 'fuel'],
     'Park' => ['park', 'garden'],
     'Hastane' => ['hospital', 'clinic', 'doctor', 'medical'],
     'Ulaşım' => [
@@ -31,9 +29,7 @@ List<Map<String, dynamic>> navoraFilterMapSearchResults(
     ],
     _ => const <String>[],
   };
-  final radiusMeters = radiusKm == null ? null : radiusKm * 1000;
-
-  return results.where((result) {
+  final filteredResults = results.where((result) {
     if (categoryKeywords.isNotEmpty) {
       final values = [
         result['category']?.toString().toLowerCase() ?? '',
@@ -47,10 +43,19 @@ List<Map<String, dynamic>> navoraFilterMapSearchResults(
         return false;
       }
     }
-
-    final distance = (result['distanceMeters'] as num?)?.toDouble();
-    return radiusMeters == null || distance == null || distance <= radiusMeters;
+    return true;
   }).toList();
+
+  if (filteredResults.any((result) => result['distanceMeters'] is num)) {
+    filteredResults.sort((first, second) {
+      final firstDistance =
+          (first['distanceMeters'] as num?)?.toDouble() ?? double.infinity;
+      final secondDistance =
+          (second['distanceMeters'] as num?)?.toDouble() ?? double.infinity;
+      return firstDistance.compareTo(secondDistance);
+    });
+  }
+  return filteredResults;
 }
 
 class MapSearchPage extends StatefulWidget {
@@ -87,8 +92,6 @@ class _MapSearchPageState extends State<MapSearchPage> {
   final SpeechToText _speech = SpeechToText();
   List<Map<String, dynamic>> _history = [];
   List<Map<String, dynamic>> _suggestions = [];
-  String _selectedCategory = 'Tümü';
-  int _selectedRadiusKm = 15;
 
   @override
   void initState() {
@@ -157,8 +160,7 @@ class _MapSearchPageState extends State<MapSearchPage> {
 
     final visibleSuggestions = navoraFilterMapSearchResults(
       _suggestions,
-      category: _selectedCategory,
-      radiusKm: _selectedRadiusKm == 0 ? null : _selectedRadiusKm,
+      category: 'Tümü',
     );
     if (visibleSuggestions.isNotEmpty) {
       await _selectSuggestion(visibleSuggestions.first);
@@ -533,20 +535,9 @@ class _MapSearchPageState extends State<MapSearchPage> {
     final results = isShowingSuggestions
         ? navoraFilterMapSearchResults(
             _suggestions,
-            category: _selectedCategory,
-            radiusKm: _selectedRadiusKm == 0 ? null : _selectedRadiusKm,
+            category: 'Tümü',
           )
         : _history;
-    final filters = const [
-      'Tümü',
-      'Kafe',
-      'Restoran',
-      'Market',
-      'Benzinlik',
-      'Park',
-      'Hastane',
-      'Ulaşım',
-    ];
 
     return Scaffold(
       backgroundColor: const Color(0xFF191919),
@@ -673,69 +664,14 @@ class _MapSearchPageState extends State<MapSearchPage> {
                 child: Column(
                   crossAxisAlignment: CrossAxisAlignment.start,
                   children: [
-                    SizedBox(
-                      height: 38,
-                      child: ListView(
-                        scrollDirection: Axis.horizontal,
-                        children: [
-                          for (final category in filters)
-                            Padding(
-                              padding: const EdgeInsets.only(right: 7),
-                              child: ChoiceChip(
-                                label: Text(category),
-                                selected: _selectedCategory == category,
-                                onSelected: (_) => setState(
-                                  () => _selectedCategory = category,
-                                ),
-                              ),
-                            ),
-                        ],
-                      ),
-                    ),
                     Row(
                       children: [
                         Text(
                           '${results.length} sonuç',
                           style: const TextStyle(color: Colors.white70),
                         ),
-                        const Spacer(),
-                        const Icon(
-                          Icons.tune_rounded,
-                          color: Colors.white70,
-                          size: 18,
-                        ),
-                        const SizedBox(width: 6),
-                        DropdownButton<int>(
-                          value: _selectedRadiusKm,
-                          dropdownColor: const Color(0xFF242424),
-                          underline: const SizedBox.shrink(),
-                          style: const TextStyle(color: Colors.white),
-                          items: const [
-                            DropdownMenuItem(value: 2, child: Text('2 km')),
-                            DropdownMenuItem(value: 5, child: Text('5 km')),
-                            DropdownMenuItem(value: 10, child: Text('10 km')),
-                            DropdownMenuItem(value: 15, child: Text('15 km')),
-                            DropdownMenuItem(value: 0, child: Text('Sınırsız')),
-                          ],
-                          onChanged: (radius) {
-                            if (radius != null) {
-                              setState(() => _selectedRadiusKm = radius);
-                            }
-                          },
-                        ),
                       ],
                     ),
-                    if (_searchOrigin == null && _selectedRadiusKm != 0)
-                      const Padding(
-                        padding: EdgeInsets.only(top: 2),
-                        child: Text(
-                          'Uzaklık filtresi için konum izni gerekli.',
-                          style: TextStyle(
-                            color: Color(0xFFFFB36B),
-                            fontSize: 12,
-                          ),
-                        ),
-                      ),
                   ],
                 ),
               ),
