@@ -49,6 +49,7 @@ flutter:
 
   assets:
     - assets/logo/navora_app_icon.svg
+    - assets/models/navora_vehicles.gltf
 
   # assets:
   #   - images/a_dot_burr.jpeg

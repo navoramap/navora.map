@@ -18,14 +18,17 @@ The app uses the Firebase project configured in `lib/firebase_options.dart` and 
 ## Tests
 
 ```powershell
+flutter analyze
 flutter test
-npm install
+npm ci
+npm ci --prefix functions
+npm test --prefix functions
 npm run test:migration
 npm run test:migration:emulator
 npm run test:rules
 ```
 
-The rules test command runs against a local demo Firestore emulator and does not deploy rules or access the configured production project.
+The Firebase emulator tests require Java 17 or newer (Java 21 recommended). They run against local demo projects and do not deploy rules or access the configured production project. GitHub Actions runs these checks on pushes and pull requests to `main`.
 
 ## Firestore Rooms
 
@@ -42,13 +45,17 @@ New rooms use schema version 2:
 The room migration tool defaults to a read-only dry run. It requires an explicit project ID and Application Default Credentials with Firestore read access. Reports contain room IDs, statuses, issue codes, non-sensitive warnings, and write counts; the tool never prints passwords, hashes, messages, or room names. The tool does not create a backup.
 
 ```powershell
-# Authenticate in a trusted operator environment and make/verify a Firestore backup first.
+# Authenticate in a trusted operator environment.
 gcloud auth application-default login
 
-# Preview only.
+# Confirm the weekly schedule and wait for a completed backup before migration.
+gcloud firestore backups schedules list --database='(default)' --project=navoramapa
+gcloud firestore backups list --location=eur3 --project=navoramapa --format='table(name,database,state,expireTime)'
+
+# Preview only after a completed backup is available.
 npm run migrate:rooms -- --project navoramapa
 
-# Apply only after a verified backup and review of the dry-run report.
+# Apply only after verifying the backup can be restored and reviewing the dry-run report.
 npm run migrate:rooms -- --project navoramapa --apply --backup-confirmed
 ```
 
@@ -85,7 +92,7 @@ firebase deploy --only functions:sendChatMessage,functions:reviewChatMessageRepo
 
 Android and iOS release builds send fatal Flutter/framework errors to Firebase Crashlytics. Debug builds do not collect reports. Verify Crashlytics is enabled in the Firebase console before release. iOS dSYM symbol upload and physical-device validation require macOS/Xcode.
 
-No scheduled Firestore backup is configured. Production currently has no listed managed Firestore backups. Choose a backup frequency and retention only after reviewing Firestore database size and the resulting storage/operation costs; do not treat data export as a substitute for a verified restorable backup.
+The production Firestore database `navoramapa/(default)` in `eur3` now has a managed backup schedule: weekly on Sunday (UTC), with 30-day retention. Managed backups can incur storage charges. The schedule is active, but no completed backup exists yet; do not migrate production room data or deploy Firestore rules until a backup has completed and its restorability has been verified. Firestore backups do not include Firebase Security Rules or TTL policies; keep rules and index definitions versioned separately.
 
 ## Important Limitations
 

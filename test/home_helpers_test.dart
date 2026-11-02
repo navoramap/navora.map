@@ -3,8 +3,11 @@ import 'package:google_maps_flutter/google_maps_flutter.dart';
 import 'package:navora_map/views/home/home_page.dart';
 import 'package:navora_map/views/home/search_page.dart';
 import 'package:navora_map/services/chat_room_service.dart';
+import 'package:navora_map/views/home/vehicle_gltf_model.dart';
 
 void main() {
+  TestWidgetsFlutterBinding.ensureInitialized();
+
   test('navigation duration switches to hours after 60 minutes', () {
     expect(navoraFormatNavigationDuration(59), '59 dk');
     expect(navoraFormatNavigationDuration(60), '1 sa');
@@ -35,6 +38,85 @@ void main() {
     expect(navoraNavigationZoomForManeuverDistance(300), 18);
     expect(navoraNavigationZoomForManeuverDistance(100), 19);
     expect(navoraNavigationZoomForManeuverDistance(null), 17);
+  });
+
+  test(
+    'navigation camera zoom adapts to speed without hiding nearby turns',
+    () {
+      expect(navoraNavigationZoomForSpeedAndManeuver(500, 5), 17);
+      expect(navoraNavigationZoomForSpeedAndManeuver(500, 20), 16.5);
+      expect(navoraNavigationZoomForSpeedAndManeuver(500, 30), 16);
+      expect(navoraNavigationZoomForSpeedAndManeuver(50, 30), 18);
+      expect(navoraNavigationZoomForSpeedAndManeuver(500, double.nan), 17);
+    },
+  );
+
+  test('off-route tolerance accounts for transport mode and GPS accuracy', () {
+    expect(
+      navoraOffRouteThresholdMeters(vehicle: 'Araba', accuracyMeters: 10),
+      95,
+    );
+    expect(
+      navoraOffRouteThresholdMeters(vehicle: 'Yürüyüş', accuracyMeters: 10),
+      45,
+    );
+    expect(
+      navoraOffRouteThresholdMeters(vehicle: 'Bisiklet', accuracyMeters: 100),
+      90,
+    );
+  });
+
+  test(
+    'route recalculation uses a newer position after significant movement',
+    () {
+      expect(
+        navoraShouldRefetchRouteFromLatestPosition(
+          movedMeters: 17,
+          speedMetersPerSecond: 0,
+        ),
+        isFalse,
+      );
+      expect(
+        navoraShouldRefetchRouteFromLatestPosition(
+          movedMeters: 80,
+          speedMetersPerSecond: 25,
+        ),
+        isTrue,
+      );
+      expect(
+        navoraShouldRefetchRouteFromLatestPosition(
+          movedMeters: double.nan,
+          speedMetersPerSecond: 2,
+        ),
+        isFalse,
+      );
+    },
+  );
+
+  test('authored GLTF contains all four map transport models', () async {
+    final models = await GltfVehicleModel.load();
+    expect(
+      models.keys,
+      containsAll(['Araba', 'Motosiklet', 'Bisiklet', 'Yürüyüş']),
+    );
+    expect(models.values.every((faces) => faces.isNotEmpty), isTrue);
+    expect(models['Araba']!.length, greaterThan(100));
+  });
+
+  test('chat rooms cluster at wide zoom and separate when zoomed in', () {
+    final rooms = [
+      {'id': 'near-a', 'latitude': 41.0, 'longitude': 29.0},
+      {'id': 'near-b', 'latitude': 41.0001, 'longitude': 29.0001},
+      {'id': 'far', 'latitude': 41.5, 'longitude': 29.5},
+    ];
+
+    final wideZoomClusters = navoraClusterChatRooms(rooms, zoom: 11);
+    expect(wideZoomClusters, hasLength(2));
+    expect(
+      wideZoomClusters.map((cluster) => cluster.length).toSet(),
+      contains(2),
+    );
+    expect(navoraClusterChatRooms(rooms, zoom: 15), hasLength(3));
   });
 
   test('slow or unavailable internet is flagged for navigation', () {

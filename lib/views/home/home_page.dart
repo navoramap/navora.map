@@ -37,6 +37,7 @@ import 'tabs/explore_page.dart';
 import 'my_property_listings_page.dart';
 import 'property_listing_moderation_page.dart';
 import 'chat_message_moderation_page.dart';
+import 'vehicle_gltf_model.dart';
 import '../../services/places_service.dart';
 import '../../services/chat_room_service.dart';
 import '../../services/property_listing_service.dart';
@@ -179,6 +180,94 @@ double navoraNavigationZoomForManeuverDistance(double? distanceMeters) {
   if (distanceMeters <= 100) return 19;
   if (distanceMeters <= 300) return 18;
   return 17;
+}
+
+double navoraNavigationZoomForSpeedAndManeuver(
+  double? distanceMeters,
+  double speedMetersPerSecond,
+) {
+  final maneuverZoom = navoraNavigationZoomForManeuverDistance(distanceMeters);
+  if (!speedMetersPerSecond.isFinite || speedMetersPerSecond < 0) {
+    return maneuverZoom;
+  }
+  final speedAdjustment = speedMetersPerSecond >= 25
+      ? 1.0
+      : speedMetersPerSecond >= 16
+      ? 0.5
+      : 0.0;
+  return (maneuverZoom - speedAdjustment).clamp(16.0, 19.0);
+}
+
+double navoraOffRouteThresholdMeters({
+  required String vehicle,
+  required double accuracyMeters,
+}) {
+  final vehicleThreshold = switch (vehicle) {
+    'Yürüyüş' => 30.0,
+    'Bisiklet' => 45.0,
+    'Motosiklet' => 65.0,
+    _ => 80.0,
+  };
+  final accuracyAllowance = accuracyMeters.isFinite && accuracyMeters > 0
+      ? (accuracyMeters * 1.5).clamp(0.0, 45.0)
+      : 0.0;
+  return vehicleThreshold + accuracyAllowance;
+}
+
+bool navoraShouldRefetchRouteFromLatestPosition({
+  required double movedMeters,
+  required double speedMetersPerSecond,
+}) {
+  if (!movedMeters.isFinite || movedMeters < 0) return false;
+  final speedAllowance =
+      speedMetersPerSecond.isFinite && speedMetersPerSecond > 0
+      ? speedMetersPerSecond * 3
+      : 0.0;
+  return movedMeters >= math.max(18.0, speedAllowance);
+}
+
+List<List<Map<String, dynamic>>> navoraClusterChatRooms(
+  List<Map<String, dynamic>> rooms, {
+  required double zoom,
+  double cellSize = 64,
+}) {
+  final clusters = <String, List<Map<String, dynamic>>>{};
+  for (final room in rooms) {
+    final latitude = (room['latitude'] as num?)?.toDouble();
+    final longitude = (room['longitude'] as num?)?.toDouble();
+    if (latitude == null ||
+        longitude == null ||
+        !latitude.isFinite ||
+        !longitude.isFinite ||
+        latitude < -90 ||
+        latitude > 90 ||
+        longitude < -180 ||
+        longitude > 180) {
+      continue;
+    }
+
+    final key = zoom >= 14
+        ? 'room-${room['id'] ?? identityHashCode(room)}'
+        : _navoraChatRoomGridKey(latitude, longitude, zoom, cellSize);
+    clusters.putIfAbsent(key, () => []).add(room);
+  }
+  return clusters.values.toList(growable: false);
+}
+
+String _navoraChatRoomGridKey(
+  double latitude,
+  double longitude,
+  double zoom,
+  double cellSize,
+) {
+  final worldSize = 256 * math.pow(2, zoom);
+  final x = (longitude + 180) / 360 * worldSize;
+  final clampedLatitude = latitude.clamp(-85.05112878, 85.05112878);
+  final sinLatitude = math.sin(clampedLatitude * math.pi / 180);
+  final y =
+      (0.5 - math.log((1 + sinLatitude) / (1 - sinLatitude)) / (4 * math.pi)) *
+      worldSize;
+  return '${(x / cellSize).floor()}:${(y / cellSize).floor()}';
 }
 
 bool navoraIsNetworkDegraded(Duration latency, int statusCode) =>
@@ -530,6 +619,566 @@ String navoraResolveSearchSubtitle(Map<String, dynamic> item) {
   return 'Konum';
 }
 
+class _Vehicle3DVertex {
+  const _Vehicle3DVertex(this.x, this.y, this.z);
+
+  final double x;
+  final double y;
+  final double z;
+}
+
+class _Vehicle3DFace {
+  const _Vehicle3DFace(this.vertices, this.color);
+
+  final List<_Vehicle3DVertex> vertices;
+  final Color color;
+}
+
+class _Vehicle3DModelPainter extends CustomPainter {
+  const _Vehicle3DModelPainter({
+    required this.vehicle,
+    required this.heading,
+    required this.cameraTilt,
+    this.modelFaces,
+  });
+
+  final String vehicle;
+  final double heading;
+  final double cameraTilt;
+  final List<GltfVehicleFace>? modelFaces;
+
+  @override
+  void paint(Canvas canvas, Size size) {
+    final center = Offset(size.width / 2, size.height / 2 + 5);
+    canvas.drawOval(
+      Rect.fromCenter(center: center.translate(1, 13), width: 52, height: 20),
+      Paint()
+        ..color = const Color(0x70030A12)
+        ..maskFilter = const MaskFilter.blur(BlurStyle.normal, 7),
+    );
+
+    final faces = modelFaces == null
+        ? <_Vehicle3DFace>[]
+        : modelFaces!
+              .map(
+                (face) => _Vehicle3DFace(
+                  face.vertices
+                      .map(
+                        (vertex) =>
+                            _Vehicle3DVertex(vertex.x, vertex.y, vertex.z),
+                      )
+                      .toList(),
+                  face.color,
+                ),
+              )
+              .toList();
+    if (modelFaces == null) {
+      final orange = const Color(0xFFFF7616);
+      final darkOrange = const Color(0xFFAD3B08);
+      final glass = const Color(0xFF28627F);
+      switch (vehicle) {
+      case 'Motosiklet':
+        _addBox(
+          faces,
+          -0.10,
+          0.10,
+          -0.88,
+          -0.68,
+          0.02,
+          0.20,
+          const Color(0xFF171E26),
+        );
+        _addBox(
+          faces,
+          -0.10,
+          0.10,
+          0.68,
+          0.88,
+          0.02,
+          0.20,
+          const Color(0xFF171E26),
+        );
+        _addBox(
+          faces,
+          -0.13,
+          0.13,
+          -0.60,
+          0.59,
+          0.16,
+          0.32,
+          const Color(0xFF60717C),
+        );
+        _addBox(faces, -0.31, 0.31, -0.32, 0.15, 0.27, 0.53, orange);
+        _addBox(
+          faces,
+          -0.24,
+          0.24,
+          -0.12,
+          0.08,
+          0.51,
+          0.58,
+          const Color(0xFF303C46),
+        );
+        _addSphere(faces, const _Vehicle3DVertex(0, -0.54, 0.35), 0.11, glass);
+      case 'Bisiklet':
+        _addWheel(faces, -0.03, -0.66, 0.25, 0.25);
+        _addWheel(faces, -0.03, 0.66, 0.25, 0.25);
+        _addBeam(
+          faces,
+          const _Vehicle3DVertex(0, -0.66, 0.25),
+          const _Vehicle3DVertex(0, 0, 0.28),
+          0.045,
+          orange,
+        );
+        _addBeam(
+          faces,
+          const _Vehicle3DVertex(0, 0, 0.28),
+          const _Vehicle3DVertex(0, 0.66, 0.25),
+          0.045,
+          orange,
+        );
+        _addBeam(
+          faces,
+          const _Vehicle3DVertex(0, -0.66, 0.25),
+          const _Vehicle3DVertex(0, 0.12, 0.72),
+          0.04,
+          darkOrange,
+        );
+        _addBeam(
+          faces,
+          const _Vehicle3DVertex(0, 0.12, 0.72),
+          const _Vehicle3DVertex(0, 0.66, 0.25),
+          0.04,
+          orange,
+        );
+        _addBeam(
+          faces,
+          const _Vehicle3DVertex(0, 0.12, 0.72),
+          const _Vehicle3DVertex(0, -0.66, 0.25),
+          0.04,
+          const Color(0xFFFFA74D),
+        );
+        _addBeam(
+          faces,
+          const _Vehicle3DVertex(-0.2, 0.12, 0.74),
+          const _Vehicle3DVertex(0.2, 0.12, 0.74),
+          0.035,
+          const Color(0xFF26333D),
+        );
+        _addBeam(
+          faces,
+          const _Vehicle3DVertex(0, 0.66, 0.25),
+          const _Vehicle3DVertex(0, 0.66, 0.55),
+          0.035,
+          const Color(0xFFCAD6DE),
+        );
+      case 'Yürüyüş':
+        _addBox(
+          faces,
+          -0.19,
+          0.19,
+          -0.10,
+          0.20,
+          0.58,
+          1.10,
+          const Color(0xFF2788E8),
+        );
+        _addSphere(
+          faces,
+          const _Vehicle3DVertex(0, 0.02, 1.30),
+          0.22,
+          const Color(0xFFE9B38B),
+        );
+        _addBeam(
+          faces,
+          const _Vehicle3DVertex(0, -0.01, 0.61),
+          const _Vehicle3DVertex(0.03, -0.38, 0.08),
+          0.09,
+          const Color(0xFF25364A),
+        );
+        _addBeam(
+          faces,
+          const _Vehicle3DVertex(0.02, 0.10, 0.61),
+          const _Vehicle3DVertex(-0.08, 0.38, 0.08),
+          0.09,
+          const Color(0xFF25364A),
+        );
+        _addBeam(
+          faces,
+          const _Vehicle3DVertex(-0.14, 0, 1.02),
+          const _Vehicle3DVertex(-0.32, -0.28, 0.70),
+          0.07,
+          const Color(0xFF2788E8),
+        );
+        _addBeam(
+          faces,
+          const _Vehicle3DVertex(0.14, 0, 1.02),
+          const _Vehicle3DVertex(0.31, 0.28, 0.72),
+          0.07,
+          const Color(0xFF2788E8),
+        );
+      case 'Araba':
+      default:
+        _addBox(
+          faces,
+          -0.48,
+          0.48,
+          -0.94,
+          0.94,
+          0.12,
+          0.42,
+          orange,
+          sideColor: darkOrange,
+        );
+        _addBox(
+          faces,
+          -0.35,
+          0.35,
+          -0.42,
+          0.40,
+          0.40,
+          0.75,
+          const Color(0xFFFF8B34),
+          topColor: const Color(0xFFFFB46F),
+          sideColor: const Color(0xFFC44C0A),
+        );
+        _addBox(
+          faces,
+          -0.29,
+          0.29,
+          -0.34,
+          -0.06,
+          0.48,
+          0.68,
+          glass,
+          topColor: const Color(0xFF6FB0C9),
+          sideColor: const Color(0xFF19465E),
+        );
+        _addBox(
+          faces,
+          -0.29,
+          0.29,
+          0.04,
+          0.33,
+          0.48,
+          0.68,
+          const Color(0xFF214F69),
+          topColor: const Color(0xFF5F9BB4),
+          sideColor: const Color(0xFF173B52),
+        );
+        for (final x in [-0.48, 0.48]) {
+          for (final y in [-0.60, 0.60]) {
+            _addBox(
+              faces,
+              x - 0.07,
+              x + 0.07,
+              y - 0.19,
+              y + 0.19,
+              0.06,
+              0.34,
+              const Color(0xFF111820),
+              topColor: const Color(0xFF313D46),
+              sideColor: const Color(0xFF090E13),
+            );
+            _addBox(
+              faces,
+              x - 0.075,
+              x + 0.075,
+              y - 0.11,
+              y + 0.11,
+              0.14,
+              0.25,
+              const Color(0xFF9BAAB1),
+              topColor: const Color(0xFFDCE5E9),
+              sideColor: const Color(0xFF53636D),
+            );
+            }
+          }
+        }
+        _addBox(
+          faces,
+          -0.30,
+          0.30,
+          0.90,
+          0.96,
+          0.22,
+          0.34,
+          const Color(0xFFFFF0C3),
+        );
+        _addBox(
+          faces,
+          -0.30,
+          0.30,
+          -0.96,
+          -0.90,
+          0.22,
+          0.34,
+          const Color(0xFFFFD8C8),
+        );
+    }
+
+    final yaw = heading * math.pi / 180;
+    final pitch = cameraTilt.clamp(38, 65) * math.pi / 180;
+    final cosYaw = math.cos(yaw);
+    final sinYaw = math.sin(yaw);
+    final cosPitch = math.cos(pitch);
+    final sinPitch = math.sin(pitch);
+
+    ({Offset point, double depth}) project(_Vehicle3DVertex vertex) {
+      final rotatedX = vertex.x * cosYaw + vertex.y * sinYaw;
+      final rotatedY = -vertex.x * sinYaw + vertex.y * cosYaw;
+      final depth = rotatedY * sinPitch + vertex.z * cosPitch;
+      final perspective = 5.2 / (5.2 + depth);
+      final screenY = rotatedY * cosPitch - vertex.z * sinPitch;
+      return (
+        point: Offset(
+          center.dx + rotatedX * 31 * perspective,
+          center.dy - screenY * 31 * perspective,
+        ),
+        depth: depth,
+      );
+    }
+
+    final projectedFaces = faces.map((face) {
+      final projected = face.vertices.map(project).toList();
+      final depth =
+          projected.map((vertex) => vertex.depth).reduce((a, b) => a + b) /
+          projected.length;
+      return (vertices: projected, depth: depth, color: face.color);
+    }).toList()..sort((a, b) => a.depth.compareTo(b.depth));
+
+    for (final face in projectedFaces) {
+      final path = Path()
+        ..moveTo(face.vertices.first.point.dx, face.vertices.first.point.dy);
+      for (final vertex in face.vertices.skip(1)) {
+        path.lineTo(vertex.point.dx, vertex.point.dy);
+      }
+      path.close();
+      canvas
+        ..drawPath(
+          path,
+          Paint()
+            ..color = face.color
+            ..isAntiAlias = true,
+        )
+        ..drawPath(
+          path,
+          Paint()
+            ..color = face.color.withValues(alpha: 0.72)
+            ..style = PaintingStyle.stroke
+            ..strokeWidth = 0.65
+            ..isAntiAlias = true,
+        );
+    }
+  }
+
+  void _addBox(
+    List<_Vehicle3DFace> faces,
+    double minX,
+    double maxX,
+    double minY,
+    double maxY,
+    double minZ,
+    double maxZ,
+    Color color, {
+    Color? topColor,
+    Color? sideColor,
+  }) {
+    final v000 = _Vehicle3DVertex(minX, minY, minZ);
+    final v100 = _Vehicle3DVertex(maxX, minY, minZ);
+    final v010 = _Vehicle3DVertex(minX, maxY, minZ);
+    final v110 = _Vehicle3DVertex(maxX, maxY, minZ);
+    final v001 = _Vehicle3DVertex(minX, minY, maxZ);
+    final v101 = _Vehicle3DVertex(maxX, minY, maxZ);
+    final v011 = _Vehicle3DVertex(minX, maxY, maxZ);
+    final v111 = _Vehicle3DVertex(maxX, maxY, maxZ);
+    faces
+      ..add(_Vehicle3DFace([v001, v101, v111, v011], topColor ?? color))
+      ..add(
+        _Vehicle3DFace([v000, v010, v110, v100], color.withValues(alpha: 0.88)),
+      )
+      ..add(_Vehicle3DFace([v000, v001, v011, v010], sideColor ?? color))
+      ..add(
+        _Vehicle3DFace([
+          v100,
+          v110,
+          v111,
+          v101,
+        ], (sideColor ?? color).withValues(alpha: 0.72)),
+      )
+      ..add(
+        _Vehicle3DFace([v000, v100, v101, v001], color.withValues(alpha: 0.94)),
+      )
+      ..add(
+        _Vehicle3DFace([v010, v011, v111, v110], color.withValues(alpha: 0.80)),
+      );
+  }
+
+  void _addBeam(
+    List<_Vehicle3DFace> faces,
+    _Vehicle3DVertex start,
+    _Vehicle3DVertex end,
+    double radius,
+    Color color,
+  ) {
+    final dx = end.x - start.x;
+    final dy = end.y - start.y;
+    final length = math.sqrt(dx * dx + dy * dy);
+    final offsetX = length == 0 ? radius : -dy / length * radius;
+    final offsetY = length == 0 ? 0 : dx / length * radius;
+    final startLeft = _Vehicle3DVertex(
+      start.x - offsetX,
+      start.y - offsetY,
+      start.z - radius,
+    );
+    final startRight = _Vehicle3DVertex(
+      start.x + offsetX,
+      start.y + offsetY,
+      start.z + radius,
+    );
+    final startUpperLeft = _Vehicle3DVertex(
+      start.x - offsetX,
+      start.y - offsetY,
+      start.z + radius,
+    );
+    final endLeft = _Vehicle3DVertex(
+      end.x - offsetX,
+      end.y - offsetY,
+      end.z - radius,
+    );
+    final endRight = _Vehicle3DVertex(
+      end.x + offsetX,
+      end.y + offsetY,
+      end.z + radius,
+    );
+    final endUpperLeft = _Vehicle3DVertex(
+      end.x - offsetX,
+      end.y - offsetY,
+      end.z + radius,
+    );
+    final startUpperRight = _Vehicle3DVertex(
+      start.x + offsetX,
+      start.y + offsetY,
+      start.z - radius,
+    );
+    final endUpperRight = _Vehicle3DVertex(
+      end.x + offsetX,
+      end.y + offsetY,
+      end.z - radius,
+    );
+    faces
+      ..add(
+        _Vehicle3DFace([
+          startLeft,
+          startRight,
+          endRight,
+          endLeft,
+        ], color.withValues(alpha: 0.78)),
+      )
+      ..add(
+        _Vehicle3DFace([
+          startRight,
+          startUpperLeft,
+          endUpperLeft,
+          endRight,
+        ], color),
+      )
+      ..add(
+        _Vehicle3DFace([
+          startUpperLeft,
+          startUpperRight,
+          endUpperRight,
+          endUpperLeft,
+        ], color.withValues(alpha: 0.92)),
+      )
+      ..add(
+        _Vehicle3DFace([
+          startUpperRight,
+          startLeft,
+          endLeft,
+          endUpperRight,
+        ], color.withValues(alpha: 0.68)),
+      );
+  }
+
+  void _addWheel(
+    List<_Vehicle3DFace> faces,
+    double centerX,
+    double centerY,
+    double centerZ,
+    double radius,
+  ) {
+    const segments = 12;
+    const thickness = 0.09;
+    final left = <_Vehicle3DVertex>[];
+    final right = <_Vehicle3DVertex>[];
+    for (var index = 0; index < segments; index++) {
+      final angle = index * math.pi * 2 / segments;
+      final y = centerY + math.sin(angle) * radius;
+      final z = centerZ + math.cos(angle) * radius;
+      left.add(_Vehicle3DVertex(centerX - thickness / 2, y, z));
+      right.add(_Vehicle3DVertex(centerX + thickness / 2, y, z));
+    }
+    for (var index = 0; index < segments; index++) {
+      final next = (index + 1) % segments;
+      faces
+        ..add(
+          _Vehicle3DFace([
+            left[index],
+            right[index],
+            right[next],
+            left[next],
+          ], const Color(0xFF18212A)),
+        )
+        ..add(
+          _Vehicle3DFace([
+            _Vehicle3DVertex(centerX - thickness / 2, centerY, centerZ),
+            left[index],
+            left[next],
+          ], const Color(0xFF9AAAB5)),
+        );
+    }
+  }
+
+  void _addSphere(
+    List<_Vehicle3DFace> faces,
+    _Vehicle3DVertex center,
+    double radius,
+    Color color,
+  ) {
+    const rings = 5;
+    const segments = 10;
+    for (var ring = 0; ring < rings; ring++) {
+      final latitudeA = -math.pi / 2 + math.pi * ring / rings;
+      final latitudeB = -math.pi / 2 + math.pi * (ring + 1) / rings;
+      for (var segment = 0; segment < segments; segment++) {
+        final longitudeA = math.pi * 2 * segment / segments;
+        final longitudeB = math.pi * 2 * (segment + 1) / segments;
+        _Vehicle3DVertex vertex(double latitude, double longitude) =>
+            _Vehicle3DVertex(
+              center.x + radius * math.cos(latitude) * math.cos(longitude),
+              center.y + radius * math.cos(latitude) * math.sin(longitude),
+              center.z + radius * math.sin(latitude),
+            );
+        faces.add(
+          _Vehicle3DFace([
+            vertex(latitudeA, longitudeA),
+            vertex(latitudeA, longitudeB),
+            vertex(latitudeB, longitudeB),
+            vertex(latitudeB, longitudeA),
+          ], color.withValues(alpha: 0.84 + 0.16 * math.cos(longitudeA))),
+        );
+      }
+    }
+  }
+
+  @override
+  bool shouldRepaint(covariant _Vehicle3DModelPainter oldDelegate) =>
+      vehicle != oldDelegate.vehicle ||
+      heading != oldDelegate.heading ||
+      cameraTilt != oldDelegate.cameraTilt;
+}
+
 class HomePage extends StatefulWidget {
   final String userName;
   final String userEmail;
@@ -568,6 +1217,13 @@ class _HomePageState extends State<HomePage> {
   final MapType _mapType = MapType.normal;
   GoogleMapController? _mapController;
   CameraPosition? _mapCameraPosition;
+  final ValueNotifier<Offset?> _vehicleModelScreenPosition = ValueNotifier(
+    null,
+  );
+  Timer? _vehicleModelProjectionTimer;
+  int _vehicleModelProjectionRequest = 0;
+  bool _vehicleModelProjectionInFlight = false;
+  bool _vehicleModelProjectionPending = false;
   final TextEditingController _searchController = TextEditingController();
   final FocusNode _searchFocusNode = FocusNode();
   Timer? _searchDebounce;
@@ -590,6 +1246,11 @@ class _HomePageState extends State<HomePage> {
   bool _isMapTilted = false;
   bool _isFollowingCurrentPosition = true;
   bool _isProgrammaticCameraMove = false;
+  bool _isNavigationCameraUpdateInFlight = false;
+  geo.Position? _pendingNavigationCameraPosition;
+  double? _smoothedVehicleHeading;
+  double _vehicleModelScreenRotation = 0;
+  bool _hasVehicleModelScreenRotation = false;
   final Set<int> _activeMapPointers = {};
   bool _isLocationTracking = false;
   bool _hasMapBearing = false;
@@ -602,6 +1263,7 @@ class _HomePageState extends State<HomePage> {
   bool _hasShownRouteUpdateError = false;
   bool _isNavigationVoiceEnabled = true;
   BitmapDescriptor? _navigationEndpointMarkerIcon;
+  final Map<String, BitmapDescriptor> _vehicleMarkerIcons = {};
   bool _isSearchHistoryEnabled = true;
   bool _hasAnnouncedArrival = false;
   int _offRouteReadings = 0;
@@ -707,7 +1369,6 @@ class _HomePageState extends State<HomePage> {
   String _userPhone = '+90 532 000 0000';
   String _userGender = 'Belirtmek istemiyorum';
   String _selectedVehicle = 'Araba';
-  final Map<String, BitmapDescriptor> _vehicleMarkerIcons = {};
 
   // Pro & Oda Sınırı Değişkenleri
   bool _isProUser = false;
@@ -716,6 +1377,13 @@ class _HomePageState extends State<HomePage> {
   String? _profilePhotoUrl;
   bool _canManageExploreHighlights = false;
   BitmapDescriptor? _chatRoomMarkerIcon;
+  Map<String, List<GltfVehicleFace>> _vehicleGltfModels = const {};
+  final Map<int, BitmapDescriptor> _chatRoomMarkerIcons = {};
+  final Map<int, BitmapDescriptor> _chatRoomClusterMarkerIcons = {};
+  final Set<int> _loadingRoomMarkerIconCounts = {};
+  final Set<int> _loadingRoomClusterIconCounts = {};
+  bool _clusterRoomMarkers = true;
+  BitmapDescriptor? _navigationDestinationMarkerIcon;
   bool _locationPermissionGranted = false;
   static const int _dailyRoomLimit = 3;
   static const int _freeAiQueriesPerDay = 3;
@@ -793,6 +1461,7 @@ class _HomePageState extends State<HomePage> {
     _userEmail = widget.userEmail;
     _profilePhotoUrl = FirebaseAuth.instance.currentUser?.photoURL;
     _initializeVoiceNavigation();
+    unawaited(_loadVehicleGltfModels());
     _loadNavigationEndpointMarkerIcon();
     _loadVehicleMarkerIcons();
     _loadChatRoomMarkerIcon();
@@ -2315,10 +2984,13 @@ class _HomePageState extends State<HomePage> {
     final query = _searchController.text.trim();
     if (query.isEmpty || _isSearching) return;
 
+    _searchDebounce?.cancel();
+    final requestId = ++_searchRequestId;
     FocusManager.instance.primaryFocus?.unfocus();
     setState(() => _isSearching = true);
     try {
       final locations = await geo_coding.locationFromAddress(query);
+      if (!mounted || requestId != _searchRequestId) return;
       if (locations.isEmpty) {
         _showTrackingMessage('Bu arama için konum bulunamadı.');
         return;
@@ -2330,10 +3002,10 @@ class _HomePageState extends State<HomePage> {
         location.latitude,
         location.longitude,
       );
+      if (!mounted || requestId != _searchRequestId) return;
       final placemark = placemarks.isEmpty ? null : placemarks.first;
       final resultName = _formatPlacemark(placemark) ?? query;
 
-      if (!mounted) return;
       setState(() {
         _clearRouteState();
         _searchResultName = resultName.isEmpty ? query : resultName;
@@ -2363,21 +3035,27 @@ class _HomePageState extends State<HomePage> {
       if (mounted) {
         Future.microtask(() async {
           await Future<void>.delayed(const Duration(milliseconds: 300));
-          if (mounted) {
+          if (mounted && requestId == _searchRequestId) {
             _showSelectedPlaceActionSheet();
           }
         });
       }
     } on PlatformException catch (error) {
       debugPrint('Yer araması başarısız: $error');
-      _showTrackingMessage('Yer araması şu anda kullanılamıyor.');
+      if (mounted && requestId == _searchRequestId) {
+        _showTrackingMessage('Yer araması şu anda kullanılamıyor.');
+      }
     } catch (error) {
       debugPrint('Yer araması başarısız: $error');
-      _showTrackingMessage(
-        'Yer bulunamadı. İnternet bağlantınızı kontrol edin.',
-      );
+      if (mounted && requestId == _searchRequestId) {
+        _showTrackingMessage(
+          'Yer bulunamadı. İnternet bağlantınızı kontrol edin.',
+        );
+      }
     } finally {
-      if (mounted) setState(() => _isSearching = false);
+      if (mounted && requestId == _searchRequestId) {
+        setState(() => _isSearching = false);
+      }
     }
   }
 
@@ -2878,8 +3556,9 @@ class _HomePageState extends State<HomePage> {
   }
 
   Future<void> _refreshNavigationRouteIfNeeded(geo.Position position) async {
+    final destination = _selectedDestinationCoordinate;
     if (!_isNavigationActive ||
-        _selectedDestinationCoordinate == null ||
+        destination == null ||
         !navoraHasReliableNavigationPosition(position.accuracy)) {
       return;
     }
@@ -2888,13 +3567,11 @@ class _HomePageState extends State<HomePage> {
     final liveRoute = _routePolylines.isEmpty
         ? const <LatLng>[]
         : _routePolylines.first.points;
-    final offRouteThresholdMeters = switch (_selectedVehicle) {
-      'Yürüyüş' => 30.0,
-      'Bisiklet' => 45.0,
-      'Motosiklet' => 65.0,
-      _ => 80.0,
-    };
-    final recoveryThresholdMeters = offRouteThresholdMeters * 0.65;
+    final effectiveRouteThresholdMeters = navoraOffRouteThresholdMeters(
+      vehicle: _selectedVehicle,
+      accuracyMeters: position.accuracy,
+    );
+    final recoveryThresholdMeters = effectiveRouteThresholdMeters * 0.65;
     final distanceToRoute = navoraDistanceToRouteMeters(
       currentPosition,
       liveRoute,
@@ -2903,7 +3580,9 @@ class _HomePageState extends State<HomePage> {
     final exceedsRouteThreshold =
         hasLiveRoute &&
         distanceToRoute >
-            (_isOffRoute ? recoveryThresholdMeters : offRouteThresholdMeters);
+            (_isOffRoute
+                ? recoveryThresholdMeters
+                : effectiveRouteThresholdMeters);
     if (exceedsRouteThreshold) {
       _offRouteReadings++;
     } else {
@@ -2970,26 +3649,83 @@ class _HomePageState extends State<HomePage> {
     _lastNavigationRefreshAt = now;
     _isRefreshingNavigation = true;
     try {
-      final route = await _fetchRoadRoute(
-        currentPosition,
-        _selectedDestinationCoordinate!,
-        vehicle: _selectedVehicle,
-      );
-      if (!mounted || !_isNavigationActive) return;
+      var routeOrigin = currentPosition;
+      Map<String, dynamic>? route;
+      for (var attempt = 0; attempt < 2; attempt++) {
+        route = await _fetchRoadRoute(
+          routeOrigin,
+          destination,
+          vehicle: _selectedVehicle,
+        );
+        if (!mounted ||
+            !_isNavigationActive ||
+            !_isOffRoute ||
+            _selectedDestinationCoordinate != destination) {
+          return;
+        }
+
+        final latestPosition = _currentPosition;
+        if (attempt == 1 ||
+            latestPosition == null ||
+            !navoraHasReliableNavigationPosition(latestPosition.accuracy)) {
+          break;
+        }
+        final latestCoordinate = LatLng(
+          latestPosition.latitude,
+          latestPosition.longitude,
+        );
+        final movedMeters = geo.Geolocator.distanceBetween(
+          routeOrigin.latitude,
+          routeOrigin.longitude,
+          latestCoordinate.latitude,
+          latestCoordinate.longitude,
+        );
+        if (!navoraShouldRefetchRouteFromLatestPosition(
+          movedMeters: movedMeters,
+          speedMetersPerSecond: latestPosition.speed,
+        )) {
+          break;
+        }
+        routeOrigin = latestCoordinate;
+      }
+
+      if (route == null ||
+          !mounted ||
+          !_isNavigationActive ||
+          !_isOffRoute ||
+          _selectedDestinationCoordinate != destination) {
+        return;
+      }
       final routeOptions =
           route['options'] as List<Map<String, dynamic>>? ?? [route];
       final selectedRoute = routeOptions.first;
       final routePoints = selectedRoute['points'] as List<LatLng>;
       final latestPosition = _currentPosition;
+      final latestRoutePosition =
+          latestPosition != null &&
+              navoraHasReliableNavigationPosition(latestPosition.accuracy)
+          ? LatLng(latestPosition.latitude, latestPosition.longitude)
+          : currentPosition;
       final remainingRoute = navoraTrimRouteToRemainingPath(
         routePoints,
-        latestPosition == null
-            ? currentPosition
-            : LatLng(latestPosition.latitude, latestPosition.longitude),
+        latestRoutePosition,
         vehicle: _selectedVehicle,
       );
       final trafficPolylines =
           selectedRoute['trafficPolylines'] as List<Polyline>? ?? const [];
+      final refreshedDistanceKm =
+          (selectedRoute['distanceKm'] as num?)?.toDouble() ??
+          navoraRouteLengthKm(routePoints);
+      final remainingDistanceKm = navoraRouteLengthKm(remainingRoute);
+      final refreshedDurationMinutes =
+          selectedRoute['durationMinutes'] as int;
+      final remainingDurationMinutes = refreshedDistanceKm > 0
+          ? (refreshedDurationMinutes *
+                    (remainingDistanceKm / refreshedDistanceKm)
+                        .clamp(0.0, 1.0))
+                .ceil()
+                .clamp(1, refreshedDurationMinutes)
+          : refreshedDurationMinutes;
       setState(() {
         _navigationTrafficPolylines = trafficPolylines;
         _alternativeRoutePolylines = const [];
@@ -3005,12 +3741,13 @@ class _HomePageState extends State<HomePage> {
           selectedRoute['steps'],
         );
         _navigationStepIndex = 0;
-        _navigationDistanceKm = selectedRoute['distanceKm'] as double;
-        _navigationDurationMinutes = selectedRoute['durationMinutes'] as int;
+        _navigationDistanceKm = remainingDistanceKm;
+        _navigationDurationMinutes = remainingDurationMinutes;
         _isOffRoute = false;
         _offRouteReadings = 0;
         _hasShownRouteUpdateError = false;
       });
+      unawaited(_speakNavigation('Yeni rota hazır. Yolunu takip et.'));
     } catch (error) {
       debugPrint('Canlı rota güncellenemedi: $error');
       if (mounted && !_hasShownRouteUpdateError) {
@@ -3208,6 +3945,7 @@ class _HomePageState extends State<HomePage> {
 
   void _handleSearchChanged(String value) {
     _searchDebounce?.cancel();
+    final requestId = ++_searchRequestId;
     final query = value.trim();
     if (mounted && !_isSearchMode) {
       setState(() => _isSearchMode = true);
@@ -3217,6 +3955,7 @@ class _HomePageState extends State<HomePage> {
         setState(() {
           _searchSuggestions = [];
           _showSearchPanel = false;
+          _isSearching = false;
         });
       }
       return;
@@ -3225,11 +3964,14 @@ class _HomePageState extends State<HomePage> {
     if (mounted) {
       setState(() {
         _showSearchPanel = true;
+        _isSearching = false;
       });
     }
 
     _searchDebounce = Timer(const Duration(milliseconds: 450), () {
-      _loadSearchSuggestions(query);
+      if (mounted && requestId == _searchRequestId) {
+        _loadSearchSuggestions(query, requestId: requestId);
+      }
     });
   }
 
@@ -3361,11 +4103,11 @@ class _HomePageState extends State<HomePage> {
     return null;
   }
 
-  Future<void> _loadSearchSuggestions(String query) async {
-    final requestId = ++_searchRequestId;
+  Future<void> _loadSearchSuggestions(String query, {int? requestId}) async {
+    final activeRequestId = requestId ?? ++_searchRequestId;
     try {
       final currentPosition = await _getPositionForSearch();
-      if (!mounted || requestId != _searchRequestId) return;
+      if (!mounted || activeRequestId != _searchRequestId) return;
       final searchLocation = currentPosition == null
           ? null
           : LatLng(currentPosition.latitude, currentPosition.longitude);
@@ -3381,7 +4123,7 @@ class _HomePageState extends State<HomePage> {
           debugPrint('Google Places text search failed: $error');
         }
         if (businesses.isNotEmpty) {
-          if (!mounted || requestId != _searchRequestId) return;
+          if (!mounted || activeRequestId != _searchRequestId) return;
           setState(() {
             _searchSuggestions = businesses;
             _showSearchPanel = true;
@@ -3394,6 +4136,7 @@ class _HomePageState extends State<HomePage> {
             category,
             currentPosition,
             _nearbyBusinessConfig()[category]!,
+            requestId: activeRequestId,
           );
           return;
         }
@@ -3408,7 +4151,7 @@ class _HomePageState extends State<HomePage> {
           debugPrint('Google Places text search failed: $error');
         }
         if (googleResults.isNotEmpty) {
-          if (!mounted || requestId != _searchRequestId) return;
+          if (!mounted || activeRequestId != _searchRequestId) return;
           setState(() {
             _searchSuggestions = googleResults;
             _showSearchPanel = true;
@@ -3426,7 +4169,7 @@ class _HomePageState extends State<HomePage> {
           debugPrint('Google Places autocomplete failed: $error');
         }
         if (googleSuggestions.isNotEmpty) {
-          if (!mounted || requestId != _searchRequestId) return;
+          if (!mounted || activeRequestId != _searchRequestId) return;
           setState(() {
             _searchSuggestions = googleSuggestions;
             _showSearchPanel = true;
@@ -3518,7 +4261,7 @@ class _HomePageState extends State<HomePage> {
         });
       }
 
-      if (!mounted || requestId != _searchRequestId) return;
+      if (!mounted || activeRequestId != _searchRequestId) return;
       if (suggestions.isEmpty && currentPosition != null) {
         final fallbackCategory = _matchNearbyCategory(query);
         if (fallbackCategory != null) {
@@ -3527,6 +4270,7 @@ class _HomePageState extends State<HomePage> {
             fallbackCategory,
             currentPosition,
             config,
+            requestId: activeRequestId,
           );
           return;
         }
@@ -3534,6 +4278,7 @@ class _HomePageState extends State<HomePage> {
 
       if (suggestions.isEmpty) {
         final locations = await geo_coding.locationFromAddress(query);
+        if (!mounted || activeRequestId != _searchRequestId) return;
         if (locations.isNotEmpty && mounted) {
           final location = locations.first;
           final placemark = (await geo_coding.placemarkFromCoordinates(
@@ -3577,18 +4322,22 @@ class _HomePageState extends State<HomePage> {
         }
       }
 
-      if (!mounted || requestId != _searchRequestId) return;
+      if (!mounted || activeRequestId != _searchRequestId) return;
       setState(() {
         _searchSuggestions = suggestions;
         _showSearchPanel = suggestions.isNotEmpty;
       });
       if (_activeCategory != null && suggestions.isNotEmpty) {
-        await _showCategoryResultsOnMap(suggestions);
+        await _showCategoryResultsOnMap(
+          suggestions,
+          requestId: activeRequestId,
+        );
       }
     } catch (error) {
       debugPrint('Arama önerileri alınamadı: $error');
-      if (!mounted) return;
+      if (!mounted || activeRequestId != _searchRequestId) return;
       final fallback = await _buildFallbackLocationSuggestion(query);
+      if (!mounted || activeRequestId != _searchRequestId) return;
       if (fallback != null) {
         setState(() {
           _searchSuggestions = [fallback];
@@ -3648,8 +4397,9 @@ class _HomePageState extends State<HomePage> {
   }
 
   Future<void> _showCategoryResultsOnMap(
-    List<Map<String, dynamic>> suggestions,
-  ) async {
+    List<Map<String, dynamic>> suggestions, {
+    required int requestId,
+  }) async {
     final markers = <Marker>[];
     final points = <LatLng>[];
     for (var index = 0; index < suggestions.length; index++) {
@@ -3668,7 +4418,7 @@ class _HomePageState extends State<HomePage> {
         ),
       );
     }
-    if (!mounted || points.isEmpty) return;
+    if (!mounted || requestId != _searchRequestId || points.isEmpty) return;
     setState(() => _searchMarkers = markers);
     if (points.length == 1) {
       await _moveMapTo(points.first, 14);
@@ -3739,6 +4489,10 @@ class _HomePageState extends State<HomePage> {
   }
 
   void _clearRouteState() {
+    _vehicleModelProjectionTimer?.cancel();
+    _vehicleModelProjectionRequest++;
+    _vehicleModelProjectionPending = false;
+    _vehicleModelScreenPosition.value = null;
     _routePolylines = const <Polyline>[];
     _alternativeRoutePolylines = const <Polyline>[];
     _navigationTrafficPolylines = const <Polyline>[];
@@ -3802,6 +4556,8 @@ class _HomePageState extends State<HomePage> {
   }
 
   Future<void> _searchCategory(String label, String query) async {
+    _searchDebounce?.cancel();
+    final requestId = ++_searchRequestId;
     FocusManager.instance.primaryFocus?.unfocus();
     var position = _currentPosition;
     if (position == null) {
@@ -3812,13 +4568,16 @@ class _HomePageState extends State<HomePage> {
             accuracy: geo.LocationAccuracy.medium,
           ),
         );
+        if (!mounted || requestId != _searchRequestId) return;
         if (mounted) setState(() => _currentPosition = position);
       } catch (error) {
+        if (!mounted || requestId != _searchRequestId) return;
         debugPrint('Yakın kategori konumu alınamadı: $error');
         _showTrackingMessage('Yakındaki yerleri göstermek için konum gerekli.');
         return;
       }
     }
+    if (!mounted || requestId != _searchRequestId) return;
     setState(() {
       _activeCategory = label;
       _isSearchMode = true;
@@ -3835,17 +4594,19 @@ class _HomePageState extends State<HomePage> {
         label,
         position,
         nearbyCategories[label]!,
+        requestId: requestId,
       );
     } else {
-      await _loadSearchSuggestions(query);
+      await _loadSearchSuggestions(query, requestId: requestId);
     }
   }
 
   Future<void> _loadNearbyCategoryResults(
     String label,
     geo.Position? position,
-    Map<String, String> config,
-  ) async {
+    Map<String, String> config, {
+    required int requestId,
+  }) async {
     if (position == null) return;
     final key = config['key'] ?? 'amenity';
     final value = config['value'] ?? 'cafe';
@@ -3925,13 +4686,14 @@ out center tags;
         ),
       );
       final nearbySuggestions = suggestions.take(15).toList();
-      if (!mounted) return;
+      if (!mounted || requestId != _searchRequestId) return;
       setState(() {
         _searchSuggestions = nearbySuggestions;
         _showSearchPanel = nearbySuggestions.isNotEmpty;
       });
-      await _showCategoryResultsOnMap(nearbySuggestions);
+      await _showCategoryResultsOnMap(nearbySuggestions, requestId: requestId);
     } catch (error) {
+      if (!mounted || requestId != _searchRequestId) return;
       debugPrint('Yakındaki $label sonuçları alınamadı: $error');
       _showTrackingMessage('Yakındaki $label sonuçları şu anda alınamıyor.');
     }
@@ -4366,22 +5128,36 @@ out center tags;
       return;
     }
 
-    var currentPosition = _currentPosition;
-    if (currentPosition == null) {
-      if (!await _ensureLocationPermission()) {
-        _isOpeningDirections = false;
-        return;
-      }
+    if (!await _ensureLocationPermission()) {
+      _isOpeningDirections = false;
+      return;
+    }
+
+    late final geo.Position currentPosition;
+    try {
       currentPosition = await geo.Geolocator.getCurrentPosition(
         locationSettings: const geo.LocationSettings(
           accuracy: geo.LocationAccuracy.medium,
         ),
-      );
-      if (mounted) setState(() => _currentPosition = currentPosition);
+      ).timeout(const Duration(seconds: 20));
+    } catch (error) {
+      debugPrint('Rota başlangıcı için güncel konum alınamadı: $error');
+      if (mounted) {
+        _showTrackingMessage(
+          'Rota için güncel konum alınamadı. Konum servislerini kontrol edin.',
+        );
+      }
+      _isOpeningDirections = false;
+      return;
     }
+    if (!mounted) {
+      _isOpeningDirections = false;
+      return;
+    }
+    setState(() => _currentPosition = currentPosition);
 
     final destination = _selectedDestinationCoordinate;
-    if (destination == null || !mounted) {
+    if (destination == null) {
       _isOpeningDirections = false;
       return;
     }
@@ -7786,34 +8562,60 @@ out center tags;
             Marker(
               markerId: const MarkerId('navigation-route-end'),
               position: _routePolylines.first.points.last,
-              icon: _navigationEndpointMarkerIcon!,
+              icon:
+                  _navigationDestinationMarkerIcon ??
+                  _navigationEndpointMarkerIcon!,
               anchor: const Offset(0.5, 0.5),
               zIndexInt: 1000,
             ),
           ];
+    final roomZoom = _mapCameraPosition?.zoom ?? 11.5;
+    final roomClusters =
+        !_isMapLayerVisible('rooms') || _chatRoomMarkerIcon == null
+        ? const <List<Map<String, dynamic>>>[]
+        : navoraClusterChatRooms(
+            _liveRooms,
+            zoom: _clusterRoomMarkers
+                ? math.min(roomZoom, 13.99)
+                : math.max(roomZoom, 14),
+          );
     final roomMarkers = !_isMapLayerVisible('rooms')
         ? <Marker>[]
-        : _liveRooms
-              .where(
-                (room) =>
-                    _chatRoomMarkerIcon != null &&
-                    room['latitude'] is num &&
-                    room['longitude'] is num,
-              )
-              .map(
-                (room) => Marker(
-                  markerId: MarkerId(
-                    'room-${room['id'] ?? room['name'] ?? DateTime.now().microsecondsSinceEpoch}',
-                  ),
-                  position: LatLng(
-                    (room['latitude'] as num).toDouble(),
-                    (room['longitude'] as num).toDouble(),
-                  ),
-                  icon: _chatRoomMarkerIcon!,
-                  onTap: () => _showRoomMarkerDialog(room),
+        : roomClusters.map((cluster) {
+            if (cluster.length == 1) {
+              final room = cluster.single;
+              final userCount =
+                  (room['activeUsersCount'] as num?)?.toInt() ?? 1;
+              return Marker(
+                markerId: MarkerId('room-${room['id'] ?? room['name']}'),
+                position: LatLng(
+                  (room['latitude'] as num).toDouble(),
+                  (room['longitude'] as num).toDouble(),
                 ),
-              )
-              .toList();
+                icon: _roomMarkerIconForCount(userCount),
+                infoWindow: InfoWindow(
+                  title: room['name']?.toString() ?? 'Sohbet Odası',
+                  snippet: '$userCount kişi aktif',
+                ),
+                onTap: () => _showRoomMarkerDialog(room),
+              );
+            }
+
+            final center = _roomClusterCenter(cluster);
+            return Marker(
+              markerId: MarkerId(
+                'room-cluster-${cluster.map((room) => room['id']).join('-')}',
+              ),
+              position: center,
+              icon: _roomClusterMarkerIconForCount(cluster.length),
+              infoWindow: InfoWindow(
+                title: '${cluster.length} sohbet odası',
+                snippet: 'Yakınlaştırmak için dokunun',
+              ),
+              onTap: () => _zoomToRoomCluster(center),
+              zIndexInt: 100,
+            );
+          }).toList();
     final communityPlaceMarkers = !_isMapLayerVisible('community')
         ? <Marker>[]
         : _communityPlaces
@@ -7832,7 +8634,9 @@ out center tags;
               )
               .toList();
     final currentVehicleMarker =
-        _currentPosition == null || !_isNavigationActive
+        _currentPosition == null ||
+            !_isNavigationActive ||
+            _vehicleModelScreenPosition.value != null
         ? null
         : Marker(
             markerId: const MarkerId('current-vehicle-location'),
@@ -7845,6 +8649,14 @@ out center tags;
                 BitmapDescriptor.defaultMarkerWithHue(
                   BitmapDescriptor.hueAzure,
                 ),
+            anchor: const Offset(0.5, 0.5),
+            flat: false,
+            rotation:
+                _currentPosition!.heading.isFinite &&
+                    _currentPosition!.heading >= 0 &&
+                    _currentPosition!.heading < 360
+                ? _currentPosition!.heading
+                : (_deviceHeading ?? 0),
             zIndexInt: 999,
           );
     final parkingLatitude = double.tryParse(
@@ -7998,56 +8810,239 @@ out center tags;
       onPointerDown: (event) => _activeMapPointers.add(event.pointer),
       onPointerUp: (event) => _activeMapPointers.remove(event.pointer),
       onPointerCancel: (event) => _activeMapPointers.remove(event.pointer),
-      child: GoogleMap(
-        initialCameraPosition: const CameraPosition(
-          target: LatLng(41.0082, 28.9784),
-          zoom: 11.5,
-        ),
-        cameraTargetBounds: CameraTargetBounds(
-          LatLngBounds(
-            southwest: LatLng(35.8, 25.6),
-            northeast: LatLng(42.2, 44.8),
+      child: Stack(
+        fit: StackFit.expand,
+        children: [
+          GoogleMap(
+            initialCameraPosition: const CameraPosition(
+              target: LatLng(41.0082, 28.9784),
+              zoom: 11.5,
+            ),
+            cameraTargetBounds: CameraTargetBounds(
+              LatLngBounds(
+                southwest: LatLng(35.8, 25.6),
+                northeast: LatLng(42.2, 44.8),
+              ),
+            ),
+            minMaxZoomPreference: const MinMaxZoomPreference(5.5, 20),
+            style: _darkGoogleMapStyle,
+            mapType: _mapType,
+            trafficEnabled: false,
+            myLocationEnabled:
+                _locationPermissionGranted && !_isNavigationActive,
+            myLocationButtonEnabled: false,
+            zoomControlsEnabled: false,
+            compassEnabled: false,
+            markers: mapMarkers,
+            circles: roomGlowCircles,
+            polylines: {
+              ..._routePolylines
+                  .where((route) => route.points.length > 1)
+                  .map(
+                    (route) => Polyline(
+                      polylineId: PolylineId(
+                        '${route.polylineId.value}-highlight',
+                      ),
+                      points: route.points,
+                      color: const Color(0x885AB6FF),
+                      width: route.width + 8,
+                      zIndex: route.zIndex + 10,
+                    ),
+                  ),
+              ..._alternativeRoutePolylines,
+              ..._routePolylines.map(
+                (route) => Polyline(
+                  polylineId: route.polylineId,
+                  points: route.points,
+                  color: route.color,
+                  width: route.width,
+                  zIndex: route.zIndex + 11,
+                ),
+              ),
+              if (_isNavigationActive)
+                ..._navigationTrafficPolylines.map(
+                  (route) => Polyline(
+                    polylineId: route.polylineId,
+                    points: route.points,
+                    color: route.color,
+                    width: route.width,
+                    zIndex: route.zIndex + 20,
+                  ),
+                ),
+            },
+            onMapCreated: (controller) {
+              _mapController = controller;
+              final currentPosition = _currentPosition;
+              if (currentPosition != null) {
+                unawaited(_centerOnPosition(currentPosition));
+                _scheduleVehicleModelProjection();
+              }
+            },
+            onTap: _handleRouteMapTap,
+            onLongPress: _selectMapLocation,
+            onCameraMoveStarted: () {
+              if (_isProgrammaticCameraMove ||
+                  _activeMapPointers.isEmpty ||
+                  !_isFollowingCurrentPosition) {
+                return;
+              }
+              if (mounted) {
+                setState(() => _isFollowingCurrentPosition = false);
+              }
+            },
+            onCameraMove: (cameraPosition) {
+              _mapCameraPosition = cameraPosition;
+              _scheduleVehicleModelProjection();
+            },
+            onCameraIdle: () {
+              final shouldCluster = (_mapCameraPosition?.zoom ?? 11.5) < 14;
+              if (shouldCluster != _clusterRoomMarkers && mounted) {
+                setState(() => _clusterRoomMarkers = shouldCluster);
+              }
+            },
           ),
-        ),
-        minMaxZoomPreference: const MinMaxZoomPreference(5.5, 20),
-        style: _darkGoogleMapStyle,
-        mapType: _mapType,
-        trafficEnabled: false,
-        myLocationEnabled: _locationPermissionGranted && !_isNavigationActive,
-        myLocationButtonEnabled: false,
-        zoomControlsEnabled: false,
-        compassEnabled: false,
-        markers: mapMarkers,
-        circles: roomGlowCircles,
-        polylines: {
-          ..._routePolylines,
-          ..._alternativeRoutePolylines,
-          if (_isNavigationActive) ..._navigationTrafficPolylines,
-        },
-        onMapCreated: (controller) {
-          _mapController = controller;
-          final currentPosition = _currentPosition;
-          if (currentPosition != null) {
-            unawaited(_centerOnPosition(currentPosition));
-          }
-        },
-        onTap: _handleRouteMapTap,
-        onLongPress: _selectMapLocation,
-        onCameraMoveStarted: () {
-          if (_isProgrammaticCameraMove ||
-              _activeMapPointers.isEmpty ||
-              !_isFollowingCurrentPosition) {
-            return;
-          }
-          if (mounted) {
-            setState(() => _isFollowingCurrentPosition = false);
-          }
-        },
-        onCameraMove: (cameraPosition) {
-          _mapCameraPosition = cameraPosition;
-        },
+          if (_isNavigationActive)
+            Positioned.fill(
+              child: IgnorePointer(
+                child: ValueListenableBuilder<Offset?>(
+                  valueListenable: _vehicleModelScreenPosition,
+                  builder: (context, position, _) {
+                    if (position == null) return const SizedBox.shrink();
+                    final currentPosition = _currentPosition;
+                    final hasMovingGpsHeading =
+                        currentPosition != null &&
+                        currentPosition.speed >= 0.8 &&
+                        currentPosition.heading.isFinite &&
+                        currentPosition.heading >= 0 &&
+                        currentPosition.heading < 360;
+                    final heading = hasMovingGpsHeading
+                        ? (_smoothedVehicleHeading ?? currentPosition.heading)
+                        : (_deviceHeading ?? 0);
+                    final screenRotation =
+                        heading - (_mapCameraPosition?.bearing ?? 0);
+                    final beginRotation = _hasVehicleModelScreenRotation
+                        ? _vehicleModelScreenRotation
+                        : screenRotation;
+                    final rotationDelta =
+                        (screenRotation - beginRotation + 540) % 360 - 180;
+                    final targetRotation = beginRotation + rotationDelta;
+                    _vehicleModelScreenRotation = targetRotation;
+                    _hasVehicleModelScreenRotation = true;
+                    return LayoutBuilder(
+                      builder: (context, constraints) {
+                        const modelSize = 96.0;
+                        final left = position.dx - modelSize / 2;
+                        final top = position.dy - modelSize / 2;
+                        if (left > constraints.maxWidth ||
+                            top > constraints.maxHeight ||
+                            left + modelSize < 0 ||
+                            top + modelSize < 0) {
+                          return const SizedBox.shrink();
+                        }
+                        return Stack(
+                          clipBehavior: Clip.none,
+                          children: [
+                            AnimatedPositioned(
+                              left: left,
+                              top: top,
+                              duration: const Duration(milliseconds: 100),
+                              curve: Curves.easeOutCubic,
+                              child: SizedBox(
+                                width: modelSize,
+                                height: modelSize,
+                                child: TweenAnimationBuilder<double>(
+                                  tween: Tween<double>(
+                                    begin: beginRotation,
+                                    end: targetRotation,
+                                  ),
+                                  duration: const Duration(milliseconds: 110),
+                                  curve: Curves.easeOutCubic,
+                                  builder: (context, rotation, _) =>
+                                      CustomPaint(
+                                        painter: _Vehicle3DModelPainter(
+                                          vehicle: _selectedVehicle,
+                                          heading: rotation,
+                                          modelFaces: _vehicleGltfModels[
+                                              _selectedVehicle],
+                                          cameraTilt:
+                                              _mapCameraPosition?.tilt ??
+                                              (_isMapTilted ? 60 : 0),
+                                        ),
+                                      ),
+                                ),
+                              ),
+                            ),
+                          ],
+                        );
+                      },
+                    );
+                  },
+                ),
+              ),
+            ),
+        ],
       ),
     );
+  }
+
+  void _scheduleVehicleModelProjection() {
+    if (!_isNavigationActive || _currentPosition == null) {
+      _vehicleModelProjectionTimer?.cancel();
+      _vehicleModelProjectionPending = false;
+      _vehicleModelScreenPosition.value = null;
+      return;
+    }
+    if (_vehicleModelProjectionTimer?.isActive == true) return;
+    _vehicleModelProjectionTimer = Timer(
+      const Duration(milliseconds: 33),
+      _updateVehicleModelProjection,
+    );
+  }
+
+  Future<void> _updateVehicleModelProjection() async {
+    _vehicleModelProjectionTimer = null;
+    if (_vehicleModelProjectionInFlight) {
+      _vehicleModelProjectionPending = true;
+      return;
+    }
+
+    final controller = _mapController;
+    final position = _currentPosition;
+    if (!mounted ||
+        !_isNavigationActive ||
+        controller == null ||
+        position == null) {
+      _vehicleModelScreenPosition.value = null;
+      return;
+    }
+
+    final requestId = ++_vehicleModelProjectionRequest;
+    _vehicleModelProjectionInFlight = true;
+    try {
+      final point = await controller.getScreenCoordinate(
+        LatLng(position.latitude, position.longitude),
+      );
+      if (!mounted ||
+          !_isNavigationActive ||
+          requestId != _vehicleModelProjectionRequest) {
+        return;
+      }
+      final devicePixelRatio = MediaQuery.devicePixelRatioOf(context);
+      final wasUnpositioned = _vehicleModelScreenPosition.value == null;
+      _vehicleModelScreenPosition.value = Offset(
+        point.x / devicePixelRatio,
+        point.y / devicePixelRatio,
+      );
+      if (wasUnpositioned) setState(() {});
+    } catch (error) {
+      debugPrint('3B araç modeli harita konumuna yerleştirilemedi: $error');
+    } finally {
+      _vehicleModelProjectionInFlight = false;
+      if (_vehicleModelProjectionPending && mounted && _isNavigationActive) {
+        _vehicleModelProjectionPending = false;
+        _scheduleVehicleModelProjection();
+      }
+    }
   }
 
   void _showRoomMarkerDialog(Map<String, dynamic> room) {
@@ -8162,6 +9157,8 @@ out center tags;
 
   @override
   void dispose() {
+    _vehicleModelProjectionTimer?.cancel();
+    _vehicleModelScreenPosition.dispose();
     _publicChatScrollController.dispose();
     _searchController.dispose();
     _roomSearchController.dispose();
@@ -12708,7 +13705,7 @@ out center tags;
       _positionSubscription = geo.Geolocator.getPositionStream(
         locationSettings: const geo.LocationSettings(
           accuracy: geo.LocationAccuracy.high,
-          distanceFilter: 10,
+          distanceFilter: 2,
         ),
       ).listen(_handleDrivePosition);
       if (!mounted) return;
@@ -12842,27 +13839,41 @@ out center tags;
       }
     }
 
-    if (hasReliableNavigationPosition) {
-      _announceUpcomingNavigationStep(position);
-      if (await _checkNavigationArrival(position)) return;
-      _refreshNavigationRouteIfNeeded(position);
-      unawaited(_checkForFasterAlternativeRoute(position));
-    }
     _lastDrivePosition = position;
     if (!mounted) return;
+    if (position.heading.isFinite &&
+        position.heading >= 0 &&
+        position.heading < 360 &&
+        position.speed >= 0.8) {
+      _smoothedVehicleHeading = _smoothedVehicleHeading == null
+          ? position.heading
+          : navoraSmoothBearing(
+              _smoothedVehicleHeading!,
+              position.heading,
+              factor: 0.28,
+            );
+    }
     setState(() {
       _currentPosition = position;
       _refreshLiveRoomDistances();
     });
+    _scheduleVehicleModelProjection();
     if (navoraShouldFollowCurrentPosition(
       isNavigationActive: _isNavigationActive,
       isDriveTracking: _isDriveTracking,
       isLocationTracking: _isLocationTracking,
       isFollowing: _isFollowingCurrentPosition,
     )) {
-      Future.microtask(() => _centerOnPosition(position));
+      unawaited(_centerOnPosition(position));
     }
     _updateCurrentAddress(position);
+
+    if (hasReliableNavigationPosition) {
+      _announceUpcomingNavigationStep(position);
+      if (await _checkNavigationArrival(position)) return;
+      unawaited(_refreshNavigationRouteIfNeeded(position));
+      unawaited(_checkForFasterAlternativeRoute(position));
+    }
   }
 
   Future<void> _checkForFasterAlternativeRoute(geo.Position position) async {
@@ -13349,22 +14360,30 @@ out center tags;
     }
 
     if (_isNavigationActive) {
+      if (_isNavigationCameraUpdateInFlight) {
+        _pendingNavigationCameraPosition = position;
+        return;
+      }
+
       final currentPosition = LatLng(position.latitude, position.longitude);
-      final lookAheadMeters = (position.speed * 3).clamp(45.0, 110.0);
+      final lookAheadMeters = (position.speed * 4).clamp(45.0, 180.0);
       final nextStepIndex = _navigationSteps.isEmpty
           ? 0
           : _navigationStepIndex.clamp(0, _navigationSteps.length - 1);
-      final maneuverZoom = navoraNavigationZoomForManeuverDistance(
-        _distanceFromPositionToStep(
-          position,
-          _navigationSteps.isEmpty ? null : _navigationSteps[nextStepIndex],
-        ),
+      final distanceToManeuver = _distanceFromPositionToStep(
+        position,
+        _navigationSteps.isEmpty ? null : _navigationSteps[nextStepIndex],
+      );
+      final maneuverZoom = navoraNavigationZoomForSpeedAndManeuver(
+        distanceToManeuver,
+        position.speed,
       );
       final cameraTarget = navoraOffsetCameraTarget(
         currentPosition,
         _mapBearing,
-        lookAheadMeters,
+        lookAheadMeters.toDouble(),
       );
+      _isNavigationCameraUpdateInFlight = true;
       _isProgrammaticCameraMove = true;
       try {
         await controller.animateCamera(
@@ -13373,12 +14392,37 @@ out center tags;
               target: cameraTarget,
               zoom: maneuverZoom,
               bearing: _mapBearing,
-              tilt: _isMapTilted ? 48 : 0,
+              tilt: !_isMapTilted
+                  ? 0
+                  : distanceToManeuver != null && distanceToManeuver <= 150
+                  ? 48
+                  : 60,
             ),
           ),
         );
       } finally {
+        _isNavigationCameraUpdateInFlight = false;
         _isProgrammaticCameraMove = false;
+        final pendingPosition = _pendingNavigationCameraPosition;
+        _pendingNavigationCameraPosition = null;
+        if (pendingPosition != null &&
+            mounted &&
+            navoraShouldFollowCurrentPosition(
+              isNavigationActive: _isNavigationActive,
+              isDriveTracking: _isDriveTracking,
+              isLocationTracking: _isLocationTracking,
+              isFollowing: _isFollowingCurrentPosition,
+            )) {
+          final movementMeters = geo.Geolocator.distanceBetween(
+            position.latitude,
+            position.longitude,
+            pendingPosition.latitude,
+            pendingPosition.longitude,
+          );
+          if (movementMeters >= 0.5) {
+            unawaited(_centerOnPosition(pendingPosition));
+          }
+        }
       }
       return;
     }
@@ -14560,46 +15604,66 @@ out center tags;
   }
 
   Future<void> _loadNavigationEndpointMarkerIcon() async {
-    const imageSize = 18;
-    final recorder = ui.PictureRecorder();
-    final canvas = Canvas(
-      recorder,
-      Rect.fromLTWH(0, 0, imageSize.toDouble(), imageSize.toDouble()),
-    );
-    canvas.drawCircle(
-      const Offset(9, 9),
-      8.5,
-      Paint()..color = const Color(0xFF31363B),
-    );
-    canvas.drawCircle(const Offset(9, 9), 6.5, Paint()..color = Colors.white);
-
-    final image = await recorder.endRecording().toImage(imageSize, imageSize);
-    final byteData = await image.toByteData(format: ui.ImageByteFormat.png);
-    if (byteData == null) {
-      debugPrint('Navigasyon rota ucu işaretçisi oluşturulamadı.');
-      return;
-    }
-
-    final markerIcon = BitmapDescriptor.bytes(
-      byteData.buffer.asUint8List(),
-      width: 9,
-      height: 9,
+    final markerIcon = await _renderHighResolutionMarker(
+      logicalSize: 9,
+      draw: (canvas) {
+        canvas
+          ..drawCircle(
+            const Offset(4.5, 4.5),
+            4.25,
+            Paint()..color = const Color(0xFF31363B),
+          )
+          ..drawCircle(
+            const Offset(4.5, 4.5),
+            3.25,
+            Paint()..color = Colors.white,
+          );
+      },
     );
     if (!mounted) return;
     setState(() => _navigationEndpointMarkerIcon = markerIcon);
+
+    final destinationIcon = await _renderHighResolutionMarker(
+      logicalSize: 44,
+      draw: (canvas) {
+        canvas
+          ..drawCircle(
+            const Offset(22, 23),
+            19,
+            Paint()
+              ..color = const Color(0xFF101820)
+              ..maskFilter = const MaskFilter.blur(BlurStyle.normal, 4),
+          )
+          ..drawCircle(
+            const Offset(22, 22),
+            18,
+            Paint()..color = const Color(0xFFEA4335),
+          )
+          ..drawCircle(
+            const Offset(22, 22),
+            15,
+            Paint()
+              ..color = Colors.white
+              ..style = PaintingStyle.stroke
+              ..strokeWidth = 2,
+          );
+        _paintMarkerGlyph(
+          canvas,
+          Icons.flag_rounded,
+          color: Colors.white,
+          fontSize: 21,
+          center: const Offset(22, 22),
+        );
+      },
+    );
+    if (!mounted) return;
+    setState(() => _navigationDestinationMarkerIcon = destinationIcon);
   }
 
   Future<void> _loadVehicleMarkerIcons() async {
     final markerIcons = <String, BitmapDescriptor>{};
-    final vehicleMap = <String, IconData>{
-      'Araba': Icons.directions_car_filled,
-      'Motosiklet': Icons.two_wheeler,
-      'Bisiklet': Icons.pedal_bike,
-      'Yürüyüş': Icons.directions_walk,
-    };
-
-    for (final entry in vehicleMap.entries) {
-      markerIcons[entry.key] = await _createVehicleMarkerBitmap(entry.value);
+    for (final vehicle in ['Araba', 'Motosiklet', 'Bisiklet', 'Yürüyüş']) {
+      markerIcons[vehicle] = await _createVehicleMarkerBitmap(vehicle);
     }
 
     if (!mounted) return;
@@ -14609,78 +15673,609 @@ out center tags;
     });
   }
 
+  Future<void> _loadVehicleGltfModels() async {
+    try {
+      final models = await GltfVehicleModel.load();
+      if (!mounted) return;
+      setState(() => _vehicleGltfModels = models);
+    } catch (error) {
+      debugPrint('GLTF araç modelleri yüklenemedi: $error');
+    }
+  }
+
   Future<void> _loadChatRoomMarkerIcon() async {
     final icon = await _createStandaloneMarkerIcon(Icons.forum_rounded);
     if (!mounted) return;
     setState(() => _chatRoomMarkerIcon = icon);
   }
 
-  Future<BitmapDescriptor> _createStandaloneMarkerIcon(
-    IconData iconData,
-  ) async {
-    const size = 128;
-    final recorder = ui.PictureRecorder();
-    final canvas = Canvas(
-      recorder,
-      Rect.fromLTWH(0, 0, size.toDouble(), size.toDouble()),
-    );
-    final textPainter = TextPainter(textDirection: TextDirection.ltr);
-    textPainter.text = TextSpan(
-      text: String.fromCharCode(iconData.codePoint),
-      style: TextStyle(
-        fontFamily: iconData.fontFamily,
-        fontSize: 76,
-        color: const Color(0xFFFF7A00),
-        height: 1,
-      ),
-    );
-    textPainter.layout();
-    textPainter.paint(canvas, const Offset(26, 26));
+  BitmapDescriptor _roomMarkerIconForCount(int activeCount) {
+    final count = activeCount.clamp(1, 99);
+    final cached = _chatRoomMarkerIcons[count];
+    if (cached != null) return cached;
+    if (_loadingRoomMarkerIconCounts.add(count)) {
+      unawaited(_loadChatRoomCountMarkerIcon(count));
+    }
+    return _chatRoomMarkerIcon!;
+  }
 
-    final image = await recorder.endRecording().toImage(size, size);
-    final byteData = await image.toByteData(format: ui.ImageByteFormat.png);
-    return BitmapDescriptor.bytes(
-      byteData!.buffer.asUint8List(),
-      width: size.toDouble(),
-      height: size.toDouble(),
+  BitmapDescriptor _roomClusterMarkerIconForCount(int roomCount) {
+    final count = roomCount.clamp(2, 99);
+    final cached = _chatRoomClusterMarkerIcons[count];
+    if (cached != null) return cached;
+    if (_loadingRoomClusterIconCounts.add(count)) {
+      unawaited(_loadChatRoomClusterMarkerIcon(count));
+    }
+    return _chatRoomMarkerIcon!;
+  }
+
+  Future<void> _loadChatRoomCountMarkerIcon(int count) async {
+    try {
+      final icon = await _createStandaloneMarkerIcon(
+        Icons.forum_rounded,
+        badgeText: count >= 99 ? '99+' : '$count',
+      );
+      if (!mounted) return;
+      setState(() => _chatRoomMarkerIcons[count] = icon);
+    } catch (error) {
+      _loadingRoomMarkerIconCounts.remove(count);
+      debugPrint('Sohbet odası kullanıcı rozeti çizilemedi: $error');
+    } finally {
+      _loadingRoomMarkerIconCounts.remove(count);
+    }
+  }
+
+  Future<void> _loadChatRoomClusterMarkerIcon(int count) async {
+    try {
+      final icon = await _createStandaloneMarkerIcon(
+        Icons.forum_rounded,
+        badgeText: count >= 99 ? '99+' : '$count',
+      );
+      if (!mounted) return;
+      setState(() => _chatRoomClusterMarkerIcons[count] = icon);
+    } catch (error) {
+      _loadingRoomClusterIconCounts.remove(count);
+      debugPrint('Sohbet odası küme rozeti çizilemedi: $error');
+    } finally {
+      _loadingRoomClusterIconCounts.remove(count);
+    }
+  }
+
+  LatLng _roomClusterCenter(List<Map<String, dynamic>> cluster) {
+    var latitude = 0.0;
+    var longitude = 0.0;
+    for (final room in cluster) {
+      latitude += (room['latitude'] as num).toDouble();
+      longitude += (room['longitude'] as num).toDouble();
+    }
+    return LatLng(latitude / cluster.length, longitude / cluster.length);
+  }
+
+  Future<void> _zoomToRoomCluster(LatLng center) async {
+    final controller = _mapController;
+    if (controller == null) return;
+    final currentZoom = _mapCameraPosition?.zoom ?? 11.5;
+    _isProgrammaticCameraMove = true;
+    try {
+      await controller.animateCamera(
+        CameraUpdate.newLatLngZoom(
+          center,
+          math.min(16.0, math.max(currentZoom + 2.5, 14.5)),
+        ),
+      );
+    } catch (error) {
+      debugPrint('Sohbet odası kümesi yakınlaştırılamadı: $error');
+    } finally {
+      _isProgrammaticCameraMove = false;
+    }
+  }
+
+  Future<BitmapDescriptor> _createStandaloneMarkerIcon(
+    IconData iconData, {
+    String? badgeText,
+  }) async {
+    const size = 56.0;
+    return _renderHighResolutionMarker(
+      logicalSize: size,
+      draw: (canvas) {
+        const center = Offset(size / 2, size / 2);
+        final bubble = Path()
+          ..moveTo(18, 10)
+          ..quadraticBezierTo(12, 10, 12, 16)
+          ..lineTo(12, 32)
+          ..quadraticBezierTo(12, 38, 18, 38)
+          ..lineTo(20, 38)
+          ..lineTo(18, 45)
+          ..lineTo(29, 38)
+          ..lineTo(38, 38)
+          ..quadraticBezierTo(44, 38, 44, 32)
+          ..lineTo(44, 16)
+          ..quadraticBezierTo(44, 10, 38, 10)
+          ..close();
+        final shadowPaint = Paint()
+          ..color = Colors.black.withValues(alpha: 0.3)
+          ..maskFilter = const MaskFilter.blur(BlurStyle.normal, 3);
+        canvas
+          ..drawPath(bubble.shift(const Offset(0, 2)), shadowPaint)
+          ..drawPath(bubble, Paint()..color = const Color(0xFFFF7A00))
+          ..drawPath(
+            bubble,
+            Paint()
+              ..color = Colors.white
+              ..style = PaintingStyle.stroke
+              ..strokeWidth = 2,
+          );
+        _paintMarkerGlyph(
+          canvas,
+          iconData,
+          color: Colors.white,
+          fontSize: 23,
+          center: center,
+        );
+        if (badgeText != null) {
+          final textPainter = TextPainter(
+            text: TextSpan(
+              text: badgeText,
+              style: const TextStyle(
+                color: Colors.white,
+                fontSize: 9,
+                fontWeight: FontWeight.w900,
+              ),
+            ),
+            textDirection: TextDirection.ltr,
+          )..layout();
+          final badgeWidth = math.max(17.0, textPainter.width + 8);
+          final badgeRect = RRect.fromRectAndRadius(
+            Rect.fromLTWH(44 - badgeWidth / 2, 10, badgeWidth, 16),
+            const Radius.circular(9),
+          );
+          canvas
+            ..drawRRect(
+              badgeRect.shift(const Offset(0, 1)),
+              Paint()..color = const Color(0xAA000000),
+            )
+            ..drawRRect(badgeRect, Paint()..color = const Color(0xFF173344))
+            ..drawRRect(
+              badgeRect,
+              Paint()
+                ..color = Colors.white
+                ..style = PaintingStyle.stroke
+                ..strokeWidth = 1.2,
+            );
+          textPainter.paint(
+            canvas,
+            Offset(
+              badgeRect.left + (badgeRect.width - textPainter.width) / 2,
+              badgeRect.top + (badgeRect.height - textPainter.height) / 2,
+            ),
+          );
+        }
+      },
     );
   }
 
-  Future<BitmapDescriptor> _createVehicleMarkerBitmap(IconData iconData) async {
-    const int size = 56;
-    final recorder = ui.PictureRecorder();
-    final canvas = Canvas(recorder, const Rect.fromLTWH(0, 0, 56, 56));
-
-    final shadowPaint = Paint()
-      ..color = Colors.black.withValues(alpha: 0.18)
-      ..maskFilter = const MaskFilter.blur(BlurStyle.normal, 7);
-    final circlePaint = Paint()..color = const Color(0xFFFF6B00);
-    final iconPaint = Paint()..color = Colors.white;
-
-    canvas.drawCircle(const Offset(28, 28), 21, shadowPaint);
-    canvas.drawCircle(const Offset(28, 28), 17, circlePaint);
-
-    final textPainter = TextPainter(textDirection: TextDirection.ltr);
-    textPainter.text = TextSpan(
-      text: String.fromCharCode(iconData.codePoint),
-      style: TextStyle(
-        fontFamily: 'MaterialIcons',
-        fontSize: 26,
-        color: iconPaint.color,
-        height: 1,
-      ),
+  Future<BitmapDescriptor> _createVehicleMarkerBitmap(String vehicle) async {
+    const size = 64.0;
+    return _renderHighResolutionMarker(
+      logicalSize: size,
+      draw: (canvas) {
+        _drawVehicleShadow(canvas);
+        switch (vehicle) {
+          case 'Motosiklet':
+            _drawMotorcycleMarker(canvas);
+          case 'Bisiklet':
+            _drawBicycleMarker(canvas);
+          case 'Yürüyüş':
+            _drawWalkingMarker(canvas);
+          case 'Araba':
+          default:
+            _drawCarMarker(canvas);
+        }
+      },
     );
-    textPainter.layout();
-    textPainter.paint(canvas, const Offset(14, 14));
+  }
+
+  void _drawVehicleShadow(Canvas canvas) {
+    canvas.drawOval(
+      const Rect.fromLTRB(12, 47, 53, 61),
+      Paint()
+        ..color = const Color(0xAA07101A)
+        ..maskFilter = const MaskFilter.blur(BlurStyle.normal, 5),
+    );
+  }
+
+  void _drawCarMarker(Canvas canvas) {
+    final tirePaint = Paint()..color = const Color(0xFF101820);
+    final wheelHubPaint = Paint()
+      ..color = const Color(0xFF93A3AD)
+      ..style = PaintingStyle.stroke
+      ..strokeWidth = 1.2;
+    for (final y in [19.0, 39.0]) {
+      for (final x in [12.0, 44.0]) {
+        final wheel = RRect.fromRectAndRadius(
+          Rect.fromLTRB(x, y, x + 9, y + 12),
+          const Radius.circular(4),
+        );
+        canvas
+          ..drawRRect(
+            wheel.shift(const Offset(1.5, 2)),
+            Paint()..color = const Color(0xFF080D12),
+          )
+          ..drawRRect(wheel, tirePaint)
+          ..drawLine(
+            Offset(x + 2, y + 3),
+            Offset(x + 7, y + 3),
+            Paint()
+              ..color = const Color(0xFF687984)
+              ..strokeWidth = 1.2,
+          )
+          ..drawLine(
+            Offset(x + 4.5, y + 4),
+            Offset(x + 4.5, y + 9),
+            wheelHubPaint,
+          );
+      }
+    }
+
+    final rightSide = Path()
+      ..moveTo(41, 10)
+      ..lineTo(48, 16)
+      ..lineTo(51, 42)
+      ..lineTo(44, 55)
+      ..lineTo(41, 52)
+      ..close();
+    canvas.drawPath(
+      rightSide,
+      Paint()
+        ..shader = ui.Gradient.linear(
+          const Offset(42, 12),
+          const Offset(51, 48),
+          const [Color(0xFFB63D00), Color(0xFF762600)],
+        ),
+    );
+
+    final body = Path()
+      ..moveTo(22, 7)
+      ..quadraticBezierTo(32, 4, 42, 8)
+      ..lineTo(47, 18)
+      ..lineTo(47, 42)
+      ..quadraticBezierTo(45, 49, 41, 55)
+      ..lineTo(21, 55)
+      ..quadraticBezierTo(17, 49, 15, 42)
+      ..lineTo(17, 18)
+      ..close();
+    canvas
+      ..drawPath(
+        body.shift(const Offset(0, 1)),
+        Paint()..color = const Color(0xFF9A3100),
+      )
+      ..drawPath(
+        body,
+        Paint()
+          ..shader = ui.Gradient.linear(
+            const Offset(16, 8),
+            const Offset(47, 54),
+            const [Color(0xFFFFB66E), Color(0xFFFF7A1A), Color(0xFFE55700)],
+            const [0, 0.52, 1],
+          ),
+      );
+    canvas
+      ..drawPath(
+        Path()
+          ..moveTo(22, 15)
+          ..quadraticBezierTo(32, 12, 42, 15)
+          ..lineTo(43, 27)
+          ..lineTo(21, 27)
+          ..close(),
+        Paint()
+          ..shader = ui.Gradient.linear(
+            const Offset(22, 14),
+            const Offset(42, 28),
+            const [Color(0xFFB9EDFF), Color(0xFF397493), Color(0xFF152E42)],
+            const [0, 0.48, 1],
+          ),
+      )
+      ..drawPath(
+        Path()
+          ..moveTo(21, 34)
+          ..lineTo(43, 34)
+          ..lineTo(41, 44)
+          ..quadraticBezierTo(32, 47, 23, 44)
+          ..close(),
+        Paint()
+          ..shader = ui.Gradient.linear(
+            const Offset(21, 34),
+            const Offset(43, 45),
+            const [Color(0xFF10283A), Color(0xFF69B8D5), Color(0xFF162C3B)],
+            const [0, 0.5, 1],
+          ),
+      )
+      ..drawLine(
+        const Offset(20, 30),
+        const Offset(44, 30),
+        Paint()
+          ..color = const Color(0xFFFFD29E)
+          ..strokeWidth = 1.5,
+      )
+      ..drawRRect(
+        RRect.fromRectAndRadius(
+          const Rect.fromLTRB(23, 8, 29, 10),
+          const Radius.circular(1.2),
+        ),
+        Paint()..color = const Color(0xFFFFF1C4),
+      )
+      ..drawRRect(
+        RRect.fromRectAndRadius(
+          const Rect.fromLTRB(35, 8, 41, 10),
+          const Radius.circular(1.2),
+        ),
+        Paint()..color = const Color(0xFFFFF1C4),
+      )
+      ..drawPath(
+        Path()
+          ..moveTo(17, 18)
+          ..lineTo(21, 15)
+          ..lineTo(21, 27)
+          ..lineTo(17, 30)
+          ..close(),
+        Paint()..color = const Color(0xFFFFA451),
+      )
+      ..drawPath(
+        Path()
+          ..moveTo(43, 15)
+          ..lineTo(47, 18)
+          ..lineTo(47, 30)
+          ..lineTo(43, 27)
+          ..close(),
+        Paint()..color = const Color(0xFFB54108),
+      )
+      ..drawRRect(
+        RRect.fromRectAndRadius(
+          const Rect.fromLTRB(21, 51, 27, 53),
+          const Radius.circular(1),
+        ),
+        Paint()..color = const Color(0xFFFFD9C5),
+      )
+      ..drawRRect(
+        RRect.fromRectAndRadius(
+          const Rect.fromLTRB(35, 51, 41, 53),
+          const Radius.circular(1),
+        ),
+        Paint()..color = const Color(0xFFFFD9C5),
+      )
+      ..drawPath(
+        body,
+        Paint()
+          ..color = const Color(0xFFFFDDB8)
+          ..style = PaintingStyle.stroke
+          ..strokeWidth = 0.8,
+      );
+  }
+
+  void _drawMotorcycleMarker(Canvas canvas) {
+    final tirePaint = Paint()..color = const Color(0xFF17212B);
+    final chromePaint = Paint()
+      ..color = const Color(0xFFE2EAF0)
+      ..style = PaintingStyle.stroke
+      ..strokeCap = StrokeCap.round
+      ..strokeWidth = 3;
+    canvas
+      ..drawOval(const Rect.fromLTRB(27, 4, 37, 17), tirePaint)
+      ..drawOval(const Rect.fromLTRB(27, 47, 37, 60), tirePaint)
+      ..drawLine(const Offset(32, 13), const Offset(32, 49), chromePaint)
+      ..drawLine(
+        const Offset(23, 15),
+        const Offset(41, 15),
+        chromePaint..strokeWidth = 2,
+      )
+      ..drawLine(const Offset(24, 15), const Offset(27, 21), chromePaint)
+      ..drawLine(const Offset(40, 15), const Offset(37, 21), chromePaint);
+
+    final tank = Path()
+      ..moveTo(27, 19)
+      ..quadraticBezierTo(32, 15, 37, 19)
+      ..lineTo(39, 28)
+      ..quadraticBezierTo(37, 34, 32, 34)
+      ..quadraticBezierTo(27, 34, 25, 28)
+      ..close();
+    canvas
+      ..drawPath(
+        tank.shift(const Offset(0, 1)),
+        Paint()..color = const Color(0xFF9A3100),
+      )
+      ..drawPath(
+        tank,
+        Paint()
+          ..shader = ui.Gradient.linear(
+            Offset(24, 18),
+            Offset(40, 34),
+            [Color(0xFFFFAF5B), Color(0xFFFF6B00), Color(0xFFB63D00)],
+            [0, 0.48, 1],
+          ),
+      )
+      ..drawRRect(
+        RRect.fromRectAndRadius(
+          const Rect.fromLTRB(28, 31, 36, 44),
+          const Radius.circular(3),
+        ),
+        Paint()
+          ..shader = ui.Gradient.linear(Offset(28, 31), Offset(36, 44), [
+            Color(0xFF384653),
+            Color(0xFF101820),
+          ]),
+      )
+      ..drawCircle(const Offset(32, 19), 2.2, Paint()..color = Colors.white)
+      ..drawCircle(
+        const Offset(32, 18.5),
+        1.2,
+        Paint()..color = const Color(0xFFFFF6D6),
+      );
+  }
+
+  void _drawBicycleMarker(Canvas canvas) {
+    final wheelPaint = Paint()
+      ..color = const Color(0xFF18212B)
+      ..style = PaintingStyle.stroke
+      ..strokeWidth = 4;
+    final rimPaint = Paint()
+      ..color = const Color(0xFFEAF2F6)
+      ..style = PaintingStyle.stroke
+      ..strokeWidth = 1.2;
+    canvas
+      ..drawCircle(const Offset(32, 12), 7, wheelPaint)
+      ..drawCircle(const Offset(32, 52), 7, wheelPaint)
+      ..drawCircle(const Offset(32, 12), 5, rimPaint)
+      ..drawCircle(const Offset(32, 52), 5, rimPaint);
+
+    final framePaint = Paint()
+      ..shader = ui.Gradient.linear(Offset(22, 20), Offset(42, 44), [
+        Color(0xFFFFB45E),
+        Color(0xFFFF6B00),
+        Color(0xFFC54200),
+      ])
+      ..style = PaintingStyle.stroke
+      ..strokeCap = StrokeCap.round
+      ..strokeJoin = StrokeJoin.round
+      ..strokeWidth = 3;
+    canvas
+      ..drawLine(const Offset(32, 12), const Offset(21, 37), framePaint)
+      ..drawLine(const Offset(21, 37), const Offset(41, 37), framePaint)
+      ..drawLine(const Offset(41, 37), const Offset(32, 12), framePaint)
+      ..drawLine(const Offset(21, 37), const Offset(32, 52), framePaint)
+      ..drawLine(const Offset(32, 52), const Offset(41, 37), framePaint)
+      ..drawLine(
+        const Offset(32, 12),
+        const Offset(39, 12),
+        Paint()
+          ..color = const Color(0xFFCAD4DB)
+          ..strokeWidth = 2
+          ..strokeCap = StrokeCap.round,
+      )
+      ..drawLine(
+        const Offset(18, 30),
+        const Offset(24, 30),
+        Paint()
+          ..color = const Color(0xFF202A33)
+          ..strokeWidth = 3
+          ..strokeCap = StrokeCap.round,
+      )
+      ..drawCircle(
+        const Offset(32, 37),
+        3,
+        Paint()..color = const Color(0xFF263440),
+      );
+  }
+
+  void _drawWalkingMarker(Canvas canvas) {
+    canvas.drawOval(
+      const Rect.fromLTRB(17, 47, 47, 57),
+      Paint()
+        ..color = const Color(0x6607162C)
+        ..maskFilter = const MaskFilter.blur(BlurStyle.normal, 3),
+    );
+    final outlinePaint = Paint()
+      ..color = const Color(0xFF174AA0)
+      ..strokeCap = StrokeCap.round
+      ..strokeJoin = StrokeJoin.round
+      ..strokeWidth = 7;
+    final bodyPaint = Paint()
+      ..shader = ui.Gradient.linear(
+        const Offset(24, 15),
+        const Offset(43, 48),
+        [Color(0xFF8FD8FF), Color(0xFF2688F4), Color(0xFF1552B5)],
+      )
+      ..strokeCap = StrokeCap.round
+      ..strokeJoin = StrokeJoin.round
+      ..strokeWidth = 4.5;
+
+    canvas
+      ..drawLine(const Offset(30, 25), const Offset(24, 36), outlinePaint)
+      ..drawLine(const Offset(24, 36), const Offset(20, 49), outlinePaint)
+      ..drawLine(const Offset(24, 36), const Offset(36, 45), outlinePaint)
+      ..drawLine(const Offset(30, 26), const Offset(41, 33), outlinePaint)
+      ..drawLine(const Offset(41, 33), const Offset(46, 27), outlinePaint)
+      ..drawLine(const Offset(30, 25), const Offset(35, 36), outlinePaint)
+      ..drawLine(const Offset(35, 36), const Offset(30, 50), outlinePaint)
+      ..drawLine(const Offset(30, 25), const Offset(24, 36), bodyPaint)
+      ..drawLine(const Offset(24, 36), const Offset(20, 49), bodyPaint)
+      ..drawLine(const Offset(24, 36), const Offset(36, 45), bodyPaint)
+      ..drawLine(const Offset(30, 26), const Offset(41, 33), bodyPaint)
+      ..drawLine(const Offset(41, 33), const Offset(46, 27), bodyPaint)
+      ..drawLine(const Offset(30, 25), const Offset(35, 36), bodyPaint)
+      ..drawLine(const Offset(35, 36), const Offset(30, 50), bodyPaint)
+      ..drawCircle(
+        const Offset(31, 15),
+        6,
+        Paint()..color = const Color(0xFF174AA0),
+      )
+      ..drawCircle(
+        const Offset(30.5, 14),
+        5,
+        Paint()
+          ..shader = ui.Gradient.linear(Offset(27, 10), Offset(35, 19), [
+            Color(0xFFFFD7AE),
+            Color(0xFFEF9F6A),
+          ]),
+      );
+  }
+
+  Future<BitmapDescriptor> _renderHighResolutionMarker({
+    required double logicalSize,
+    required void Function(Canvas canvas) draw,
+  }) async {
+    const rasterScale = 4.0;
+    final pixelSize = (logicalSize * rasterScale).round();
+    final recorder = ui.PictureRecorder();
+    final canvas = Canvas(
+      recorder,
+      Rect.fromLTWH(0, 0, pixelSize.toDouble(), pixelSize.toDouble()),
+    )..scale(rasterScale);
+    draw(canvas);
 
     final picture = recorder.endRecording();
-    final image = await picture.toImage(size, size);
-    final byteData = await image.toByteData(format: ui.ImageByteFormat.png);
+    final image = await picture.toImage(pixelSize, pixelSize);
+    picture.dispose();
+    try {
+      final byteData = await image.toByteData(format: ui.ImageByteFormat.png);
+      if (byteData == null) {
+        throw StateError('Harita işaretçisi PNG olarak oluşturulamadı.');
+      }
+      return BitmapDescriptor.bytes(
+        byteData.buffer.asUint8List(),
+        width: logicalSize,
+        height: logicalSize,
+      );
+    } finally {
+      image.dispose();
+    }
+  }
 
-    return BitmapDescriptor.bytes(
-      byteData!.buffer.asUint8List(),
-      width: size.toDouble(),
-      height: size.toDouble(),
+  void _paintMarkerGlyph(
+    Canvas canvas,
+    IconData iconData, {
+    required Color color,
+    required double fontSize,
+    required Offset center,
+  }) {
+    final textPainter = TextPainter(
+      text: TextSpan(
+        text: String.fromCharCode(iconData.codePoint),
+        style: TextStyle(
+          fontFamily: iconData.fontFamily,
+          package: iconData.fontPackage,
+          fontSize: fontSize,
+          color: color,
+          height: 1,
+        ),
+      ),
+      textDirection: TextDirection.ltr,
+    )..layout();
+    textPainter.paint(
+      canvas,
+      Offset(
+        center.dx - textPainter.width / 2,
+        center.dy - textPainter.height / 2,
+      ),
     );
   }
 

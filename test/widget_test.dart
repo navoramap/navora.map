@@ -46,6 +46,7 @@ void main() {
     await tester.pump();
 
     expect(find.text('Lütfen tüm alanları doldurun.'), findsOneWidget);
+    await tester.pump(const Duration(seconds: 4));
   });
 
   testWidgets('shows membership upgrade flow in the profile page', (
