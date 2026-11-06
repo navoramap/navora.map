@@ -315,6 +315,12 @@ test('adoption owners can publish, update photos, and close listings safely', as
       updated_at: serverTimestamp(),
     }),
   );
+  await assertSucceeds(
+    updateDoc(listingReference, {
+      pet_name: 'Misket güncellendi',
+      updated_at: serverTimestamp(),
+    }),
+  );
   await assertFails(
     updateDoc(listingReference, {
       contact_phone: '+90 555 111 1111',
@@ -340,6 +346,40 @@ test('adoption owners can publish, update photos, and close listings safely', as
     }),
   );
   await assertFails(getDoc(doc(visitor, 'pet_adoption_listings/new-listing')));
+});
+
+test('pet listing views are unique per signed-in visitor and readable by owner', async () => {
+  const owner = testEnvironment.authenticatedContext('reporter').firestore();
+  const visitor = testEnvironment.authenticatedContext('visitor').firestore();
+  const listingReference = doc(owner, 'pet_adoption_listings/view-count-test');
+  await assertSucceeds(
+    setDoc(listingReference, {
+      ...validPetAdoptionListing,
+      owner_uid: 'reporter',
+      created_at: serverTimestamp(),
+      updated_at: serverTimestamp(),
+    }),
+  );
+
+  const viewReference = doc(
+    visitor,
+    'pet_adoption_listings/view-count-test/_views/visitor',
+  );
+  await assertSucceeds(
+    setDoc(viewReference, { created_at: serverTimestamp() }),
+  );
+  await assertFails(
+    setDoc(viewReference, { created_at: serverTimestamp() }),
+  );
+  const views = await assertSucceeds(
+    getDocs(collection(owner, 'pet_adoption_listings/view-count-test/_views')),
+  );
+  if (views.size !== 1) {
+    throw new Error('The owner could not read the unique listing views');
+  }
+  await assertFails(
+    getDocs(collection(visitor, 'pet_adoption_listings/view-count-test/_views')),
+  );
 });
 
 test('adoption listings reject missing consent, invalid coordinates, and extra fields', async () => {
@@ -1374,6 +1414,23 @@ test('community places are authenticated, validated, and owner-managed', async (
   await assertSucceeds(
     updateDoc(placeReference, {
       photo_url: 'https://firebasestorage.googleapis.com/v0/b/test/o/cover',
+    }),
+  );
+  const photoUrls = [
+    'https://firebasestorage.googleapis.com/v0/b/test/o/photo-0',
+    'https://firebasestorage.googleapis.com/v0/b/test/o/photo-1',
+    'https://firebasestorage.googleapis.com/v0/b/test/o/photo-2',
+  ];
+  await assertSucceeds(
+    updateDoc(placeReference, {
+      photo_urls: photoUrls,
+      photo_url: photoUrls[0],
+    }),
+  );
+  await assertFails(
+    updateDoc(placeReference, {
+      photo_urls: [...photoUrls, 'https://firebasestorage.googleapis.com/v0/b/test/o/photo-3'],
+      photo_url: photoUrls[0],
     }),
   );
   await assertFails(updateDoc(placeReference, { photo_url: 'not-a-url' }));

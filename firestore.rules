@@ -675,7 +675,10 @@ service cloud.firestore {
           && request.resource.data.updated_at == request.time
           && (
             (request.resource.data.diff(resource.data).affectedKeys().hasOnly([
-                'photo_urls', 'cover_image_url', 'updated_at'
+                'pet_type', 'pet_name', 'description', 'city', 'district',
+                'address', 'latitude', 'longitude', 'contact_phone',
+                'contact_phone_shared', 'photo_urls', 'cover_image_url',
+                'updated_at'
               ])
               && request.resource.data.status == 'active')
             ||
@@ -686,6 +689,29 @@ service cloud.firestore {
           );
       allow delete: if signedIn()
           && resource.data.owner_uid == request.auth.uid;
+
+      match /_views/{viewerUid} {
+        function parentListing() {
+          return get(/databases/$(database)/documents/pet_adoption_listings/$(listingId));
+        }
+
+        allow read: if signedIn()
+            && exists(/databases/$(database)/documents/pet_adoption_listings/$(listingId))
+            && (parentListing().data.owner_uid == request.auth.uid
+                || viewerUid == request.auth.uid);
+        allow create: if signedIn()
+            && viewerUid == request.auth.uid
+            && exists(/databases/$(database)/documents/pet_adoption_listings/$(listingId))
+            && parentListing().data.status == 'active'
+            && parentListing().data.owner_uid != request.auth.uid
+            && request.resource.data.keys().hasOnly(['created_at'])
+            && request.resource.data.created_at is timestamp
+            && request.resource.data.created_at == request.time;
+        allow update: if false;
+        allow delete: if signedIn()
+            && exists(/databases/$(database)/documents/pet_adoption_listings/$(listingId))
+            && parentListing().data.owner_uid == request.auth.uid;
+      }
     }
 
     match /lost_pet_reports/{reportId} {
@@ -753,7 +779,6 @@ service cloud.firestore {
             && validLostPetPhotoUrls(data)
             && data.status == 'active'
             && data.created_at is timestamp
-            && data.created_at == request.time
             && data.updated_at is timestamp
             && data.updated_at == request.time;
       }
@@ -762,16 +787,21 @@ service cloud.firestore {
           && (resource.data.status == 'active'
               || resource.data.owner_uid == request.auth.uid);
       allow create: if signedIn()
-          && validLostPetReport(request.resource.data, request.auth.uid);
+          && validLostPetReport(request.resource.data, request.auth.uid)
+          && request.resource.data.created_at == request.time;
       allow update: if signedIn()
           && resource.data.owner_uid == request.auth.uid
           && resource.data.status == 'active'
           && (
             (request.resource.data.diff(resource.data).affectedKeys().hasOnly([
-                'photo_urls', 'cover_image_url', 'updated_at'
+                'pet_type', 'pet_name', 'description', 'city', 'district',
+                'address', 'latitude', 'longitude', 'last_seen_at',
+                'contact_phone', 'contact_phone_shared', 'photo_urls',
+                'cover_image_url', 'updated_at'
               ])
               && request.resource.data.status == 'active'
-              && validLostPetPhotoUrls(request.resource.data)
+              && validLostPetReport(request.resource.data, resource.data.owner_uid)
+              && request.resource.data.created_at == resource.data.created_at
               && request.resource.data.updated_at is timestamp
               && request.resource.data.updated_at == request.time)
             ||
@@ -784,13 +814,36 @@ service cloud.firestore {
           );
       allow delete: if signedIn()
           && resource.data.owner_uid == request.auth.uid;
+
+      match /_views/{viewerUid} {
+        function parentReport() {
+          return get(/databases/$(database)/documents/lost_pet_reports/$(reportId));
+        }
+
+        allow read: if signedIn()
+            && exists(/databases/$(database)/documents/lost_pet_reports/$(reportId))
+            && (parentReport().data.owner_uid == request.auth.uid
+                || viewerUid == request.auth.uid);
+        allow create: if signedIn()
+            && viewerUid == request.auth.uid
+            && exists(/databases/$(database)/documents/lost_pet_reports/$(reportId))
+            && parentReport().data.status == 'active'
+            && parentReport().data.owner_uid != request.auth.uid
+            && request.resource.data.keys().hasOnly(['created_at'])
+            && request.resource.data.created_at is timestamp
+            && request.resource.data.created_at == request.time;
+        allow update: if false;
+        allow delete: if signedIn()
+            && exists(/databases/$(database)/documents/lost_pet_reports/$(reportId))
+            && parentReport().data.owner_uid == request.auth.uid;
+      }
     }
 
     match /community_places/{placeId} {
       function validCommunityPlace(data, ownerUid) {
         return data.keys().hasOnly([
               'owner_uid', 'name', 'category', 'description', 'address',
-            'latitude', 'longitude', 'created_at', 'photo_url'
+            'latitude', 'longitude', 'created_at', 'photo_url', 'photo_urls'
             ])
             && data.keys().hasAll([
               'owner_uid', 'name', 'category', 'description', 'address',
@@ -818,7 +871,24 @@ service cloud.firestore {
             && (!data.keys().hasAny(['photo_url'])
               || (data.photo_url is string
                 && data.photo_url.size() <= 2048
-                && data.photo_url.matches('^https://.*')));
+                && data.photo_url.matches('^https://.*')))
+            && (!data.keys().hasAny(['photo_urls'])
+              || (data.photo_urls is list
+                && data.photo_urls.size() <= 3
+                && (data.photo_urls.size() < 1
+                  || (data.photo_urls[0] is string
+                    && data.photo_urls[0].size() <= 2048
+                    && data.photo_urls[0].matches('^https://.*')))
+                && (data.photo_urls.size() < 2
+                  || (data.photo_urls[1] is string
+                    && data.photo_urls[1].size() <= 2048
+                    && data.photo_urls[1].matches('^https://.*')))
+                && (data.photo_urls.size() < 3
+                  || (data.photo_urls[2] is string
+                    && data.photo_urls[2].size() <= 2048
+                    && data.photo_urls[2].matches('^https://.*')))
+                && (data.photo_urls.size() == 0
+                  || data.photo_url == data.photo_urls[0])));
       }
 
       allow read: if signedIn();

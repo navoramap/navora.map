@@ -1,6 +1,7 @@
 import 'dart:typed_data';
 
 import 'package:flutter/material.dart';
+import 'package:google_maps_flutter/google_maps_flutter.dart';
 import 'package:image_picker/image_picker.dart';
 
 class CreateCommunityPlaceSheet extends StatefulWidget {
@@ -8,14 +9,19 @@ class CreateCommunityPlaceSheet extends StatefulWidget {
   final double longitude;
   final String initialName;
   final String initialAddress;
+  final String initialCategory;
+  final String initialDescription;
+  final bool isEditing;
   final Future<void> Function({
     required String name,
     required String category,
     required String description,
     required String address,
-    required Uint8List? photoBytes,
-    required String? photoExtension,
-  }) onSubmit;
+    required List<Uint8List> photoBytes,
+    required List<String> photoExtensions,
+    required LatLng coordinate,
+  })
+  onSubmit;
 
   const CreateCommunityPlaceSheet({
     super.key,
@@ -23,6 +29,9 @@ class CreateCommunityPlaceSheet extends StatefulWidget {
     required this.longitude,
     required this.initialName,
     required this.initialAddress,
+    this.initialCategory = 'Kafe',
+    this.initialDescription = '',
+    this.isEditing = false,
     required this.onSubmit,
   });
 
@@ -32,6 +41,17 @@ class CreateCommunityPlaceSheet extends StatefulWidget {
 }
 
 class _CreateCommunityPlaceSheetState extends State<CreateCommunityPlaceSheet> {
+  static const _locationMapStyle = '''
+    [
+      {"featureType":"all","elementType":"geometry","stylers":[{"color":"#101010"}]},
+      {"featureType":"all","elementType":"labels.text.fill","stylers":[{"color":"#d6d6d6"}]},
+      {"featureType":"all","elementType":"labels.text.stroke","stylers":[{"color":"#101010"}]},
+      {"featureType":"water","elementType":"geometry","stylers":[{"color":"#080808"}]},
+      {"featureType":"road","elementType":"geometry","stylers":[{"color":"#242424"}]},
+      {"featureType":"transit","stylers":[{"visibility":"off"}]}
+    ]
+  ''';
+
   static const _categories = [
     'Kafe',
     'Restoran',
@@ -48,11 +68,16 @@ class _CreateCommunityPlaceSheetState extends State<CreateCommunityPlaceSheet> {
   late final _addressController = TextEditingController(
     text: widget.initialAddress,
   );
-  final _descriptionController = TextEditingController();
+  late final _descriptionController = TextEditingController(
+    text: widget.initialDescription,
+  );
   final _imagePicker = ImagePicker();
-  Uint8List? _photoBytes;
-  String? _photoExtension;
-  String _category = _categories.first;
+  final List<Uint8List> _photoBytes = [];
+  final List<String> _photoExtensions = [];
+  late LatLng _coordinate = LatLng(widget.latitude, widget.longitude);
+  late String _category = _categories.contains(widget.initialCategory)
+      ? widget.initialCategory
+      : _categories.first;
   bool _isSubmitting = false;
   String? _errorMessage;
 
@@ -81,33 +106,168 @@ class _CreateCommunityPlaceSheetState extends State<CreateCommunityPlaceSheet> {
     );
   }
 
-  Future<void> _pickPhoto() async {
-    try {
-      final photo = await _imagePicker.pickImage(
-        source: ImageSource.gallery,
-        imageQuality: 82,
-        maxWidth: 1500,
-      );
-      if (photo == null) return;
+  Future<void> _selectLocation() async {
+    final selectedCoordinate = await showModalBottomSheet<LatLng>(
+      context: context,
+      isScrollControlled: true,
+      useSafeArea: true,
+      enableDrag: false,
+      backgroundColor: const Color(0xFF171717),
+      shape: const RoundedRectangleBorder(
+        borderRadius: BorderRadius.vertical(top: Radius.circular(24)),
+      ),
+      builder: (context) {
+        var coordinate = _coordinate;
+        return StatefulBuilder(
+          builder: (context, setMapState) => SizedBox(
+            height: MediaQuery.sizeOf(context).height * 0.78,
+            child: Column(
+              children: [
+                Padding(
+                  padding: const EdgeInsets.fromLTRB(20, 18, 12, 12),
+                  child: Row(
+                    children: [
+                      const Expanded(
+                        child: Text(
+                          'Mekân konumunu seç',
+                          style: TextStyle(
+                            color: Colors.white,
+                            fontSize: 18,
+                            fontWeight: FontWeight.w700,
+                          ),
+                        ),
+                      ),
+                      IconButton(
+                        tooltip: 'Kapat',
+                        onPressed: () => Navigator.pop(context),
+                        icon: const Icon(Icons.close, color: Colors.white70),
+                      ),
+                    ],
+                  ),
+                ),
+                Expanded(
+                  child: Stack(
+                    alignment: Alignment.center,
+                    children: [
+                      GoogleMap(
+                        initialCameraPosition: CameraPosition(
+                          target: coordinate,
+                          zoom: 15,
+                        ),
+                        style: _locationMapStyle,
+                        markers: {
+                          Marker(
+                            markerId: const MarkerId(
+                              'community-place-selection',
+                            ),
+                            position: coordinate,
+                            icon: BitmapDescriptor.defaultMarkerWithHue(
+                              BitmapDescriptor.hueOrange,
+                            ),
+                          ),
+                        },
+                        myLocationButtonEnabled: false,
+                        zoomControlsEnabled: false,
+                        zoomGesturesEnabled: true,
+                        scrollGesturesEnabled: true,
+                        compassEnabled: false,
+                        mapToolbarEnabled: false,
+                        onTap: (tappedCoordinate) {
+                          setMapState(() => coordinate = tappedCoordinate);
+                        },
+                        onCameraMove: (cameraPosition) {
+                          coordinate = cameraPosition.target;
+                        },
+                        onCameraIdle: () => setMapState(() {}),
+                      ),
+                    ],
+                  ),
+                ),
+                Padding(
+                  padding: const EdgeInsets.fromLTRB(20, 12, 20, 20),
+                  child: SizedBox(
+                    width: double.infinity,
+                    height: 48,
+                    child: FilledButton.icon(
+                      onPressed: () => Navigator.pop(context, coordinate),
+                      icon: const Icon(Icons.check_rounded),
+                      label: const Text('Bu konumu seç'),
+                    ),
+                  ),
+                ),
+              ],
+            ),
+          ),
+        );
+      },
+    );
+    if (selectedCoordinate != null && mounted) {
+      setState(() {
+        _coordinate = selectedCoordinate;
+        _errorMessage = null;
+      });
+    }
+  }
 
-      final extension = photo.name.split('.').last.toLowerCase();
-      if (!{'jpg', 'jpeg', 'png', 'webp'}.contains(extension)) {
+  Future<void> _pickPhotos(ImageSource source) async {
+    try {
+      final remaining = 3 - _photoBytes.length;
+      if (remaining <= 0) {
+        setState(() => _errorMessage = 'En fazla 3 fotoğraf ekleyebilirsin.');
+        return;
+      }
+
+      final List<XFile> photos;
+      if (source == ImageSource.gallery) {
+        photos = await _imagePicker.pickMultiImage(
+          imageQuality: 82,
+          maxWidth: 1500,
+        );
+      } else {
+        final photo = await _imagePicker.pickImage(
+          source: source,
+          imageQuality: 82,
+          maxWidth: 1500,
+        );
+        photos = photo == null ? const [] : [photo];
+      }
+      if (photos.isEmpty) return;
+      if (photos.length > remaining) {
         if (mounted) {
-          setState(() => _errorMessage = 'JPG, PNG veya WebP fotoğraf seç.');
+          setState(() {
+            _errorMessage =
+                'En fazla 3 fotoğraf ekleyebilirsin. $remaining fotoğraf yeri kaldı.';
+          });
         }
         return;
       }
-      final bytes = await photo.readAsBytes();
-      if (bytes.isEmpty || bytes.length > 5 * 1024 * 1024) {
-        if (mounted) {
-          setState(() => _errorMessage = 'Fotoğraf 5 MB veya daha küçük olmalı.');
+
+      final selectedBytes = <Uint8List>[];
+      final selectedExtensions = <String>[];
+      for (final photo in photos) {
+        final extension = photo.name.split('.').last.toLowerCase();
+        if (!{'jpg', 'jpeg', 'png', 'webp'}.contains(extension)) {
+          if (mounted) {
+            setState(() => _errorMessage = 'JPG, PNG veya WebP fotoğraf seç.');
+          }
+          return;
         }
-        return;
+        final bytes = await photo.readAsBytes();
+        if (bytes.isEmpty || bytes.length > 5 * 1024 * 1024) {
+          if (mounted) {
+            setState(
+              () => _errorMessage = 'Her fotoğraf 5 MB veya daha küçük olmalı.',
+            );
+          }
+          return;
+        }
+        selectedBytes.add(bytes);
+        selectedExtensions.add(extension);
       }
       if (!mounted) return;
       setState(() {
-        _photoBytes = bytes;
-        _photoExtension = extension;
+        _photoBytes.addAll(selectedBytes);
+        _photoExtensions.addAll(selectedExtensions);
         _errorMessage = null;
       });
     } catch (error) {
@@ -130,15 +290,17 @@ class _CreateCommunityPlaceSheetState extends State<CreateCommunityPlaceSheet> {
         category: _category,
         description: _descriptionController.text.trim(),
         address: _addressController.text.trim(),
-        photoBytes: _photoBytes,
-        photoExtension: _photoExtension,
+        photoBytes: List.unmodifiable(_photoBytes),
+        photoExtensions: List.unmodifiable(_photoExtensions),
+        coordinate: _coordinate,
       );
       if (mounted) Navigator.pop(context, true);
     } catch (error) {
       debugPrint('Topluluk mekanı eklenemedi: $error');
       if (mounted) {
         setState(() {
-          _errorMessage = 'Mekân eklenemedi. Bağlantını kontrol edip tekrar dene.';
+          _errorMessage =
+              'Mekân eklenemedi. Bağlantını kontrol edip tekrar dene.';
           _isSubmitting = false;
         });
       }
@@ -162,8 +324,8 @@ class _CreateCommunityPlaceSheetState extends State<CreateCommunityPlaceSheet> {
               mainAxisSize: MainAxisSize.min,
               crossAxisAlignment: CrossAxisAlignment.start,
               children: [
-                const Text(
-                  'Yeni mekân ekle',
+                Text(
+                  widget.isEditing ? 'Mekânı düzenle' : 'Yeni mekân ekle',
                   style: TextStyle(
                     color: Colors.white,
                     fontSize: 20,
@@ -172,8 +334,14 @@ class _CreateCommunityPlaceSheetState extends State<CreateCommunityPlaceSheet> {
                 ),
                 const SizedBox(height: 6),
                 Text(
-                  '${widget.latitude.toStringAsFixed(5)}, ${widget.longitude.toStringAsFixed(5)}',
+                  '${_coordinate.latitude.toStringAsFixed(5)}, ${_coordinate.longitude.toStringAsFixed(5)}',
                   style: const TextStyle(color: Colors.white60, fontSize: 12),
+                ),
+                const SizedBox(height: 8),
+                OutlinedButton.icon(
+                  onPressed: _isSubmitting ? null : _selectLocation,
+                  icon: const Icon(Icons.location_on_outlined),
+                  label: const Text('Haritadan konum seç'),
                 ),
                 const SizedBox(height: 16),
                 TextFormField(
@@ -217,55 +385,88 @@ class _CreateCommunityPlaceSheetState extends State<CreateCommunityPlaceSheet> {
                   maxLines: 3,
                   decoration: _decoration('Kısa not (isteğe bağlı)'),
                 ),
-                const SizedBox(height: 8),
-                if (_photoBytes != null) ...[
-                  ClipRRect(
-                    borderRadius: BorderRadius.circular(12),
-                    child: Image.memory(
-                      _photoBytes!,
-                      width: double.infinity,
-                      height: 160,
-                      fit: BoxFit.cover,
-                    ),
-                  ),
+                if (!widget.isEditing) ...[
                   const SizedBox(height: 8),
-                ],
-                Row(
-                  children: [
-                    Expanded(
-                      child: Text(
-                        _photoBytes == null
-                            ? 'Fotoğraf ekle (isteğe bağlı)'
-                            : 'Mekân fotoğrafı seçildi',
-                        style: const TextStyle(color: Colors.white70),
+                  if (_photoBytes.isNotEmpty) ...[
+                    SizedBox(
+                      height: 160,
+                      child: ListView.separated(
+                        scrollDirection: Axis.horizontal,
+                        itemCount: _photoBytes.length,
+                        separatorBuilder: (context, index) =>
+                            const SizedBox(width: 8),
+                        itemBuilder: (context, index) => Stack(
+                          children: [
+                            ClipRRect(
+                              borderRadius: BorderRadius.circular(12),
+                              child: Image.memory(
+                                _photoBytes[index],
+                                width: 220,
+                                height: 160,
+                                fit: BoxFit.cover,
+                              ),
+                            ),
+                            Positioned(
+                              top: 6,
+                              right: 6,
+                              child: IconButton.filled(
+                                tooltip: 'Fotoğrafı kaldır',
+                                onPressed: _isSubmitting
+                                    ? null
+                                    : () => setState(() {
+                                        _photoBytes.removeAt(index);
+                                        _photoExtensions.removeAt(index);
+                                      }),
+                                icon: const Icon(Icons.close_rounded, size: 18),
+                                style: IconButton.styleFrom(
+                                  backgroundColor: Colors.black54,
+                                  foregroundColor: Colors.white,
+                                  minimumSize: const Size(32, 32),
+                                ),
+                              ),
+                            ),
+                          ],
+                        ),
                       ),
                     ),
-                    if (_photoBytes != null)
-                      IconButton(
-                        tooltip: 'Fotoğrafı kaldır',
-                        onPressed: _isSubmitting
-                            ? null
-                            : () => setState(() {
-                                _photoBytes = null;
-                                _photoExtension = null;
-                              }),
-                        icon: const Icon(Icons.delete_outline_rounded),
-                      ),
-                    OutlinedButton.icon(
-                      onPressed: _isSubmitting ? null : _pickPhoto,
-                      icon: const Icon(Icons.add_photo_alternate_outlined),
-                      label: Text(_photoBytes == null ? 'Seç' : 'Değiştir'),
-                    ),
+                    const SizedBox(height: 8),
                   ],
-                ),
+                  Row(
+                    children: [
+                      Expanded(
+                        child: Text(
+                          'Fotoğraflar (${_photoBytes.length}/3)',
+                          style: const TextStyle(color: Colors.white70),
+                        ),
+                      ),
+                      OutlinedButton.icon(
+                        onPressed: _isSubmitting || _photoBytes.length == 3
+                            ? null
+                            : () => _pickPhotos(ImageSource.gallery),
+                        icon: const Icon(Icons.photo_library_outlined),
+                        label: const Text('Galeri'),
+                      ),
+                      const SizedBox(width: 8),
+                      OutlinedButton.icon(
+                        onPressed: _isSubmitting || _photoBytes.length == 3
+                            ? null
+                            : () => _pickPhotos(ImageSource.camera),
+                        icon: const Icon(Icons.photo_camera_outlined),
+                        label: const Text('Kamera'),
+                      ),
+                    ],
+                  ),
+                ],
                 if (_errorMessage != null) ...[
                   const SizedBox(height: 8),
                   Text(
                     _errorMessage!,
-                    style: TextStyle(color: Theme.of(context).colorScheme.error),
+                    style: TextStyle(
+                      color: Theme.of(context).colorScheme.error,
+                    ),
                   ),
                 ],
-                const SizedBox(height: 8),
+                const SizedBox(height: 20),
                 SizedBox(
                   width: double.infinity,
                   height: 48,
@@ -277,7 +478,11 @@ class _CreateCommunityPlaceSheetState extends State<CreateCommunityPlaceSheet> {
                             child: CircularProgressIndicator(strokeWidth: 2),
                           )
                         : const Icon(Icons.add_location_alt_outlined),
-                    label: const Text('Keşfet’e ekle'),
+                    label: Text(
+                      widget.isEditing
+                          ? 'Değişiklikleri kaydet'
+                          : 'Keşfet’e ekle',
+                    ),
                   ),
                 ),
               ],

@@ -53,30 +53,6 @@ async function seedListing(listingId, status = 'pending_review') {
   });
 }
 
-async function seedLostPetReport(reportId) {
-  await testEnvironment.withSecurityRulesDisabled(async (context) => {
-    await setDoc(doc(context.firestore(), `lost_pet_reports/${reportId}`), {
-      owner_uid: 'owner',
-      pet_type: 'dog',
-      pet_name: 'Boncuk',
-      description: 'Kahverengi tasmalı küçük köpek.',
-      city: 'İstanbul',
-      district: 'Kadıköy',
-      address: 'Moda Mahallesi, Kadıköy, İstanbul',
-      latitude: 41,
-      longitude: 29,
-      last_seen_at: new Date(),
-      contact_phone: '+90 555 000 0000',
-      contact_phone_shared: true,
-      photo_urls: [],
-      cover_image_url: '',
-      status: 'active',
-      created_at: new Date(),
-      updated_at: new Date(),
-    });
-  });
-}
-
 async function seedPetAdoptionListing(listingId, status = 'active') {
   await testEnvironment.withSecurityRulesDisabled(async (context) => {
     await setDoc(
@@ -118,13 +94,19 @@ async function seedCommunityPlace(placeId) {
   });
 }
 
-test('lost pet owners upload optional photos and signed-in users can read them', async () => {
+test('lost pet photos are limited to owner uploads and signed-in reads', async () => {
   const reportId = `lost-${Date.now()}`;
-  await seedLostPetReport(reportId);
   const ownerStorage = testEnvironment.authenticatedContext('owner').storage();
   const photo = ref(ownerStorage, `lost_pet_reports/owner/${reportId}/0`);
   await assertSucceeds(
     uploadBytes(photo, new Uint8Array([1, 2, 3]), { contentType: 'image/jpeg' }),
+  );
+  await assertFails(
+    uploadBytes(
+      ref(ownerStorage, `lost_pet_reports/other/${reportId}/0`),
+      new Uint8Array([1, 2, 3]),
+      { contentType: 'image/jpeg' },
+    ),
   );
   await assertFails(
     uploadBytes(
@@ -251,6 +233,25 @@ test('community place owners upload photos and signed-in users can read them', a
     uploadBytes(photo, new Uint8Array([1, 2, 3]), {
       contentType: 'image/jpeg',
     }),
+  );
+  for (const index of [0, 1, 2]) {
+    await assertSucceeds(
+      uploadBytes(
+        ref(
+          ownerStorage,
+          `community_places/owner/${placeId}/${index}`,
+        ),
+        new Uint8Array([1, 2, 3]),
+        { contentType: 'image/jpeg' },
+      ),
+    );
+  }
+  await assertFails(
+    uploadBytes(
+      ref(ownerStorage, `community_places/owner/${placeId}/3`),
+      new Uint8Array([1, 2, 3]),
+      { contentType: 'image/jpeg' },
+    ),
   );
   await assertFails(
     uploadBytes(

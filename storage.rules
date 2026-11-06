@@ -56,33 +56,18 @@ service firebase.storage {
     }
 
     match /lost_pet_reports/{uid}/{reportId}/{photoIndex} {
-      function reportPath() {
-        return /databases/(default)/documents/lost_pet_reports/$(reportId);
-      }
-
-      function ownsActiveReport() {
-        return request.auth != null
-            && request.auth.uid == uid
-            && firestore.exists(reportPath())
-            && firestore.get(reportPath()).data.owner_uid == uid
-            && firestore.get(reportPath()).data.status == 'active';
-      }
-
-      function activeReportExists() {
-        return firestore.exists(reportPath())
-            && firestore.get(reportPath()).data.status == 'active';
-      }
-
       allow read: if request.auth != null
-          && photoIndex.matches('^[0-2]$')
-          && activeReportExists();
-      allow create: if ownsActiveReport()
+          && photoIndex.matches('^[0-2]$');
+      allow create: if request.auth != null
+          && request.auth.uid == uid
           && photoIndex.matches('^[0-2]$')
           && request.resource.size > 0
           && request.resource.size <= 5 * 1024 * 1024
           && request.resource.contentType.matches('image/(jpeg|png|webp)');
       allow update: if false;
-      allow delete: if ownsActiveReport() && photoIndex.matches('^[0-2]$');
+      allow delete: if request.auth != null
+          && request.auth.uid == uid
+          && photoIndex.matches('^[0-2]$');
     }
 
     match /pet_adoption_listings/{uid}/{listingId}/{photoIndex} {
@@ -112,7 +97,9 @@ service firebase.storage {
           && request.resource.size <= 5 * 1024 * 1024
           && request.resource.contentType.matches('image/(jpeg|png|webp)');
       allow update: if false;
-      allow delete: if ownsActiveListing() && photoIndex.matches('^[0-2]$');
+      allow delete: if request.auth != null
+          && request.auth.uid == uid
+          && photoIndex.matches('^[0-2]$');
     }
 
     match /community_places/{uid}/{placeId}/cover {
@@ -134,6 +121,29 @@ service firebase.storage {
           && request.resource.contentType.matches('image/(jpeg|png|webp)');
       allow update: if false;
       allow delete: if ownsPlace();
+    }
+
+    match /community_places/{uid}/{placeId}/{photoIndex} {
+      function placePath() {
+        return /databases/(default)/documents/community_places/$(placeId);
+      }
+
+      function ownsPlace() {
+        return request.auth != null
+            && request.auth.uid == uid
+            && firestore.exists(placePath())
+            && firestore.get(placePath()).data.owner_uid == uid;
+      }
+
+      allow read: if request.auth != null
+          && photoIndex.matches('^[0-2]$');
+      allow create: if ownsPlace()
+          && photoIndex.matches('^[0-2]$')
+          && request.resource.size > 0
+          && request.resource.size <= 5 * 1024 * 1024
+          && request.resource.contentType.matches('image/(jpeg|png|webp)');
+      allow update: if false;
+      allow delete: if ownsPlace() && photoIndex.matches('^[0-2]$');
     }
   }
 }

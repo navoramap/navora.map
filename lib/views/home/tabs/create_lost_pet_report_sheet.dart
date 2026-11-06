@@ -10,8 +10,13 @@ import '../../../services/app_notification_service.dart';
 
 class CreateLostPetReportSheet extends StatefulWidget {
   final bool isAdoption;
+  final Map<String, dynamic>? listing;
 
-  const CreateLostPetReportSheet({super.key, this.isAdoption = false});
+  const CreateLostPetReportSheet({
+    super.key,
+    this.isAdoption = false,
+    this.listing,
+  });
 
   @override
   State<CreateLostPetReportSheet> createState() =>
@@ -34,12 +39,36 @@ class _CreateLostPetReportSheetState extends State<CreateLostPetReportSheet> {
   final _imagePicker = ImagePicker();
   final List<XFile> _photos = [];
   final List<Uint8List> _photoBytes = [];
+  final List<String> _existingPhotoUrls = [];
 
   String _petType = 'dog';
   DateTime _lastSeenAt = DateTime.now();
   bool _sharePhone = false;
   bool _isSubmitting = false;
   String? _errorMessage;
+
+  @override
+  void initState() {
+    super.initState();
+    final listing = widget.listing;
+    if (listing == null) return;
+    _nameController.text = listing['pet_name']?.toString() ?? '';
+    _descriptionController.text = listing['description']?.toString() ?? '';
+    _cityController.text = listing['city']?.toString() ?? '';
+    _districtController.text = listing['district']?.toString() ?? '';
+    _addressController.text = listing['address']?.toString() ?? '';
+    _phoneController.text = listing['contact_phone']?.toString() ?? '';
+    _petType = listing['pet_type']?.toString() ?? 'dog';
+    _sharePhone = listing['contact_phone_shared'] == true;
+    final lastSeen = listing['last_seen_at'];
+    if (lastSeen is Timestamp) _lastSeenAt = lastSeen.toDate();
+    final photoUrls = listing['photo_urls'];
+    if (photoUrls is List) {
+      _existingPhotoUrls.addAll(
+        photoUrls.whereType<String>().where((url) => url.isNotEmpty),
+      );
+    }
+  }
 
   @override
   void dispose() {
@@ -70,8 +99,48 @@ class _CreateLostPetReportSheetState extends State<CreateLostPetReportSheet> {
     );
   }
 
+  Future<void> _showPhotoSourceOptions() async {
+    final source = await showModalBottomSheet<ImageSource>(
+      context: context,
+      backgroundColor: const Color(0xFF1B1C1A),
+      builder: (context) => SafeArea(
+        child: Column(
+          mainAxisSize: MainAxisSize.min,
+          children: [
+            ListTile(
+              leading: const Icon(Icons.camera_alt_outlined, color: _textColor),
+              title: const Text(
+                'Kamerayla fotoğraf çek',
+                style: TextStyle(color: _textColor),
+              ),
+              onTap: () => Navigator.pop(context, ImageSource.camera),
+            ),
+            ListTile(
+              leading: const Icon(
+                Icons.photo_library_outlined,
+                color: _textColor,
+              ),
+              title: const Text(
+                'Galeriden seç',
+                style: TextStyle(color: _textColor),
+              ),
+              onTap: () => Navigator.pop(context, ImageSource.gallery),
+            ),
+            const SizedBox(height: 8),
+          ],
+        ),
+      ),
+    );
+    if (!mounted || source == null) return;
+    if (source == ImageSource.camera) {
+      await _takePhoto();
+    } else {
+      await _pickPhotos();
+    }
+  }
+
   Future<void> _pickPhotos() async {
-    final remaining = _maxPhotos - _photos.length;
+    final remaining = _maxPhotos - _existingPhotoUrls.length - _photos.length;
     if (remaining <= 0) return;
     try {
       final files = await _imagePicker.pickMultiImage(
@@ -79,31 +148,51 @@ class _CreateLostPetReportSheetState extends State<CreateLostPetReportSheet> {
         maxWidth: 1500,
         limit: remaining,
       );
-      final addedPhotos = <XFile>[];
-      final addedBytes = <Uint8List>[];
-      for (final file in files) {
-        final extension = file.name.split('.').last.toLowerCase();
-        if (!{'jpg', 'jpeg', 'png', 'webp'}.contains(extension)) continue;
-        final bytes = await file.readAsBytes();
-        if (bytes.isEmpty || bytes.length > _maxPhotoBytes) continue;
-        addedPhotos.add(file);
-        addedBytes.add(bytes);
-      }
-      if (!mounted) return;
-      setState(() {
-        _photos.addAll(addedPhotos);
-        _photoBytes.addAll(addedBytes);
-        _errorMessage = null;
-      });
-      if (addedPhotos.length != files.length) {
-        AppNotificationService.show(
-          'En fazla 5 MB JPG, PNG veya WebP fotoğraf eklenebilir.',
-        );
-      }
+      await _addPhotos(files);
     } catch (error) {
       debugPrint('Kayıp dost fotoğrafları seçilemedi: $error');
       if (!mounted) return;
       setState(() => _errorMessage = 'Fotoğraflar seçilemedi. Tekrar dene.');
+    }
+  }
+
+  Future<void> _takePhoto() async {
+    if (_existingPhotoUrls.length + _photos.length >= _maxPhotos) return;
+    try {
+      final file = await _imagePicker.pickImage(
+        source: ImageSource.camera,
+        imageQuality: 82,
+        maxWidth: 1500,
+      );
+      if (file != null) await _addPhotos([file]);
+    } catch (error) {
+      debugPrint('Kayıp dost fotoğrafı çekilemedi: $error');
+      if (!mounted) return;
+      setState(() => _errorMessage = 'Fotoğraf çekilemedi. Tekrar dene.');
+    }
+  }
+
+  Future<void> _addPhotos(List<XFile> files) async {
+    final addedPhotos = <XFile>[];
+    final addedBytes = <Uint8List>[];
+    for (final file in files) {
+      final extension = file.name.split('.').last.toLowerCase();
+      if (!{'jpg', 'jpeg', 'png', 'webp'}.contains(extension)) continue;
+      final bytes = await file.readAsBytes();
+      if (bytes.isEmpty || bytes.length > _maxPhotoBytes) continue;
+      addedPhotos.add(file);
+      addedBytes.add(bytes);
+    }
+    if (!mounted) return;
+    setState(() {
+      _photos.addAll(addedPhotos);
+      _photoBytes.addAll(addedBytes);
+      _errorMessage = null;
+    });
+    if (addedPhotos.length != files.length) {
+      AppNotificationService.show(
+        'En fazla 5 MB JPG, PNG veya WebP fotoğraf eklenebilir.',
+      );
     }
   }
 
@@ -140,6 +229,21 @@ class _CreateLostPetReportSheetState extends State<CreateLostPetReportSheet> {
     if (_isSubmitting || !_formKey.currentState!.validate()) {
       return;
     }
+    if (!widget.isAdoption) {
+      final now = DateTime.now();
+      if (_lastSeenAt.isAfter(now.add(const Duration(minutes: 5)))) {
+        setState(() {
+          _errorMessage = 'Son görülme zamanı gelecekte olamaz.';
+        });
+        return;
+      }
+      if (_lastSeenAt.isBefore(now.subtract(const Duration(days: 60)))) {
+        setState(() {
+          _errorMessage = 'Son görülme tarihi en fazla 60 gün önce olabilir.';
+        });
+        return;
+      }
+    }
     if (!_sharePhone) {
       setState(
         () => _errorMessage = 'Telefonunun paylaşılmasına izin vermelisin.',
@@ -156,18 +260,21 @@ class _CreateLostPetReportSheetState extends State<CreateLostPetReportSheet> {
     if (user == null) {
       setState(() {
         _isSubmitting = false;
-        _errorMessage = 'Bildirim oluşturmak için giriş yapmalısın.';
+        _errorMessage = 'İlan oluşturmak için giriş yapmalısın.';
       });
       return;
     }
     final collectionName = widget.isAdoption
         ? 'pet_adoption_listings'
         : 'lost_pet_reports';
+    final isEditing = widget.listing != null;
     final reportReference = FirebaseFirestore.instance
         .collection(collectionName)
-        .doc();
+        .doc(widget.listing?['id']?.toString());
     final uploadedReferences = <Reference>[];
     var reportCreated = false;
+    var submissionStep = 'adres konumu bulunurken';
+    final photoUrls = [..._existingPhotoUrls];
 
     try {
       final locations = await geo_coding.locationFromAddress(
@@ -180,9 +287,9 @@ class _CreateLostPetReportSheetState extends State<CreateLostPetReportSheet> {
           'Adres bulunamadı. Sokak ve bina numarasını kontrol et.',
         );
       }
-
-      await reportReference.set({
-        'owner_uid': user.uid,
+      submissionStep = 'ilan kaydedilirken';
+      submissionStep = 'ilan kaydedilirken';
+      final listingData = <String, dynamic>{
         'pet_type': _petType,
         'pet_name': _nameController.text.trim(),
         'description': _descriptionController.text.trim(),
@@ -194,17 +301,23 @@ class _CreateLostPetReportSheetState extends State<CreateLostPetReportSheet> {
         if (!widget.isAdoption) 'last_seen_at': Timestamp.fromDate(_lastSeenAt),
         'contact_phone': _phoneController.text.trim(),
         'contact_phone_shared': true,
-        'photo_urls': <String>[],
-        'cover_image_url': '',
-        'status': 'active',
-        'created_at': FieldValue.serverTimestamp(),
+        'photo_urls': photoUrls,
+        'cover_image_url': photoUrls.isEmpty ? '' : photoUrls.first,
         'updated_at': FieldValue.serverTimestamp(),
-      });
-      reportCreated = true;
+      };
+      if (!isEditing) {
+        await reportReference.set({
+          ...listingData,
+          'owner_uid': user.uid,
+          'status': 'active',
+          'created_at': FieldValue.serverTimestamp(),
+        });
+        reportCreated = true;
+      }
 
       if (_photos.isNotEmpty) {
-        final photoUrls = <String>[];
         for (var index = 0; index < _photos.length; index++) {
+          submissionStep = 'fotoğraflar yüklenirken';
           final photo = _photos[index];
           final extension = photo.name.split('.').last.toLowerCase();
           final contentType = switch (extension) {
@@ -214,15 +327,26 @@ class _CreateLostPetReportSheetState extends State<CreateLostPetReportSheet> {
             _ => throw StateError('JPG, PNG veya WebP fotoğraf seçmelisin.'),
           };
           final reference = FirebaseStorage.instance.ref().child(
-            '$collectionName/${user.uid}/${reportReference.id}/$index',
+            '$collectionName/${user.uid}/${reportReference.id}/'
+            '${_existingPhotoUrls.length + index}',
           );
-          uploadedReferences.add(reference);
           await reference.putData(
             _photoBytes[index],
             SettableMetadata(contentType: contentType),
           );
+          uploadedReferences.add(reference);
+          submissionStep = 'fotoğraf indirme bağlantısı alınırken';
           photoUrls.add(await reference.getDownloadURL());
         }
+      }
+      if (isEditing) {
+        listingData
+          ..['photo_urls'] = photoUrls
+          ..['cover_image_url'] = photoUrls.isEmpty ? '' : photoUrls.first;
+        submissionStep = 'ilan güncellenirken';
+        await reportReference.update(listingData);
+      } else if (_photos.isNotEmpty) {
+        submissionStep = 'ilan güncellenirken';
         await reportReference.update({
           'photo_urls': photoUrls,
           'cover_image_url': photoUrls.first,
@@ -234,34 +358,58 @@ class _CreateLostPetReportSheetState extends State<CreateLostPetReportSheet> {
         Navigator.of(context).pop(true);
       }
     } catch (error) {
+      debugPrint('Hayvan ilanı gönderilemedi ($submissionStep): $error');
       for (final reference in uploadedReferences) {
         try {
           await reference.delete();
-        } catch (_) {
-          // Continue cleanup for the remaining selected photos.
+        } catch (cleanupError) {
+          debugPrint('Yüklenmiş ilan fotoğrafı temizlenemedi: $cleanupError');
         }
       }
       if (reportCreated) {
         try {
           await reportReference.delete();
-        } catch (_) {
-          // A report can be removed manually if cleanup is denied.
+        } catch (cleanupError) {
+          debugPrint(
+            'Başarısız hayvan ilanı kaydı temizlenemedi: $cleanupError',
+          );
         }
       }
       if (!mounted) {
         return;
       }
+      final errorMessage = switch (error) {
+        StateError() => error.message.toString(),
+        FirebaseException(
+          plugin: 'cloud_firestore',
+          code: 'permission-denied',
+        ) =>
+          'İlanı kaydetme izni yok. Firebase güvenlik kurallarını kontrol et.',
+        FirebaseException(plugin: 'cloud_firestore', code: 'unauthenticated') =>
+          'Oturumun sona ermiş. Tekrar giriş yapıp dene.',
+        FirebaseException(
+          plugin: 'firebase_storage',
+          code: 'bucket-not-found',
+        ) =>
+          'Fotoğraf depolama alanı kurulmamış. Fotoğrafları kaldırıp tekrar deneyebilirsin.',
+        FirebaseException(plugin: 'firebase_storage', code: 'unauthorized') => 'Storage isteği doğrulanamadı (unauthorized). Firebase Console > App Check bölümünde Cloud Storage ayarını ve geliştirme cihazının debug token kaydını kontrol et.',
+        FirebaseException(
+          plugin: 'firebase_storage',
+          code: 'permission-denied',
+        ) =>
+          'Storage isteği kurallar tarafından reddedildi (permission-denied). Storage kurallarının yayımlandığını ve ilan sahibinin hesabıyla giriş yapıldığını kontrol et.',
+        FirebaseException(
+          plugin: 'firebase_storage',
+          code: 'unauthenticated',
+        ) =>
+          'Oturumun sona ermiş. Tekrar giriş yapıp fotoğrafı yeniden yükle.',
+        FirebaseException(plugin: 'firebase_storage') => 'Fotoğraflar yüklenemedi. Fotoğrafları kaldırıp fotoğrafsız gönderebilirsin.',
+        _ when submissionStep == 'adres konumu bulunurken' => 'Adresin konumu alınamadı. İl, ilçe ve açık adresi kontrol edip tekrar dene.',
+        _ =>
+          'İlan oluşturulamadı ($submissionStep). Bağlantını kontrol edip tekrar dene.',
+      };
       setState(() {
-        _errorMessage = switch (error) {
-          StateError() => error.message.toString(),
-          FirebaseException(
-            plugin: 'firebase_storage',
-            code: 'bucket-not-found',
-          ) =>
-            'Fotoğraf depolama alanı kurulmamış. Fotoğrafsız gönderebilir veya fotoğrafları kaldırıp tekrar deneyebilirsin.',
-          FirebaseException(plugin: 'firebase_storage') => 'Fotoğraflar yüklenemedi. Fotoğrafları kaldırıp fotoğrafsız gönderebilirsin.',
-          _ => 'Bildirim gönderilemedi. Bağlantını kontrol edip tekrar dene.',
-        };
+        _errorMessage = errorMessage;
       });
     } finally {
       if (mounted) {
@@ -270,10 +418,18 @@ class _CreateLostPetReportSheetState extends State<CreateLostPetReportSheet> {
     }
   }
 
-  String? _required(String? value, String label, {int maxLength = 100}) {
+  String? _required(
+    String? value,
+    String label, {
+    int minLength = 1,
+    int maxLength = 100,
+  }) {
     final text = value?.trim() ?? '';
     if (text.isEmpty) {
       return '$label gerekli.';
+    }
+    if (text.length < minLength) {
+      return '$label en az $minLength karakter olmalı.';
     }
     if (text.length > maxLength) {
       return '$label en fazla $maxLength karakter olabilir.';
@@ -395,8 +551,12 @@ class _CreateLostPetReportSheetState extends State<CreateLostPetReportSheet> {
                           ? 'Karakteri, sağlık durumu ve yuva beklentisi'
                           : 'Rengi, cinsi ve ayırt edici özellikleri',
                     ),
-                    validator: (value) =>
-                        _required(value, 'Açıklama', maxLength: 800),
+                    validator: (value) => _required(
+                      value,
+                      'Açıklama',
+                      minLength: 10,
+                      maxLength: 800,
+                    ),
                   ),
                   _buildPhotoPicker(),
                   const SizedBox(height: 12),
@@ -450,8 +610,12 @@ class _CreateLostPetReportSheetState extends State<CreateLostPetReportSheet> {
                     decoration: _decoration(
                       'Açık adres (mahalle, sokak, bina no)',
                     ),
-                    validator: (value) =>
-                        _required(value, 'Açık adres', maxLength: 250),
+                    validator: (value) => _required(
+                      value,
+                      'Açık adres',
+                      minLength: 8,
+                      maxLength: 250,
+                    ),
                   ),
                   TextFormField(
                     controller: _phoneController,
@@ -462,8 +626,12 @@ class _CreateLostPetReportSheetState extends State<CreateLostPetReportSheet> {
                     ],
                     style: const TextStyle(color: _textColor),
                     decoration: _decoration('İletişim telefonu'),
-                    validator: (value) =>
-                        _required(value, 'Telefon', maxLength: 40),
+                    validator: (value) => _required(
+                      value,
+                      'Telefon',
+                      minLength: 7,
+                      maxLength: 40,
+                    ),
                   ),
                   CheckboxListTile(
                     contentPadding: EdgeInsets.zero,
@@ -550,7 +718,7 @@ class _CreateLostPetReportSheetState extends State<CreateLostPetReportSheet> {
               ),
             ),
             Text(
-              '${_photos.length}/$_maxPhotos',
+              '${_existingPhotoUrls.length + _photos.length}/$_maxPhotos',
               style: const TextStyle(color: _mutedColor, fontSize: 12),
             ),
           ],
@@ -560,15 +728,22 @@ class _CreateLostPetReportSheetState extends State<CreateLostPetReportSheet> {
           height: 82,
           child: ListView.separated(
             scrollDirection: Axis.horizontal,
-            itemCount: _photos.length + (_photos.length < _maxPhotos ? 1 : 0),
+            itemCount:
+                _existingPhotoUrls.length +
+                _photos.length +
+                (_existingPhotoUrls.length + _photos.length < _maxPhotos
+                    ? 1
+                    : 0),
             separatorBuilder: (context, index) => const SizedBox(width: 8),
             itemBuilder: (context, index) {
-              if (index == _photos.length) {
+              final totalPhotoCount =
+                  _existingPhotoUrls.length + _photos.length;
+              if (index == totalPhotoCount) {
                 return Material(
                   color: const Color(0xFF252624),
                   borderRadius: BorderRadius.circular(12),
                   child: InkWell(
-                    onTap: _isSubmitting ? null : _pickPhotos,
+                    onTap: _isSubmitting ? null : _showPhotoSourceOptions,
                     borderRadius: BorderRadius.circular(12),
                     child: Container(
                       width: 82,
@@ -585,37 +760,47 @@ class _CreateLostPetReportSheetState extends State<CreateLostPetReportSheet> {
                   ),
                 );
               }
+              final isExistingPhoto = index < _existingPhotoUrls.length;
+              final localPhotoIndex = index - _existingPhotoUrls.length;
               return Stack(
                 children: [
                   ClipRRect(
                     borderRadius: BorderRadius.circular(12),
-                    child: Image.memory(
-                      _photoBytes[index],
-                      width: 82,
-                      height: 82,
-                      fit: BoxFit.cover,
-                    ),
+                    child: isExistingPhoto
+                        ? Image.network(
+                            _existingPhotoUrls[index],
+                            width: 82,
+                            height: 82,
+                            fit: BoxFit.cover,
+                          )
+                        : Image.memory(
+                            _photoBytes[localPhotoIndex],
+                            width: 82,
+                            height: 82,
+                            fit: BoxFit.cover,
+                          ),
                   ),
-                  Positioned(
-                    top: 2,
-                    right: 2,
-                    child: IconButton(
-                      tooltip: 'Fotoğrafı kaldır',
-                      onPressed: _isSubmitting
-                          ? null
-                          : () => setState(() {
-                              _photos.removeAt(index);
-                              _photoBytes.removeAt(index);
-                            }),
-                      icon: const Icon(Icons.close_rounded, size: 16),
-                      style: IconButton.styleFrom(
-                        backgroundColor: const Color(0xCC111111),
-                        foregroundColor: Colors.white,
-                        padding: EdgeInsets.zero,
-                        minimumSize: const Size(28, 28),
+                  if (!isExistingPhoto)
+                    Positioned(
+                      top: 2,
+                      right: 2,
+                      child: IconButton(
+                        tooltip: 'Fotoğrafı kaldır',
+                        onPressed: _isSubmitting
+                            ? null
+                            : () => setState(() {
+                                _photos.removeAt(localPhotoIndex);
+                                _photoBytes.removeAt(localPhotoIndex);
+                              }),
+                        icon: const Icon(Icons.close_rounded, size: 16),
+                        style: IconButton.styleFrom(
+                          backgroundColor: const Color(0xCC111111),
+                          foregroundColor: Colors.white,
+                          padding: EdgeInsets.zero,
+                          minimumSize: const Size(28, 28),
+                        ),
                       ),
                     ),
-                  ),
                 ],
               );
             },

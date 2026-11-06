@@ -638,6 +638,31 @@ class _HomePageState extends State<HomePage> {
   final PropertyListingService _propertyListingService =
       PropertyListingService();
 
+  Future<void> _recordPetListingView(Map<String, dynamic> listing) async {
+    final user = FirebaseAuth.instance.currentUser;
+    final collection = switch (listing['collection']) {
+      'lost_pet_reports' => 'lost_pet_reports',
+      'pet_adoption_listings' => 'pet_adoption_listings',
+      _ => null,
+    };
+    final listingId = listing['id']?.toString();
+    if (user == null || collection == null || listingId == null) return;
+
+    try {
+      final viewReference = FirebaseFirestore.instance
+          .collection(collection)
+          .doc(listingId)
+          .collection('_views')
+          .doc(user.uid);
+      final existingView = await viewReference.get();
+      if (!existingView.exists) {
+        await viewReference.set({'created_at': FieldValue.serverTimestamp()});
+      }
+    } catch (error) {
+      debugPrint('Hayvan ilanı görüntülenmesi kaydedilemedi: $error');
+    }
+  }
+
   static const Duration _chatRoomLifetime = Duration(hours: 24);
   static const double _bottomNavigationBarHeight = 68;
   static const double _bottomNavigationGap = 16;
@@ -693,6 +718,11 @@ class _HomePageState extends State<HomePage> {
   bool _hasShownRouteUpdateError = false;
   bool _isNavigationVoiceEnabled = true;
   BitmapDescriptor? _navigationEndpointMarkerIcon;
+  BitmapDescriptor? _lostPetMarkerIcon;
+  BitmapDescriptor? _adoptionMarkerIcon;
+  BitmapDescriptor? _communityPlaceMarkerIcon;
+  BitmapDescriptor? _rentalPropertyMarkerIcon;
+  BitmapDescriptor? _salePropertyMarkerIcon;
   bool _isSearchHistoryEnabled = true;
   bool _hasAnnouncedArrival = false;
   int _offRouteReadings = 0;
@@ -892,6 +922,9 @@ class _HomePageState extends State<HomePage> {
     _profilePhotoUrl = FirebaseAuth.instance.currentUser?.photoURL;
     _initializeVoiceNavigation();
     _loadNavigationEndpointMarkerIcon();
+    _loadLostPetMarkerIcon();
+    _loadListingMarkerIcons();
+    _loadCommunityPlaceMarkerIcon();
     _loadChatRoomMarkerIcon();
     _loadLocationPermissionState();
     _loadProfileData();
@@ -1371,7 +1404,10 @@ class _HomePageState extends State<HomePage> {
 
   bool _isMapLayerVisible(String layer) => _mapLayerVisibility[layer] ?? true;
 
-  Future<void> _showCreateLostPetReportSheet({bool isAdoption = false}) async {
+  Future<void> _showCreateLostPetReportSheet({
+    bool isAdoption = false,
+    Map<String, dynamic>? listing,
+  }) async {
     if (FirebaseAuth.instance.currentUser == null) {
       AppNotificationService.show(
         'Bildirim vermek için önce giriş yapmalısın.',
@@ -1384,11 +1420,14 @@ class _HomePageState extends State<HomePage> {
       useSafeArea: false,
       showDragHandle: false,
       backgroundColor: const Color(0xFF171817),
-      builder: (context) => CreateLostPetReportSheet(isAdoption: isAdoption),
+      builder: (context) =>
+          CreateLostPetReportSheet(isAdoption: isAdoption, listing: listing),
     );
     if (submitted == true && mounted) {
       AppNotificationService.show(
-        isAdoption
+        listing != null
+            ? 'İlanın güncellendi.'
+            : isAdoption
             ? 'Sahiplendirme ilanı haritaya eklendi.'
             : 'Kayıp dost bildirimin haritaya eklendi.',
       );
@@ -1408,10 +1447,25 @@ class _HomePageState extends State<HomePage> {
 
   void _showLostPetReport(Map<String, dynamic> report) {
     final isAdoption = report['collection'] == 'pet_adoption_listings';
-    final imageUrl = report['cover_image_url']?.toString() ?? '';
+    final rawPhotoUrls = report['photo_urls'];
+    final imageUrls = rawPhotoUrls is List
+        ? rawPhotoUrls
+              .whereType<String>()
+              .where((url) => url.isNotEmpty)
+              .toSet()
+              .toList()
+        : <String>[];
+    final coverImageUrl = report['cover_image_url']?.toString() ?? '';
+    if (coverImageUrl.isNotEmpty && !imageUrls.contains(coverImageUrl)) {
+      imageUrls.insert(0, coverImageUrl);
+    }
+    var currentPhotoIndex = 0;
     final phone = report['contact_phone']?.toString() ?? '';
     final isOwner =
         report['owner_uid'] == FirebaseAuth.instance.currentUser?.uid;
+    if (!isOwner && report['status'] == 'active') {
+      unawaited(_recordPetListingView(report));
+    }
     final petName = report['pet_name']?.toString() ?? '';
     final type = _lostPetTypeLabel(report['pet_type']?.toString());
     final title = petName.isEmpty
@@ -1441,18 +1495,64 @@ class _HomePageState extends State<HomePage> {
             mainAxisSize: MainAxisSize.min,
             crossAxisAlignment: CrossAxisAlignment.start,
             children: [
-              if (imageUrl.isNotEmpty)
+              if (imageUrls.isNotEmpty)
                 ClipRRect(
                   borderRadius: const BorderRadius.vertical(
                     top: Radius.circular(22),
                   ),
-                  child: Image.network(
-                    imageUrl,
-                    width: double.infinity,
-                    height: 220,
-                    fit: BoxFit.cover,
-                    errorBuilder: (context, error, stackTrace) =>
-                        const SizedBox.shrink(),
+                  child: StatefulBuilder(
+                    builder: (context, setSheetState) => SizedBox(
+                      height: 220,
+                      child: Stack(
+                        fit: StackFit.expand,
+                        children: [
+                          PageView.builder(
+                            itemCount: imageUrls.length,
+                            onPageChanged: (index) {
+                              setSheetState(() => currentPhotoIndex = index);
+                            },
+                            itemBuilder: (context, index) => Image.network(
+                              imageUrls[index],
+                              width: double.infinity,
+                              fit: BoxFit.cover,
+                              errorBuilder: (context, error, stackTrace) =>
+                                  const Center(
+                                    child: Icon(
+                                      Icons.broken_image_outlined,
+                                      color: Colors.white70,
+                                      size: 36,
+                                    ),
+                                  ),
+                            ),
+                          ),
+                          if (imageUrls.length > 1)
+                            Positioned(
+                              right: 12,
+                              bottom: 12,
+                              child: DecoratedBox(
+                                decoration: BoxDecoration(
+                                  color: Colors.black54,
+                                  borderRadius: BorderRadius.circular(14),
+                                ),
+                                child: Padding(
+                                  padding: const EdgeInsets.symmetric(
+                                    horizontal: 10,
+                                    vertical: 5,
+                                  ),
+                                  child: Text(
+                                    '${currentPhotoIndex + 1}/${imageUrls.length}',
+                                    style: const TextStyle(
+                                      color: Colors.white,
+                                      fontSize: 12,
+                                      fontWeight: FontWeight.w700,
+                                    ),
+                                  ),
+                                ),
+                              ),
+                            ),
+                        ],
+                      ),
+                    ),
                   ),
                 ),
               Padding(
@@ -1790,6 +1890,17 @@ class _HomePageState extends State<HomePage> {
             final places = snapshot.docs
                 .map((document) {
                   final data = document.data();
+                  final rawPhotoUrls = data['photo_urls'];
+                  final photoUrls = rawPhotoUrls is List
+                      ? rawPhotoUrls
+                            .whereType<String>()
+                            .where((url) => url.isNotEmpty)
+                            .toList()
+                      : <String>[];
+                  final legacyPhotoUrl = data['photo_url']?.toString() ?? '';
+                  if (photoUrls.isEmpty && legacyPhotoUrl.isNotEmpty) {
+                    photoUrls.add(legacyPhotoUrl);
+                  }
                   return <String, dynamic>{
                     'id': document.id,
                     'ownerUid': data['owner_uid']?.toString() ?? '',
@@ -1797,7 +1908,8 @@ class _HomePageState extends State<HomePage> {
                     'category': data['category']?.toString() ?? 'Diğer',
                     'description': data['description']?.toString() ?? '',
                     'address': data['address']?.toString() ?? '',
-                    'photoUrl': data['photo_url']?.toString() ?? '',
+                    'photoUrls': photoUrls,
+                    'photoUrl': photoUrls.isEmpty ? '' : photoUrls.first,
                     'latitude': (data['latitude'] as num?)?.toDouble(),
                     'longitude': (data['longitude'] as num?)?.toDouble(),
                   };
@@ -2451,6 +2563,15 @@ class _HomePageState extends State<HomePage> {
 
     var didChoosePlaceAction = false;
     final placeDetails = _selectedPlaceDetails ?? const <String, dynamic>{};
+    final communityPhotoUrls = placeDetails['source'] == 'community_place'
+        ? ((placeDetails['photoUrls'] as List?)?.whereType<String>().toList() ??
+              [
+                (placeDetails['photoUrl'] ?? placeDetails['photo_url'])
+                        ?.toString()
+                        .trim() ??
+                    '',
+              ].where((url) => url.isNotEmpty).toList())
+        : <String>[];
     final ratingText = placeDetails['ratingText']?.toString();
     final phoneNumber = placeDetails['phoneNumber']?.toString();
     final websiteUri = Uri.tryParse(
@@ -2554,6 +2675,85 @@ class _HomePageState extends State<HomePage> {
                   ),
                 ],
               ),
+              if (communityPhotoUrls.isNotEmpty) ...[
+                const SizedBox(height: 16),
+                Builder(
+                  builder: (context) {
+                    var currentPhotoIndex = 0;
+                    return StatefulBuilder(
+                      builder: (context, setGalleryState) {
+                        return Column(
+                          children: [
+                            SizedBox(
+                              height: 190,
+                              child: PageView.builder(
+                                itemCount: communityPhotoUrls.length,
+                                onPageChanged: (index) {
+                                  setGalleryState(
+                                    () => currentPhotoIndex = index,
+                                  );
+                                },
+                                itemBuilder: (context, index) => ClipRRect(
+                                  borderRadius: BorderRadius.circular(14),
+                                  child: Image.network(
+                                    communityPhotoUrls[index],
+                                    width: double.infinity,
+                                    fit: BoxFit.cover,
+                                    errorBuilder: (context, error, stackTrace) {
+                                      debugPrint(
+                                        'Topluluk mekânı fotoğrafı açılamadı: $error',
+                                      );
+                                      return const Center(
+                                        child: Icon(
+                                          Icons.broken_image_outlined,
+                                          color: Colors.white54,
+                                          size: 32,
+                                        ),
+                                      );
+                                    },
+                                  ),
+                                ),
+                              ),
+                            ),
+                            if (communityPhotoUrls.length > 1) ...[
+                              const SizedBox(height: 8),
+                              Row(
+                                mainAxisAlignment: MainAxisAlignment.center,
+                                children: [
+                                  Text(
+                                    '${currentPhotoIndex + 1}/${communityPhotoUrls.length}',
+                                    style: const TextStyle(
+                                      color: Colors.white70,
+                                      fontSize: 12,
+                                    ),
+                                  ),
+                                  const SizedBox(width: 8),
+                                  ...List.generate(
+                                    communityPhotoUrls.length,
+                                    (index) => Container(
+                                      width: 6,
+                                      height: 6,
+                                      margin: const EdgeInsets.symmetric(
+                                        horizontal: 3,
+                                      ),
+                                      decoration: BoxDecoration(
+                                        shape: BoxShape.circle,
+                                        color: index == currentPhotoIndex
+                                            ? const Color(0xFFFF7A00)
+                                            : Colors.white30,
+                                      ),
+                                    ),
+                                  ),
+                                ],
+                              ),
+                            ],
+                          ],
+                        );
+                      },
+                    );
+                  },
+                ),
+              ],
               const SizedBox(height: 16),
               Container(
                 width: double.infinity,
@@ -6837,8 +7037,9 @@ out center tags;
   }
 
   Future<void> _confirmDeletePropertyListing(
-    Map<String, dynamic> listing,
-  ) async {
+    Map<String, dynamic> listing, {
+    VoidCallback? onDeleted,
+  }) async {
     final confirmed = await showDialog<bool>(
       context: context,
       builder: (dialogContext) => AlertDialog(
@@ -6864,6 +7065,7 @@ out center tags;
     try {
       await _propertyListingService.deleteListing(listing['id'].toString());
       if (mounted) {
+        onDeleted?.call();
         AppNotificationService.show('İlan silindi.');
       }
     } on FirebaseFunctionsException catch (error) {
@@ -6970,17 +7172,17 @@ out center tags;
               required description,
               required address,
               required photoBytes,
-              required photoExtension,
+              required photoExtensions,
+              required coordinate,
             }) async {
+              if (photoBytes.length > 3 ||
+                  photoBytes.length != photoExtensions.length) {
+                throw StateError('En fazla 3 mekân fotoğrafı ekleyebilirsin.');
+              }
               final placeReference = FirebaseFirestore.instance
                   .collection('community_places')
                   .doc();
-              final photoReference =
-                  photoBytes == null || photoExtension == null
-                  ? null
-                  : FirebaseStorage.instance.ref().child(
-                      'community_places/${user.uid}/${placeReference.id}/cover',
-                    );
+              final uploadedReferences = <Reference>[];
 
               try {
                 await placeReference.set({
@@ -6989,11 +7191,13 @@ out center tags;
                   'category': category,
                   'description': description,
                   'address': address,
-                  'latitude': selectedCoordinate.latitude,
-                  'longitude': selectedCoordinate.longitude,
+                  'latitude': coordinate.latitude,
+                  'longitude': coordinate.longitude,
                   'created_at': FieldValue.serverTimestamp(),
                 });
-                if (photoReference != null && photoBytes != null) {
+                final photoUrls = <String>[];
+                for (var index = 0; index < photoBytes.length; index++) {
+                  final photoExtension = photoExtensions[index];
                   final contentType = switch (photoExtension) {
                     'jpg' || 'jpeg' => 'image/jpeg',
                     'png' => 'image/png',
@@ -7002,16 +7206,24 @@ out center tags;
                       'JPG, PNG veya WebP fotoğraf seçmelisin.',
                     ),
                   };
+                  final photoReference = FirebaseStorage.instance.ref().child(
+                    'community_places/${user.uid}/${placeReference.id}/$index',
+                  );
+                  uploadedReferences.add(photoReference);
                   await photoReference.putData(
-                    photoBytes,
+                    photoBytes[index],
                     SettableMetadata(contentType: contentType),
                   );
+                  photoUrls.add(await photoReference.getDownloadURL());
+                }
+                if (photoUrls.isNotEmpty) {
                   await placeReference.update({
-                    'photo_url': await photoReference.getDownloadURL(),
+                    'photo_urls': photoUrls,
+                    'photo_url': photoUrls.first,
                   });
                 }
               } catch (_) {
-                if (photoReference != null) {
+                for (final photoReference in uploadedReferences) {
                   try {
                     await photoReference.delete();
                   } catch (cleanupError) {
@@ -7100,7 +7312,10 @@ out center tags;
         Marker(
           markerId: MarkerId('community-place-${place['id']}'),
           position: coordinate,
-          icon: BitmapDescriptor.defaultMarkerWithHue(BitmapDescriptor.hueCyan),
+          anchor: const Offset(0.5, 0.5),
+          icon:
+              _communityPlaceMarkerIcon ??
+              BitmapDescriptor.defaultMarkerWithHue(BitmapDescriptor.hueCyan),
           onTap: _showSelectedPlaceActionSheet,
         ),
       ];
@@ -7446,6 +7661,7 @@ out center tags;
     await showModalBottomSheet<void>(
       context: context,
       isScrollControlled: true,
+      showDragHandle: false,
       backgroundColor: const Color(0xFF171717),
       shape: const RoundedRectangleBorder(
         borderRadius: BorderRadius.vertical(top: Radius.circular(22)),
@@ -7916,59 +8132,16 @@ out center tags;
                     (place['latitude'] as num).toDouble(),
                     (place['longitude'] as num).toDouble(),
                   ),
-                  icon: BitmapDescriptor.defaultMarkerWithHue(
-                    BitmapDescriptor.hueCyan,
-                  ),
+                  anchor: const Offset(0.5, 0.5),
+                  icon:
+                      _communityPlaceMarkerIcon ??
+                      BitmapDescriptor.defaultMarkerWithHue(
+                        BitmapDescriptor.hueCyan,
+                      ),
                   onTap: () => _showCommunityPlaceOnMap(place),
                 ),
               )
               .toList();
-    final savedAddressMarkers = _savedAddresses
-        .asMap()
-        .entries
-        .where((entry) {
-          final latitude = double.tryParse(entry.value['latitude'] ?? '');
-          final longitude = double.tryParse(entry.value['longitude'] ?? '');
-          return latitude != null && longitude != null;
-        })
-        .map((entry) {
-          final address = entry.value;
-          final latitude = double.parse(address['latitude']!);
-          final longitude = double.parse(address['longitude']!);
-          final hue = address['type'] == 'home'
-              ? BitmapDescriptor.hueAzure
-              : address['type'] == 'work'
-              ? BitmapDescriptor.hueGreen
-              : BitmapDescriptor.hueRose;
-          return Marker(
-            markerId: MarkerId('saved-address-${entry.key}'),
-            position: LatLng(latitude, longitude),
-            icon: BitmapDescriptor.defaultMarkerWithHue(hue),
-            onTap: () async {
-              final coordinate = LatLng(latitude, longitude);
-              final title = address['title'] ?? 'Kayıtlı adres';
-              setState(() {
-                _selectedDestinationCoordinate = coordinate;
-                _selectedDestinationName = title;
-                _selectedPlaceDetails = null;
-                _searchController.text = address['address'] ?? title;
-                _searchResultName = title;
-                _searchMarkers = [
-                  Marker(
-                    markerId: const MarkerId('selected-search-result'),
-                    position: coordinate,
-                    icon: BitmapDescriptor.defaultMarkerWithHue(
-                      BitmapDescriptor.hueOrange,
-                    ),
-                    onTap: _showSelectedPlaceActionSheet,
-                  ),
-                ];
-              });
-              await _showSelectedPlaceActionSheet();
-            },
-          );
-        })
-        .toList();
     final lostPetMarkers = _lostPetReports
         .where((report) {
           return report['collection'] == 'pet_adoption_listings'
@@ -7986,9 +8159,17 @@ out center tags;
               '${isAdoption ? 'adoption' : 'lost-pet'}-${report['id']}',
             ),
             position: LatLng(latitude, longitude),
-            icon: BitmapDescriptor.defaultMarkerWithHue(
-              isAdoption ? BitmapDescriptor.hueGreen : BitmapDescriptor.hueRose,
-            ),
+            anchor: const Offset(0.5, 0.5),
+            icon: isAdoption
+                ? _adoptionMarkerIcon ??
+                      _lostPetMarkerIcon ??
+                      BitmapDescriptor.defaultMarkerWithHue(
+                        BitmapDescriptor.hueGreen,
+                      )
+                : _lostPetMarkerIcon ??
+                      BitmapDescriptor.defaultMarkerWithHue(
+                        BitmapDescriptor.hueRose,
+                      ),
             infoWindow: InfoWindow(
               title: petName.isEmpty
                   ? isAdoption
@@ -8016,14 +8197,15 @@ out center tags;
         .map((listing) {
           final latitude = (listing['latitude'] as num).toDouble();
           final longitude = (listing['longitude'] as num).toDouble();
+          final icon = listing['listing_type'] == 'kiralik'
+              ? _rentalPropertyMarkerIcon
+              : _salePropertyMarkerIcon;
+          if (icon == null) return null;
           return Marker(
             markerId: MarkerId('property-${listing['id']}'),
             position: LatLng(latitude, longitude),
-            icon: BitmapDescriptor.defaultMarkerWithHue(
-              listing['listing_type'] == 'kiralik'
-                  ? BitmapDescriptor.hueAzure
-                  : BitmapDescriptor.hueOrange,
-            ),
+            anchor: const Offset(0.5, 0.5),
+            icon: icon,
             infoWindow: InfoWindow(
               title: listing['title']?.toString() ?? 'Konut ilanı',
               snippet: _formatListingPrice(listing['price']),
@@ -8031,13 +8213,13 @@ out center tags;
             onTap: () => _showPropertyListing(listing),
           );
         })
+        .whereType<Marker>()
         .toList();
 
     final mapMarkers = <Marker>{
       ..._searchMarkers,
       ...roomMarkers,
       ...communityPlaceMarkers,
-      ...savedAddressMarkers,
       ...lostPetMarkers,
       ...propertyMarkers,
     };
@@ -10711,10 +10893,29 @@ out center tags;
               Navigator.of(context).push<void>(
                 MaterialPageRoute<void>(
                   builder: (context) => MyPropertyListingsPage(
-                    listingBuilder: _buildMyPropertyListingCard,
+                    listingBuilder: (listing, onListingChanged) =>
+                        _buildMyPropertyListingCard(
+                          listing,
+                          onListingChanged: () {
+                            if (listing['listing_collection'] ==
+                                'property_listings') {
+                              _propertyListings.removeWhere(
+                                (mapListing) =>
+                                    mapListing['id'] == listing['id'],
+                              );
+                              if (mounted) setState(() {});
+                            } else if (listing['listing_collection'] ==
+                                'community_places') {
+                              _communityPlaces.removeWhere(
+                                (place) => place['id'] == listing['id'],
+                              );
+                              if (mounted) setState(() {});
+                            }
+                            onListingChanged();
+                          },
+                        ),
                     onCreateListing: () =>
                         unawaited(_showCreatePropertyListingSheet()),
-                    onClosePetListing: _closeOwnedPetListing,
                   ),
                 ),
               ),
@@ -10790,9 +10991,21 @@ out center tags;
     );
   }
 
-  Widget _buildMyPropertyListingCard(Map<String, dynamic> listing) {
+  Widget _buildMyPropertyListingCard(
+    Map<String, dynamic> listing, {
+    required VoidCallback onListingChanged,
+  }) {
+    if (listing['listing_collection'] == 'community_places') {
+      return _buildMyCommunityPlaceCard(
+        listing,
+        onListingChanged: onListingChanged,
+      );
+    }
     if (listing['listing_collection'] != 'property_listings') {
-      return _buildMyPetListingCard(listing);
+      return _buildMyPetListingCard(
+        listing,
+        onListingChanged: onListingChanged,
+      );
     }
 
     final status = listing['status']?.toString() ?? 'unknown';
@@ -10922,8 +11135,12 @@ out center tags;
               IconButton(
                 tooltip: 'İlanı sil',
                 visualDensity: VisualDensity.compact,
-                onPressed: () =>
-                    unawaited(_confirmDeletePropertyListing(listing)),
+                onPressed: () => unawaited(
+                  _confirmDeletePropertyListing(
+                    listing,
+                    onDeleted: onListingChanged,
+                  ),
+                ),
                 icon: const Icon(Icons.delete_outline_rounded),
                 color: const Color(0xFFE57373),
               ),
@@ -10934,7 +11151,241 @@ out center tags;
     );
   }
 
-  Widget _buildMyPetListingCard(Map<String, dynamic> listing) {
+  Widget _buildMyCommunityPlaceCard(
+    Map<String, dynamic> place, {
+    required VoidCallback onListingChanged,
+  }) {
+    final photoUrls = (place['photo_urls'] as List?)
+            ?.whereType<String>()
+            .toList() ??
+        (place['photo_url']?.toString().isNotEmpty == true
+            ? [place['photo_url'].toString()]
+            : <String>[]);
+    final address = place['address']?.toString().trim() ?? '';
+    final category = place['category']?.toString() ?? 'Diğer';
+
+    return Container(
+      margin: const EdgeInsets.only(bottom: 10),
+      padding: const EdgeInsets.all(10),
+      decoration: BoxDecoration(
+        color: const Color(0xFF191919),
+        borderRadius: BorderRadius.circular(12),
+        border: Border.all(color: const Color(0xFF303030)),
+      ),
+      child: Row(
+        children: [
+          ClipRRect(
+            borderRadius: BorderRadius.circular(8),
+            child: photoUrls.isEmpty
+                ? const SizedBox(
+                    width: 76,
+                    height: 68,
+                    child: ColoredBox(
+                      color: Color(0xFF252525),
+                      child: Icon(
+                        Icons.storefront_rounded,
+                        color: Color(0xFF64D8CB),
+                      ),
+                    ),
+                  )
+                : Image.network(
+                    photoUrls.first,
+                    width: 76,
+                    height: 68,
+                    fit: BoxFit.cover,
+                    errorBuilder: (context, error, stackTrace) => const SizedBox(
+                      width: 76,
+                      height: 68,
+                      child: Icon(
+                        Icons.broken_image_outlined,
+                        color: Color(0xFFB8B8B8),
+                      ),
+                    ),
+                  ),
+          ),
+          const SizedBox(width: 11),
+          Expanded(
+            child: Column(
+              crossAxisAlignment: CrossAxisAlignment.start,
+              children: [
+                Text(
+                  place['name']?.toString() ?? 'Topluluk mekânı',
+                  maxLines: 2,
+                  overflow: TextOverflow.ellipsis,
+                  style: const TextStyle(
+                    color: Colors.white,
+                    fontSize: 14,
+                    fontWeight: FontWeight.w700,
+                  ),
+                ),
+                const SizedBox(height: 5),
+                Text(
+                  address.isEmpty ? category : '$category • $address',
+                  maxLines: 2,
+                  overflow: TextOverflow.ellipsis,
+                  style: const TextStyle(
+                    color: Color(0xFFB8B8B8),
+                    fontSize: 11,
+                  ),
+                ),
+              ],
+            ),
+          ),
+          IconButton(
+            tooltip: 'Mekânı düzenle',
+            visualDensity: VisualDensity.compact,
+            onPressed: () => unawaited(_editCommunityPlace(place)),
+            icon: const Icon(Icons.edit_outlined),
+            color: const Color(0xFFFFA052),
+          ),
+          IconButton(
+            tooltip: 'Mekânı sil',
+            visualDensity: VisualDensity.compact,
+            onPressed: () => unawaited(
+              _confirmDeleteCommunityPlace(
+                place,
+                onDeleted: onListingChanged,
+              ),
+            ),
+            icon: const Icon(Icons.delete_outline_rounded),
+            color: const Color(0xFFE57373),
+          ),
+        ],
+      ),
+    );
+  }
+
+  Future<void> _editCommunityPlace(Map<String, dynamic> place) async {
+    final latitude = (place['latitude'] as num?)?.toDouble();
+    final longitude = (place['longitude'] as num?)?.toDouble();
+    final placeId = place['id']?.toString();
+    if (latitude == null || longitude == null || placeId == null) {
+      AppNotificationService.show('Mekân bilgileri düzenlenemedi.');
+      return;
+    }
+    await showModalBottomSheet<bool>(
+      context: context,
+      isScrollControlled: true,
+      useSafeArea: true,
+      backgroundColor: const Color(0xFF171717),
+      shape: const RoundedRectangleBorder(
+        borderRadius: BorderRadius.vertical(top: Radius.circular(24)),
+      ),
+      builder: (context) => CreateCommunityPlaceSheet(
+        latitude: latitude,
+        longitude: longitude,
+        initialName: place['name']?.toString() ?? '',
+        initialAddress: place['address']?.toString() ?? '',
+        initialCategory: place['category']?.toString() ?? 'Diğer',
+        initialDescription: place['description']?.toString() ?? '',
+        isEditing: true,
+        onSubmit:
+            ({
+              required name,
+              required category,
+              required description,
+              required address,
+              required photoBytes,
+              required photoExtensions,
+              required coordinate,
+            }) async {
+              await FirebaseFirestore.instance
+                  .collection('community_places')
+                  .doc(placeId)
+                  .update({
+                    'name': name,
+                    'category': category,
+                    'description': description,
+                    'address': address,
+                    'latitude': coordinate.latitude,
+                    'longitude': coordinate.longitude,
+                  });
+            },
+      ),
+    );
+  }
+
+  Future<void> _confirmDeleteCommunityPlace(
+    Map<String, dynamic> place, {
+    required VoidCallback onDeleted,
+  }) async {
+    final placeId = place['id']?.toString();
+    final user = FirebaseAuth.instance.currentUser;
+    if (placeId == null || user == null) {
+      AppNotificationService.show('Mekân silinemedi. Tekrar giriş yapıp dene.');
+      return;
+    }
+    final confirmed = await showDialog<bool>(
+      context: context,
+      builder: (dialogContext) => AlertDialog(
+        title: const Text('Mekân silinsin mi?'),
+        content: Text(
+          '“${place['name']?.toString() ?? 'Topluluk mekânı'}” kalıcı olarak silinecek.',
+        ),
+        actions: [
+          TextButton(
+            onPressed: () => Navigator.pop(dialogContext, false),
+            child: const Text('Vazgeç'),
+          ),
+          FilledButton(
+            style: FilledButton.styleFrom(backgroundColor: Colors.redAccent),
+            onPressed: () => Navigator.pop(dialogContext, true),
+            child: const Text('Sil'),
+          ),
+        ],
+      ),
+    );
+    if (confirmed != true || !mounted) return;
+
+    final placeReference = FirebaseFirestore.instance
+        .collection('community_places')
+        .doc(placeId);
+    try {
+      final photoUrls = (place['photo_urls'] as List?)
+              ?.whereType<String>()
+              .toList() ??
+          <String>[];
+      final paths = <String>[
+        ...List.generate(
+          photoUrls.length,
+          (index) => 'community_places/${user.uid}/$placeId/$index',
+        ),
+        'community_places/${user.uid}/$placeId/cover',
+      ];
+      for (final path in paths) {
+        try {
+          await FirebaseStorage.instance.ref().child(path).delete();
+        } on FirebaseException catch (error) {
+          if (error.code != 'object-not-found') rethrow;
+        }
+      }
+      await placeReference.delete();
+      _communityPlaces.removeWhere((item) => item['id'] == placeId);
+      if (mounted) {
+        setState(() {});
+        onDeleted();
+        AppNotificationService.show('Mekân silindi.');
+      }
+    } on FirebaseException catch (error, stackTrace) {
+      debugPrint(
+        'Topluluk mekânı silinemedi (${error.code}): '
+        '${error.message}\n$stackTrace',
+      );
+      if (mounted) {
+        AppNotificationService.show(
+          'Mekân silinemedi (${error.code}). Tekrar dene.',
+        );
+      }
+    } catch (error, stackTrace) {
+      debugPrint('Topluluk mekânı silinemedi: $error\n$stackTrace');
+      if (mounted) AppNotificationService.show('Mekân silinemedi. Tekrar dene.');
+    }
+  }
+
+  Widget _buildMyPetListingCard(
+    Map<String, dynamic> listing, {
+    required VoidCallback onListingChanged,
+  }) {
     final collection = listing['listing_collection'];
     final isAdoption = collection == 'pet_adoption_listings';
     final status = listing['status']?.toString() ?? 'unknown';
@@ -10949,6 +11400,9 @@ out center tags;
       listing['city']?.toString() ?? '',
     ].where((part) => part.trim().isNotEmpty).join(', ');
     final imageUrl = listing['cover_image_url']?.toString() ?? '';
+    final statusColor = isActive
+        ? const Color(0xFF69C981)
+        : const Color(0xFFFFC266);
 
     return Container(
       margin: const EdgeInsets.only(bottom: 10),
@@ -10958,103 +11412,239 @@ out center tags;
         borderRadius: BorderRadius.circular(12),
         border: Border.all(color: const Color(0xFF303030)),
       ),
-      child: Row(
+      child: Column(
         children: [
-          ClipRRect(
-            borderRadius: BorderRadius.circular(8),
-            child: imageUrl.isEmpty
-                ? const SizedBox(
-                    width: 76,
-                    height: 68,
-                    child: ColoredBox(
-                      color: Color(0xFF252525),
-                      child: Icon(Icons.pets_rounded, color: Color(0xFFFF9A3D)),
-                    ),
-                  )
-                : Image.network(
-                    imageUrl,
-                    width: 76,
-                    height: 68,
-                    fit: BoxFit.cover,
-                    errorBuilder: (context, error, stackTrace) =>
-                        const SizedBox(
-                          width: 76,
-                          height: 68,
+          Row(
+            children: [
+              ClipRRect(
+                borderRadius: BorderRadius.circular(8),
+                child: imageUrl.isEmpty
+                    ? const SizedBox(
+                        width: 76,
+                        height: 68,
+                        child: ColoredBox(
+                          color: Color(0xFF252525),
                           child: Icon(
-                            Icons.broken_image_outlined,
-                            color: Color(0xFFB8B8B8),
+                            Icons.pets_rounded,
+                            color: Color(0xFFFF9A3D),
                           ),
                         ),
-                  ),
-          ),
-          const SizedBox(width: 11),
-          Expanded(
-            child: Column(
-              crossAxisAlignment: CrossAxisAlignment.start,
-              children: [
-                Text(
-                  title,
-                  maxLines: 2,
-                  overflow: TextOverflow.ellipsis,
-                  style: const TextStyle(
-                    color: Colors.white,
-                    fontSize: 14,
-                    fontWeight: FontWeight.w700,
-                  ),
+                      )
+                    : Image.network(
+                        imageUrl,
+                        width: 76,
+                        height: 68,
+                        fit: BoxFit.cover,
+                        errorBuilder: (context, error, stackTrace) =>
+                            const SizedBox(
+                              width: 76,
+                              height: 68,
+                              child: Icon(
+                                Icons.broken_image_outlined,
+                                color: Color(0xFFB8B8B8),
+                              ),
+                            ),
+                      ),
+              ),
+              const SizedBox(width: 11),
+              Expanded(
+                child: Column(
+                  crossAxisAlignment: CrossAxisAlignment.start,
+                  children: [
+                    Text(
+                      title,
+                      maxLines: 2,
+                      overflow: TextOverflow.ellipsis,
+                      style: const TextStyle(
+                        color: Colors.white,
+                        fontSize: 14,
+                        fontWeight: FontWeight.w700,
+                      ),
+                    ),
+                    const SizedBox(height: 5),
+                    Text(
+                      '${isAdoption ? 'Sahiplendirme' : 'Kayıp dost'} • '
+                      '${_lostPetTypeLabel(listing['pet_type']?.toString())}'
+                      '${location.isEmpty ? '' : ' • $location'}',
+                      maxLines: 2,
+                      overflow: TextOverflow.ellipsis,
+                      style: const TextStyle(
+                        color: Color(0xFFB8B8B8),
+                        fontSize: 11,
+                      ),
+                    ),
+                  ],
                 ),
-                const SizedBox(height: 5),
-                Text(
-                  '${isAdoption ? 'Sahiplendirme' : 'Kayıp dost'} • '
-                  '${_lostPetTypeLabel(listing['pet_type']?.toString())}'
-                  '${location.isEmpty ? '' : ' • $location'}',
-                  maxLines: 2,
-                  overflow: TextOverflow.ellipsis,
-                  style: const TextStyle(
-                    color: Color(0xFFB8B8B8),
-                    fontSize: 11,
-                  ),
+              ),
+              Container(
+                padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 5),
+                decoration: BoxDecoration(
+                  color: statusColor.withValues(alpha: 0.12),
+                  borderRadius: BorderRadius.circular(8),
                 ),
-                const SizedBox(height: 5),
-                Text(
+                child: Text(
                   isActive ? 'Yayında' : 'Kapalı',
                   style: TextStyle(
-                    color: isActive
-                        ? const Color(0xFF69C981)
-                        : const Color(0xFFFFC266),
-                    fontSize: 11,
+                    color: statusColor,
+                    fontSize: 10,
                     fontWeight: FontWeight.w700,
                   ),
                 ),
-              ],
-            ),
+              ),
+            ],
+          ),
+          const Divider(height: 18, color: Color(0xFF303030)),
+          Row(
+            children: [
+              const Icon(
+                Icons.visibility_outlined,
+                color: Color(0xFFB8B8B8),
+                size: 17,
+              ),
+              const SizedBox(width: 5),
+              Text(
+                listing['view_count'] is num
+                    ? '${(listing['view_count'] as num).toInt()} görüntülenme'
+                    : 'Görüntülenme alınamadı',
+                style: const TextStyle(color: Color(0xFFB8B8B8), fontSize: 12),
+              ),
+              const Spacer(),
+              if (isActive)
+                IconButton(
+                  tooltip: 'İlanı düzenle',
+                  visualDensity: VisualDensity.compact,
+                  onPressed: () => unawaited(
+                    _showCreateLostPetReportSheet(
+                      isAdoption: isAdoption,
+                      listing: listing,
+                    ),
+                  ),
+                  icon: const Icon(Icons.edit_outlined),
+                  color: const Color(0xFFFFA052),
+                ),
+              IconButton(
+                tooltip: 'İlanı sil',
+                visualDensity: VisualDensity.compact,
+                onPressed: () => unawaited(
+                  _confirmDeletePetListing(
+                    listing,
+                    onDeleted: onListingChanged,
+                  ),
+                ),
+                icon: const Icon(Icons.delete_outline_rounded),
+                color: const Color(0xFFE57373),
+              ),
+            ],
           ),
         ],
       ),
     );
   }
 
-  Future<void> _closeOwnedPetListing(Map<String, dynamic> listing) async {
-    final collection = listing['listing_collection'] as String;
+  Future<void> _confirmDeletePetListing(
+    Map<String, dynamic> listing, {
+    required VoidCallback onDeleted,
+  }) async {
+    final confirmed = await showDialog<bool>(
+      context: context,
+      builder: (dialogContext) => AlertDialog(
+        title: const Text('İlan silinsin mi?'),
+        content: Text(
+          '“${listing['pet_name']?.toString().trim().isNotEmpty == true ? listing['pet_name'] : 'Hayvan ilanı'}” ve fotoğrafları kalıcı olarak silinecek.',
+        ),
+        actions: [
+          TextButton(
+            onPressed: () => Navigator.pop(dialogContext, false),
+            child: const Text('Vazgeç'),
+          ),
+          FilledButton(
+            style: FilledButton.styleFrom(backgroundColor: Colors.redAccent),
+            onPressed: () => Navigator.pop(dialogContext, true),
+            child: const Text('Sil'),
+          ),
+        ],
+      ),
+    );
+    if (confirmed != true || !mounted) return;
+
+    final user = FirebaseAuth.instance.currentUser;
+    final collection = switch (listing['listing_collection']) {
+      'lost_pet_reports' => 'lost_pet_reports',
+      'pet_adoption_listings' => 'pet_adoption_listings',
+      _ => null,
+    };
+    final listingId = listing['id']?.toString();
+    if (user == null || collection == null || listingId == null) {
+      AppNotificationService.show('İlan silinemedi. Tekrar giriş yapıp dene.');
+      return;
+    }
+
+    final listingReference = FirebaseFirestore.instance
+        .collection(collection)
+        .doc(listingId);
     try {
-      await FirebaseFirestore.instance
-          .collection(collection)
-          .doc(listing['id'] as String)
-          .update({
-            'status': 'resolved',
-            'updated_at': FieldValue.serverTimestamp(),
-          });
-      if (mounted) {
-        _showTrackingMessage(
-          collection == 'pet_adoption_listings'
-              ? 'Sahiplendirme ilanı kapatıldı.'
-              : 'Kayıp dost bildirimi kapatıldı.',
+      try {
+        final views = await listingReference.collection('_views').get();
+        for (var start = 0; start < views.docs.length; start += 450) {
+          final batch = FirebaseFirestore.instance.batch();
+          for (final view in views.docs.skip(start).take(450)) {
+            batch.delete(view.reference);
+          }
+          await batch.commit();
+        }
+      } on FirebaseException catch (error) {
+        debugPrint(
+          'İlan görüntülenme kayıtları temizlenemedi '
+          '(${error.code}): ${error.message}',
         );
       }
-    } catch (error) {
-      debugPrint('Hayvan ilanı kapatılamadı: $error');
+      await listingReference.delete();
+      onDeleted();
+    } on FirebaseException catch (error, stackTrace) {
+      debugPrint(
+        'Hayvan ilanı Firestore’dan silinemedi '
+        '(${error.code}): ${error.message}\n$stackTrace',
+      );
       if (mounted) {
-        _showTrackingMessage('İlan kapatılamadı. Lütfen tekrar deneyin.');
+        AppNotificationService.show(
+          'İlan Firestore’dan silinemedi (${error.code}). Tekrar dene.',
+        );
       }
+      return;
+    } catch (error, stackTrace) {
+      debugPrint('Hayvan ilanı Firestore’dan silinemedi: $error\n$stackTrace');
+      if (mounted) {
+        AppNotificationService.show('İlan silinemedi. Tekrar dene.');
+      }
+      return;
+    }
+
+    final photoDeletionErrors = <FirebaseException>[];
+    for (var index = 0; index < 3; index++) {
+      try {
+        await FirebaseStorage.instance
+            .ref()
+            .child('$collection/${user.uid}/$listingId/$index')
+            .delete();
+      } on FirebaseException catch (error) {
+        if (error.code != 'object-not-found') {
+          photoDeletionErrors.add(error);
+          debugPrint(
+            'Hayvan ilanı fotoğrafı silinemedi '
+            '(${error.code}, $collection/$listingId/$index): ${error.message}',
+          );
+        }
+      }
+    }
+
+    if (!mounted) return;
+    if (photoDeletionErrors.isEmpty) {
+      AppNotificationService.show('İlan silindi.');
+    } else {
+      AppNotificationService.show(
+        'İlan silindi ancak bazı fotoğraflar silinemedi. '
+        'Storage izinlerini kontrol et.',
+      );
     }
   }
 
@@ -14822,6 +15412,52 @@ out center tags;
     setState(() => _chatRoomMarkerIcon = icon);
   }
 
+  Future<void> _loadLostPetMarkerIcon() async {
+    final icon = await _createStandaloneMarkerIcon(
+      Icons.pets_rounded,
+      bubbleColor: const Color(0xFFE53935),
+      circular: true,
+    );
+    if (!mounted) return;
+    setState(() => _lostPetMarkerIcon = icon);
+  }
+
+  Future<void> _loadCommunityPlaceMarkerIcon() async {
+    final icon = await _createStandaloneMarkerIcon(
+      Icons.storefront_rounded,
+      bubbleColor: const Color(0xFF008C95),
+      circular: true,
+    );
+    if (!mounted) return;
+    setState(() => _communityPlaceMarkerIcon = icon);
+  }
+
+  Future<void> _loadListingMarkerIcons() async {
+    final icons = await Future.wait([
+      _createStandaloneMarkerIcon(
+        Icons.home_work_rounded,
+        bubbleColor: const Color(0xFF1976D2),
+        circular: true,
+      ),
+      _createStandaloneMarkerIcon(
+        Icons.sell_rounded,
+        bubbleColor: const Color(0xFFFF7A00),
+        circular: true,
+      ),
+      _createStandaloneMarkerIcon(
+        Icons.pets_rounded,
+        bubbleColor: const Color(0xFF2E7D32),
+        circular: true,
+      ),
+    ]);
+    if (!mounted) return;
+    setState(() {
+      _rentalPropertyMarkerIcon = icons[0];
+      _salePropertyMarkerIcon = icons[1];
+      _adoptionMarkerIcon = icons[2];
+    });
+  }
+
   BitmapDescriptor _roomMarkerIconForCount(int activeCount) {
     final count = activeCount.clamp(1, 99);
     final cached = _chatRoomMarkerIcons[count];
@@ -14906,38 +15542,54 @@ out center tags;
   Future<BitmapDescriptor> _createStandaloneMarkerIcon(
     IconData iconData, {
     String? badgeText,
+    Color bubbleColor = const Color(0xFFFF7A00),
+    bool circular = false,
   }) async {
     const size = 56.0;
     return _renderHighResolutionMarker(
       logicalSize: size,
       draw: (canvas) {
         const center = Offset(size / 2, size / 2);
-        final bubble = Path()
-          ..moveTo(18, 10)
-          ..quadraticBezierTo(12, 10, 12, 16)
-          ..lineTo(12, 32)
-          ..quadraticBezierTo(12, 38, 18, 38)
-          ..lineTo(20, 38)
-          ..lineTo(18, 45)
-          ..lineTo(29, 38)
-          ..lineTo(38, 38)
-          ..quadraticBezierTo(44, 38, 44, 32)
-          ..lineTo(44, 16)
-          ..quadraticBezierTo(44, 10, 38, 10)
-          ..close();
         final shadowPaint = Paint()
           ..color = Colors.black.withValues(alpha: 0.3)
           ..maskFilter = const MaskFilter.blur(BlurStyle.normal, 3);
-        canvas
-          ..drawPath(bubble.shift(const Offset(0, 2)), shadowPaint)
-          ..drawPath(bubble, Paint()..color = const Color(0xFFFF7A00))
-          ..drawPath(
-            bubble,
-            Paint()
-              ..color = Colors.white
-              ..style = PaintingStyle.stroke
-              ..strokeWidth = 2,
-          );
+        if (circular) {
+          canvas
+            ..drawCircle(center + const Offset(0, 2), 20, shadowPaint)
+            ..drawCircle(center, 20, Paint()..color = bubbleColor)
+            ..drawCircle(
+              center,
+              17,
+              Paint()
+                ..color = Colors.white
+                ..style = PaintingStyle.stroke
+                ..strokeWidth = 2,
+            );
+        } else {
+          final bubble = Path()
+            ..moveTo(18, 10)
+            ..quadraticBezierTo(12, 10, 12, 16)
+            ..lineTo(12, 32)
+            ..quadraticBezierTo(12, 38, 18, 38)
+            ..lineTo(20, 38)
+            ..lineTo(18, 45)
+            ..lineTo(29, 38)
+            ..lineTo(38, 38)
+            ..quadraticBezierTo(44, 38, 44, 32)
+            ..lineTo(44, 16)
+            ..quadraticBezierTo(44, 10, 38, 10)
+            ..close();
+          canvas
+            ..drawPath(bubble.shift(const Offset(0, 2)), shadowPaint)
+            ..drawPath(bubble, Paint()..color = bubbleColor)
+            ..drawPath(
+              bubble,
+              Paint()
+                ..color = Colors.white
+                ..style = PaintingStyle.stroke
+                ..strokeWidth = 2,
+            );
+        }
         _paintMarkerGlyph(
           canvas,
           iconData,
@@ -15231,11 +15883,7 @@ $text''';
         ),
         content: const Text(
           'Navora AI ile yaptığın konuşmalar ve kayıtlı sohbet geçmişin silinecek.',
-          style: TextStyle(
-            color: Color(0xFFBDBDBD),
-            fontSize: 14,
-            height: 1.5,
-          ),
+          style: TextStyle(color: Color(0xFFBDBDBD), fontSize: 14, height: 1.5),
         ),
         actions: [
           TextButton(
@@ -15291,8 +15939,7 @@ $text''';
           ..clear()
           ..add({
             'sender': 'ai',
-            'text':
-                'Merhaba! Ben Navora AI. Rotan, yakındaki mekanlar veya trafik hakkında ne öğrenmek istersin?',
+            'text': 'Merhaba! Ben Navora AI. Rotan, yakındaki mekanlar veya trafik hakkında ne öğrenmek istersin?',
           });
       });
       _showTrackingMessage('Navora AI sohbeti temizlendi.');
