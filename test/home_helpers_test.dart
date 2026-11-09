@@ -26,6 +26,24 @@ void main() {
     expect(navoraFormatArrivalTime(now, null), isNull);
   });
 
+  test('navigation ETA keeps fractional progress between GPS updates', () {
+    final firstUpdate = navoraScaleRemainingDurationSeconds(
+      durationSeconds: 600,
+      remainingDistanceKm: 9.9,
+      previousDistanceKm: 10,
+    );
+    final secondUpdate = navoraScaleRemainingDurationSeconds(
+      durationSeconds: firstUpdate,
+      remainingDistanceKm: 9.8,
+      previousDistanceKm: 9.9,
+    );
+
+    expect(firstUpdate, lessThan(600));
+    expect(secondUpdate, lessThan(firstUpdate));
+    expect(navoraDurationMinutesFromSeconds(59), 1);
+    expect(navoraDurationMinutesFromSeconds(0), 0);
+  });
+
   test('route length sums remaining polyline segment distances', () {
     const points = [LatLng(41.0, 29.0), LatLng(41.0, 29.01)];
     expect(navoraRouteLengthKm(points), inInclusiveRange(0.8, 0.9));
@@ -50,18 +68,18 @@ void main() {
     },
   );
 
-  test('off-route tolerance accounts for transport mode and GPS accuracy', () {
+  test('off-route detection responds sooner and accounts for GPS accuracy', () {
     expect(
       navoraOffRouteThresholdMeters(vehicle: 'Araba', accuracyMeters: 10),
-      95,
+      60,
     );
     expect(
       navoraOffRouteThresholdMeters(vehicle: 'Yürüyüş', accuracyMeters: 10),
-      45,
+      25,
     );
     expect(
       navoraOffRouteThresholdMeters(vehicle: 'Bisiklet', accuracyMeters: 100),
-      90,
+      55,
     );
   });
 
@@ -152,15 +170,15 @@ void main() {
     expect(navoraHasReliableNavigationPosition(double.nan), isFalse);
   });
 
-  test('arrival alert is limited to the final 100 meters', () {
-    expect(navoraIsWithinArrivalRadius(100), isTrue);
-    expect(navoraIsWithinArrivalRadius(100.1), isFalse);
+  test('arrival alert starts before reaching the destination', () {
+    expect(navoraIsWithinArrivalRadius(300), isTrue);
+    expect(navoraIsWithinArrivalRadius(300.1), isFalse);
     expect(navoraIsWithinArrivalRadius(double.infinity), isFalse);
   });
 
   test('navigation completion waits until the destination is reached', () {
-    expect(navoraIsWithinNavigationCompletionRadius(35), isTrue);
-    expect(navoraIsWithinNavigationCompletionRadius(35.1), isFalse);
+    expect(navoraIsWithinNavigationCompletionRadius(60), isTrue);
+    expect(navoraIsWithinNavigationCompletionRadius(60.1), isFalse);
     expect(navoraIsWithinNavigationCompletionRadius(double.infinity), isFalse);
   });
 

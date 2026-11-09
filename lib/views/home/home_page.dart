@@ -151,6 +151,28 @@ String navoraFormatNavigationDuration(
   return minutes == 0 ? '$hours sa' : '$hours sa $minutes dk';
 }
 
+double navoraScaleRemainingDurationSeconds({
+  required double durationSeconds,
+  required double remainingDistanceKm,
+  required double previousDistanceKm,
+}) {
+  if (!durationSeconds.isFinite ||
+      durationSeconds < 0 ||
+      !remainingDistanceKm.isFinite ||
+      remainingDistanceKm < 0 ||
+      !previousDistanceKm.isFinite ||
+      previousDistanceKm <= 0) {
+    return durationSeconds;
+  }
+  return durationSeconds *
+      (remainingDistanceKm / previousDistanceKm).clamp(0.0, 1.0);
+}
+
+int navoraDurationMinutesFromSeconds(double durationSeconds) =>
+    !durationSeconds.isFinite || durationSeconds <= 0
+    ? 0
+    : (durationSeconds / 60).ceil();
+
 String? navoraFormatArrivalTime(DateTime now, int? durationMinutes) {
   if (durationMinutes == null || durationMinutes < 0) return null;
   final arrival = now.add(Duration(minutes: durationMinutes)).toLocal();
@@ -202,13 +224,13 @@ double navoraOffRouteThresholdMeters({
   required double accuracyMeters,
 }) {
   final vehicleThreshold = switch (vehicle) {
-    'Yürüyüş' => 30.0,
-    'Bisiklet' => 45.0,
-    'Motosiklet' => 65.0,
-    _ => 80.0,
+    'Yürüyüş' => 20.0,
+    'Bisiklet' => 30.0,
+    'Motosiklet' => 45.0,
+    _ => 55.0,
   };
   final accuracyAllowance = accuracyMeters.isFinite && accuracyMeters > 0
-      ? (accuracyMeters * 1.5).clamp(0.0, 45.0)
+      ? (accuracyMeters * 0.5).clamp(0.0, 25.0)
       : 0.0;
   return vehicleThreshold + accuracyAllowance;
 }
@@ -292,10 +314,10 @@ bool navoraHasReliableNavigationPosition(double accuracyMeters) =>
     accuracyMeters.isFinite && accuracyMeters >= 0 && accuracyMeters <= 50;
 
 bool navoraIsWithinArrivalRadius(double distanceMeters) =>
-    distanceMeters.isFinite && distanceMeters <= 100;
+    distanceMeters.isFinite && distanceMeters <= 300;
 
 bool navoraIsWithinNavigationCompletionRadius(double distanceMeters) =>
-    distanceMeters.isFinite && distanceMeters <= 35;
+    distanceMeters.isFinite && distanceMeters <= 60;
 
 bool navoraHasCompletedRouteProgress({
   required double traveledDistanceKm,
@@ -698,12 +720,12 @@ class _HomePageState extends State<HomePage> {
   List<Map<String, dynamic>> _navigationSteps = [];
   double? _navigationDistanceKm;
   int? _navigationDurationMinutes;
+  double? _navigationDurationSeconds;
   bool _isNavigationActive = false;
   bool _isOpeningDirections = false;
   bool _isMapTilted = false;
   bool _isFollowingCurrentPosition = true;
   bool _isProgrammaticCameraMove = false;
-  bool _isNavigationCameraUpdateInFlight = false;
   geo.Position? _pendingNavigationCameraPosition;
   double? _smoothedVehicleHeading;
   final Set<int> _activeMapPointers = {};
@@ -734,6 +756,7 @@ class _HomePageState extends State<HomePage> {
   double? _gravityZ;
   sensors.MagnetometerEvent? _magneticField;
   Timer? _compassCameraUpdateTimer;
+  Timer? _navigationCameraUpdateTimer;
   Timer? _navigationConnectivityTimer;
   String? _activeNavigationTitle;
   String? _activeNavigationDestination;
@@ -3150,12 +3173,18 @@ class _HomePageState extends State<HomePage> {
               ),
             ];
             if (previousDistanceKm != null && previousDistanceKm > 0) {
-              final remainingRatio = (remainingDistanceKm / previousDistanceKm)
-                  .clamp(0.0, 1.0);
               _navigationDistanceKm = remainingDistanceKm;
-              if (_navigationDurationMinutes != null) {
-                _navigationDurationMinutes =
-                    (_navigationDurationMinutes! * remainingRatio).ceil();
+              final previousDurationSeconds = _navigationDurationSeconds;
+              if (previousDurationSeconds != null) {
+                _navigationDurationSeconds =
+                    navoraScaleRemainingDurationSeconds(
+                      durationSeconds: previousDurationSeconds,
+                      remainingDistanceKm: remainingDistanceKm,
+                      previousDistanceKm: previousDistanceKm,
+                    );
+                _navigationDurationMinutes = navoraDurationMinutesFromSeconds(
+                  _navigationDurationSeconds!,
+                );
               }
             }
           });
@@ -3238,17 +3267,9 @@ class _HomePageState extends State<HomePage> {
       );
       final trafficPolylines =
           selectedRoute['trafficPolylines'] as List<Polyline>? ?? const [];
-      final refreshedDistanceKm =
-          (selectedRoute['distanceKm'] as num?)?.toDouble() ??
-          navoraRouteLengthKm(routePoints);
       final remainingDistanceKm = navoraRouteLengthKm(remainingRoute);
       final refreshedDurationMinutes = selectedRoute['durationMinutes'] as int;
-      final remainingDurationMinutes = refreshedDistanceKm > 0
-          ? (refreshedDurationMinutes *
-                    (remainingDistanceKm / refreshedDistanceKm).clamp(0.0, 1.0))
-                .ceil()
-                .clamp(1, refreshedDurationMinutes)
-          : refreshedDurationMinutes;
+      final refreshedDurationSeconds = refreshedDurationMinutes * 60.0;
       setState(() {
         _navigationTrafficPolylines = trafficPolylines;
         _alternativeRoutePolylines = const [];
@@ -3265,11 +3286,25 @@ class _HomePageState extends State<HomePage> {
         );
         _navigationStepIndex = 0;
         _navigationDistanceKm = remainingDistanceKm;
-        _navigationDurationMinutes = remainingDurationMinutes;
+        _navigationDurationSeconds = refreshedDurationSeconds;
+        _navigationDurationMinutes = navoraDurationMinutesFromSeconds(
+          refreshedDurationSeconds,
+        );
         _isOffRoute = false;
         _offRouteReadings = 0;
         _hasShownRouteUpdateError = false;
       });
+      final cameraPosition = latestPosition ?? _currentPosition;
+      if (cameraPosition != null &&
+          _isFollowingCurrentPosition &&
+          navoraShouldFollowCurrentPosition(
+            isNavigationActive: _isNavigationActive,
+            isDriveTracking: _isDriveTracking,
+            isLocationTracking: _isLocationTracking,
+            isFollowing: _isFollowingCurrentPosition,
+          )) {
+        unawaited(_centerOnPosition(cameraPosition));
+      }
       unawaited(_speakNavigation('Yeni rota hazır. Yolunu takip et.'));
     } catch (error) {
       debugPrint('Canlı rota güncellenemedi: $error');
@@ -4019,6 +4054,7 @@ class _HomePageState extends State<HomePage> {
     _navigationStepIndex = 0;
     _navigationDistanceKm = null;
     _navigationDurationMinutes = null;
+    _navigationDurationSeconds = null;
     _isNavigationActive = false;
     _isMapTilted = false;
     _isFollowingCurrentPosition = true;
@@ -4031,6 +4067,9 @@ class _HomePageState extends State<HomePage> {
     _isCheckingNavigationNetwork = false;
     _navigationConnectivityTimer?.cancel();
     _navigationConnectivityTimer = null;
+    _navigationCameraUpdateTimer?.cancel();
+    _navigationCameraUpdateTimer = null;
+    _pendingNavigationCameraPosition = null;
     _lastFasterRouteCheckAt = null;
     _fasterAlternativeRoute = null;
     _fasterRouteMinutesSaved = null;
@@ -4731,7 +4770,7 @@ out center tags;
     if (shouldPersistSelectedVehicle) {
       unawaited(_persistSelectedVehicle());
     }
-    await _fitMapToPoints([start, destination]);
+    await _fitMapToPoints(selectedRoute['points'] as List<LatLng>);
     if (!mounted) {
       _isOpeningDirections = false;
       return;
@@ -4770,6 +4809,7 @@ out center tags;
               selectedTravelMode,
               start,
             );
+            unawaited(_fitMapToPoints(selectedRoute['points'] as List<LatLng>));
           }
 
           Future<void> updateRouteOptions(String vehicle) async {
@@ -4809,7 +4849,7 @@ out center tags;
                 start,
               );
               unawaited(_persistSelectedVehicle());
-              await _fitMapToPoints([start, destination]);
+              await _fitMapToPoints(selectedRoute['points'] as List<LatLng>);
             } catch (error) {
               debugPrint('Rota tercihleri için rota alınamadı: $error');
               if (mounted) {
@@ -5407,6 +5447,7 @@ out center tags;
       _navigationStepIndex = 0;
       _navigationDistanceKm = selectedRoute['distanceKm'] as double;
       _navigationDurationMinutes = selectedRoute['durationMinutes'] as int;
+      _navigationDurationSeconds = _navigationDurationMinutes! * 60.0;
     });
   }
 
@@ -8446,6 +8487,7 @@ out center tags;
     _sosContactsSubscription?.cancel();
     _roomExpiryTimer?.cancel();
     _navigationConnectivityTimer?.cancel();
+    _navigationCameraUpdateTimer?.cancel();
     _positionSubscription?.cancel();
     _locationPositionSubscription?.cancel();
     _accelerometerSubscription?.cancel();
@@ -11155,9 +11197,8 @@ out center tags;
     Map<String, dynamic> place, {
     required VoidCallback onListingChanged,
   }) {
-    final photoUrls = (place['photo_urls'] as List?)
-            ?.whereType<String>()
-            .toList() ??
+    final photoUrls =
+        (place['photo_urls'] as List?)?.whereType<String>().toList() ??
         (place['photo_url']?.toString().isNotEmpty == true
             ? [place['photo_url'].toString()]
             : <String>[]);
@@ -11193,14 +11234,15 @@ out center tags;
                     width: 76,
                     height: 68,
                     fit: BoxFit.cover,
-                    errorBuilder: (context, error, stackTrace) => const SizedBox(
-                      width: 76,
-                      height: 68,
-                      child: Icon(
-                        Icons.broken_image_outlined,
-                        color: Color(0xFFB8B8B8),
-                      ),
-                    ),
+                    errorBuilder: (context, error, stackTrace) =>
+                        const SizedBox(
+                          width: 76,
+                          height: 68,
+                          child: Icon(
+                            Icons.broken_image_outlined,
+                            color: Color(0xFFB8B8B8),
+                          ),
+                        ),
                   ),
           ),
           const SizedBox(width: 11),
@@ -11242,10 +11284,7 @@ out center tags;
             tooltip: 'Mekânı sil',
             visualDensity: VisualDensity.compact,
             onPressed: () => unawaited(
-              _confirmDeleteCommunityPlace(
-                place,
-                onDeleted: onListingChanged,
-              ),
+              _confirmDeleteCommunityPlace(place, onDeleted: onListingChanged),
             ),
             icon: const Icon(Icons.delete_outline_rounded),
             color: const Color(0xFFE57373),
@@ -11341,9 +11380,8 @@ out center tags;
         .collection('community_places')
         .doc(placeId);
     try {
-      final photoUrls = (place['photo_urls'] as List?)
-              ?.whereType<String>()
-              .toList() ??
+      final photoUrls =
+          (place['photo_urls'] as List?)?.whereType<String>().toList() ??
           <String>[];
       final paths = <String>[
         ...List.generate(
@@ -11378,7 +11416,8 @@ out center tags;
       }
     } catch (error, stackTrace) {
       debugPrint('Topluluk mekânı silinemedi: $error\n$stackTrace');
-      if (mounted) AppNotificationService.show('Mekân silinemedi. Tekrar dene.');
+      if (mounted)
+        AppNotificationService.show('Mekân silinemedi. Tekrar dene.');
     }
   }
 
@@ -13423,7 +13462,7 @@ out center tags;
       _positionSubscription = geo.Geolocator.getPositionStream(
         locationSettings: const geo.LocationSettings(
           accuracy: geo.LocationAccuracy.high,
-          distanceFilter: 2,
+          distanceFilter: 5,
         ),
       ).listen(_handleDrivePosition);
       if (!mounted) return;
@@ -13712,9 +13751,13 @@ out center tags;
       _navigationStepIndex = 0;
       _navigationDistanceKm = route['distanceKm'] as double;
       _navigationDurationMinutes = route['durationMinutes'] as int;
+      _navigationDurationSeconds = _navigationDurationMinutes! * 60.0;
       _fasterAlternativeRoute = null;
       _fasterRouteMinutesSaved = null;
     });
+    if (_isFollowingCurrentPosition) {
+      unawaited(_centerOnPosition(position));
+    }
     unawaited(_speakNavigation('Daha hızlı alternatif rotaya geçildi.'));
   }
 
@@ -13740,6 +13783,11 @@ out center tags;
     }
 
     _isCompletingNavigation = true;
+    setState(() {
+      _navigationDistanceKm = 0;
+      _navigationDurationSeconds = 0;
+      _navigationDurationMinutes = 0;
+    });
     _showTrackingMessage('Varış noktanıza ulaştınız. Navigasyon tamamlandı.');
     await _stopDriveTracking(
       navigationCompleted: true,
@@ -14105,95 +14153,83 @@ out center tags;
       _hasMapBearing = true;
     }
 
-    if (_isNavigationActive) {
-      if (_isNavigationCameraUpdateInFlight) {
-        _pendingNavigationCameraPosition = position;
-        return;
-      }
-
-      final currentPosition = LatLng(position.latitude, position.longitude);
-      final lookAheadMeters = (position.speed * 4).clamp(45.0, 180.0);
-      final nextStepIndex = _navigationSteps.isEmpty
-          ? 0
-          : _navigationStepIndex.clamp(0, _navigationSteps.length - 1);
-      final distanceToManeuver = _distanceFromPositionToStep(
-        position,
-        _navigationSteps.isEmpty ? null : _navigationSteps[nextStepIndex],
-      );
-      final maneuverZoom = navoraNavigationZoomForSpeedAndManeuver(
-        distanceToManeuver,
-        position.speed,
-      );
-      final cameraTarget = navoraOffsetCameraTarget(
-        currentPosition,
-        _mapBearing,
-        lookAheadMeters.toDouble(),
-      );
-      _isNavigationCameraUpdateInFlight = true;
-      _isProgrammaticCameraMove = true;
-      try {
-        await controller.animateCamera(
-          CameraUpdate.newCameraPosition(
-            CameraPosition(
-              target: cameraTarget,
-              zoom: maneuverZoom,
-              bearing: _mapBearing,
-              tilt: !_isMapTilted
-                  ? 0
-                  : distanceToManeuver != null && distanceToManeuver <= 150
-                  ? 48
-                  : 60,
-            ),
-          ),
-        );
-      } finally {
-        _isNavigationCameraUpdateInFlight = false;
-        _isProgrammaticCameraMove = false;
-        final pendingPosition = _pendingNavigationCameraPosition;
-        _pendingNavigationCameraPosition = null;
-        if (pendingPosition != null &&
-            mounted &&
-            navoraShouldFollowCurrentPosition(
-              isNavigationActive: _isNavigationActive,
-              isDriveTracking: _isDriveTracking,
-              isLocationTracking: _isLocationTracking,
-              isFollowing: _isFollowingCurrentPosition,
-            )) {
-          final movementMeters = geo.Geolocator.distanceBetween(
-            position.latitude,
-            position.longitude,
-            pendingPosition.latitude,
-            pendingPosition.longitude,
-          );
-          if (movementMeters >= 0.5) {
-            unawaited(_centerOnPosition(pendingPosition));
+    if (_isNavigationActive || _isDriveTracking || _isLocationTracking) {
+      _pendingNavigationCameraPosition = position;
+      if (_navigationCameraUpdateTimer != null) return;
+      _navigationCameraUpdateTimer = Timer(
+        const Duration(milliseconds: 500),
+        () {
+          _navigationCameraUpdateTimer = null;
+          final latestPosition = _pendingNavigationCameraPosition;
+          _pendingNavigationCameraPosition = null;
+          if (!mounted ||
+              latestPosition == null ||
+              !navoraShouldFollowCurrentPosition(
+                isNavigationActive: _isNavigationActive,
+                isDriveTracking: _isDriveTracking,
+                isLocationTracking: _isLocationTracking,
+                isFollowing: _isFollowingCurrentPosition,
+              )) {
+            return;
           }
-        }
-      }
-      return;
-    }
-
-    if (_isDriveTracking || _isLocationTracking) {
-      _isProgrammaticCameraMove = true;
-      try {
-        await controller.animateCamera(
-          CameraUpdate.newCameraPosition(
-            CameraPosition(
-              target: LatLng(position.latitude, position.longitude),
-              zoom: 16,
-              bearing: _hasMapBearing ? _mapBearing : 0,
-            ),
-          ),
-        );
-      } finally {
-        _isProgrammaticCameraMove = false;
-      }
+          unawaited(_animateNavigationCamera(latestPosition));
+        },
+      );
       return;
     }
 
     _isProgrammaticCameraMove = true;
     try {
       await _moveMapTo(LatLng(position.latitude, position.longitude), 16);
+    } finally {
+      _isProgrammaticCameraMove = false;
+    }
+  }
+
+  Future<void> _animateNavigationCamera(geo.Position position) async {
+    final controller = _mapController;
+    if (controller == null) return;
+
+    final currentPosition = LatLng(position.latitude, position.longitude);
+    final isNavigating = _isNavigationActive;
+    final lookAheadMeters = (position.speed * 4).clamp(45.0, 180.0);
+    final nextStepIndex = _navigationSteps.isEmpty
+        ? 0
+        : _navigationStepIndex.clamp(0, _navigationSteps.length - 1);
+    final distanceToManeuver = _distanceFromPositionToStep(
+      position,
+      _navigationSteps.isEmpty ? null : _navigationSteps[nextStepIndex],
+    );
+    final maneuverZoom = isNavigating
+        ? navoraNavigationZoomForSpeedAndManeuver(
+            distanceToManeuver,
+            position.speed,
+          )
+        : 16.0;
+    final cameraTarget = isNavigating
+        ? navoraOffsetCameraTarget(
+            currentPosition,
+            _mapBearing,
+            lookAheadMeters.toDouble(),
+          )
+        : currentPosition;
+    _isProgrammaticCameraMove = true;
+    try {
+      await controller.animateCamera(
+        CameraUpdate.newCameraPosition(
+          CameraPosition(
+            target: cameraTarget,
+            zoom: maneuverZoom,
+            bearing: _mapBearing,
+            tilt: !isNavigating || !_isMapTilted
+                ? 0
+                : distanceToManeuver != null && distanceToManeuver <= 150
+                ? 48
+                : 60,
+          ),
+        ),
+        duration: const Duration(milliseconds: 500),
+      );
     } finally {
       _isProgrammaticCameraMove = false;
     }
