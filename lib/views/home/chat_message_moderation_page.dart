@@ -14,8 +14,72 @@ class ChatMessageModerationPage extends StatefulWidget {
 }
 
 class _ChatMessageModerationPageState extends State<ChatMessageModerationPage> {
+  static const int _reportPageSize = 100;
+
   final Set<String> _processingReports = {};
+  final List<QueryDocumentSnapshot<Map<String, dynamic>>> _additionalReports =
+      [];
   int _selectedQueue = 0;
+  int _queueGeneration = 0;
+  QueryDocumentSnapshot<Map<String, dynamic>>? _nextReportsCursor;
+  bool _hasLoadedAdditionalPage = false;
+  bool _hasMoreAdditionalReports = false;
+  bool _loadingMoreReports = false;
+
+  void _selectQueue(int queue) {
+    setState(() {
+      _queueGeneration++;
+      _selectedQueue = queue;
+      _additionalReports.clear();
+      _nextReportsCursor = null;
+      _hasLoadedAdditionalPage = false;
+      _hasMoreAdditionalReports = false;
+      _loadingMoreReports = false;
+    });
+  }
+
+  Future<void> _loadMoreReports({
+    required int queue,
+    required int queueGeneration,
+    required QueryDocumentSnapshot<Map<String, dynamic>> cursor,
+  }) async {
+    setState(() => _loadingMoreReports = true);
+    try {
+      final snapshot = await FirebaseFirestore.instance
+          .collection(queue == 0 ? 'chat_message_reports' : 'content_reports')
+          .where('status', isEqualTo: 'open')
+          .orderBy('created_at')
+          .startAfterDocument(cursor)
+          .limit(_reportPageSize + 1)
+          .get();
+      if (!mounted ||
+          _selectedQueue != queue ||
+          _queueGeneration != queueGeneration) {
+        return;
+      }
+
+      final reports = snapshot.docs.take(_reportPageSize).toList();
+      setState(() {
+        _additionalReports.addAll(reports);
+        _nextReportsCursor = reports.isEmpty ? null : reports.last;
+        _hasLoadedAdditionalPage = true;
+        _hasMoreAdditionalReports = snapshot.docs.length > _reportPageSize;
+      });
+    } on FirebaseException catch (error) {
+      debugPrint('Sonraki şikayet sayfası yüklenemedi: $error');
+      if (mounted &&
+          _selectedQueue == queue &&
+          _queueGeneration == queueGeneration) {
+        AppNotificationService.show('Şikayetler yüklenemedi. Tekrar deneyin.');
+      }
+    } finally {
+      if (mounted &&
+          _selectedQueue == queue &&
+          _queueGeneration == queueGeneration) {
+        setState(() => _loadingMoreReports = false);
+      }
+    }
+  }
 
   Future<void> _reviewReport({
     required QueryDocumentSnapshot<Map<String, dynamic>> report,
@@ -92,6 +156,9 @@ class _ChatMessageModerationPageState extends State<ChatMessageModerationPage> {
           .call({'reportId': report.id, 'action': action});
 
       if (mounted) {
+        setState(() {
+          _additionalReports.removeWhere((item) => item.id == report.id);
+        });
         final cleanupFailed =
             isContentReport &&
             result.data is Map &&
@@ -227,13 +294,13 @@ class _ChatMessageModerationPageState extends State<ChatMessageModerationPage> {
                 ChoiceChip(
                   label: const Text('Sohbet'),
                   selected: _selectedQueue == 0,
-                  onSelected: (_) => setState(() => _selectedQueue = 0),
+                  onSelected: (_) => _selectQueue(0),
                 ),
                 const SizedBox(width: 8),
                 ChoiceChip(
                   label: const Text('İlan ve mekân'),
                   selected: _selectedQueue == 1,
-                  onSelected: (_) => setState(() => _selectedQueue = 1),
+                  onSelected: (_) => _selectQueue(1),
                 ),
               ],
             ),
@@ -248,7 +315,7 @@ class _ChatMessageModerationPageState extends State<ChatMessageModerationPage> {
                   )
                   .where('status', isEqualTo: 'open')
                   .orderBy('created_at')
-                  .limit(100)
+                  .limit(_reportPageSize + 1)
                   .snapshots(),
               builder: (context, snapshot) {
                 if (snapshot.hasError) {
@@ -288,7 +355,10 @@ class _ChatMessageModerationPageState extends State<ChatMessageModerationPage> {
                     child: CircularProgressIndicator(color: Color(0xFFFF7A00)),
                   );
                 }
-                final reports = snapshot.data!.docs;
+                final firstPageReports = snapshot.data!.docs
+                    .take(_reportPageSize)
+                    .toList();
+                final reports = [...firstPageReports, ..._additionalReports];
                 if (reports.isEmpty) {
                   return Center(
                     child: Column(
@@ -315,8 +385,7 @@ class _ChatMessageModerationPageState extends State<ChatMessageModerationPage> {
                   padding: const EdgeInsets.all(16),
                   children: [
                     Text(
-                      '${reports.length} açık şikayet'
-                      '${reports.length == 100 ? ' (en fazla 100 gösteriliyor)' : ''}',
+                      '${reports.length} açık şikayet',
                       style: const TextStyle(
                         color: Color(0xFFB8B8B8),
                         fontWeight: FontWeight.w700,
@@ -478,6 +547,34 @@ class _ChatMessageModerationPageState extends State<ChatMessageModerationPage> {
                         ),
                       );
                     }),
+                    if (!_hasLoadedAdditionalPage
+                        ? snapshot.data!.docs.length > _reportPageSize
+                        : _hasMoreAdditionalReports)
+                      Center(
+                        child: Padding(
+                          padding: const EdgeInsets.only(top: 4, bottom: 12),
+                          child: OutlinedButton(
+                            onPressed: _loadingMoreReports
+                                ? null
+                                : () => _loadMoreReports(
+                                    queue: _selectedQueue,
+                                    queueGeneration: _queueGeneration,
+                                    cursor:
+                                        _nextReportsCursor ??
+                                        firstPageReports.last,
+                                  ),
+                            child: _loadingMoreReports
+                                ? const SizedBox(
+                                    width: 18,
+                                    height: 18,
+                                    child: CircularProgressIndicator(
+                                      strokeWidth: 2,
+                                    ),
+                                  )
+                                : const Text('Daha fazla yükle'),
+                          ),
+                        ),
+                      ),
                   ],
                 );
               },
