@@ -67,14 +67,29 @@ service cloud.firestore {
               && get(/databases/$(database)/documents/chat_rooms/$(data.room_id)/messages/$(data.message_id)).data.text == data.text);
     }
 
+    function validContentReportTarget(data) {
+      return (data.content_type == 'property_listing'
+              && exists(/databases/$(database)/documents/property_listings/$(data.content_id))
+              && get(/databases/$(database)/documents/property_listings/$(data.content_id)).data.status == 'active'
+              && get(/databases/$(database)/documents/property_listings/$(data.content_id)).data.owner_uid == data.content_owner_uid
+              && get(/databases/$(database)/documents/property_listings/$(data.content_id)).data.title == data.content_title
+              && get(/databases/$(database)/documents/property_listings/$(data.content_id)).data.description == data.content_description)
+          || (data.content_type == 'lost_pet'
+              && exists(/databases/$(database)/documents/lost_pet_reports/$(data.content_id))
+              && get(/databases/$(database)/documents/lost_pet_reports/$(data.content_id)).data.status == 'active'
+              && get(/databases/$(database)/documents/lost_pet_reports/$(data.content_id)).data.owner_uid == data.content_owner_uid
+              && get(/databases/$(database)/documents/lost_pet_reports/$(data.content_id)).data.pet_name == data.content_title
+              && get(/databases/$(database)/documents/lost_pet_reports/$(data.content_id)).data.description == data.content_description)
+          || (data.content_type == 'community_place'
+              && exists(/databases/$(database)/documents/community_places/$(data.content_id))
+              && get(/databases/$(database)/documents/community_places/$(data.content_id)).data.owner_uid == data.content_owner_uid
+              && get(/databases/$(database)/documents/community_places/$(data.content_id)).data.name == data.content_title
+              && get(/databases/$(database)/documents/community_places/$(data.content_id)).data.description == data.content_description);
+    }
+
     function serverManagedProfileFieldsUnchanged() {
       return unchangedIfPresent('is_pro')
           && unchangedIfPresent('plan')
-          && unchangedIfPresent('navora_points')
-          && unchangedIfPresent('points_version')
-          && unchangedIfPresent('bonus_chat_rooms')
-          && unchangedIfPresent('bonus_ai_queries')
-          && unchangedIfPresent('pro_discount_unlocked')
           && unchangedIfPresent('daily_quota_date')
           && unchangedIfPresent('daily_rooms_created')
           && unchangedIfPresent('daily_ai_queries_used');
@@ -96,19 +111,15 @@ service cloud.firestore {
         'gender', 'bio', 'selected_vehicle', 'vehicle_brand_model',
         'vehicle_km', 'monthly_driving_analytics', 'explore_preferences',
         'created_at', 'updated_at',
-        'is_pro', 'plan', 'navora_points', 'daily_quota_date',
-        'daily_rooms_created', 'daily_ai_queries_used', 'visited_cities',
-        'bonus_chat_rooms', 'bonus_ai_queries', 'pro_discount_unlocked',
-        'points_version'
+        'is_pro', 'plan', 'daily_quota_date',
+        'daily_rooms_created', 'daily_ai_queries_used', 'visited_cities'
       ];
     }
 
     function noClientManagedProfileFields(data) {
       return !data.keys().hasAny([
-        'is_pro', 'plan', 'navora_points', 'daily_quota_date',
-        'daily_rooms_created', 'daily_ai_queries_used',
-        'bonus_chat_rooms', 'bonus_ai_queries', 'pro_discount_unlocked',
-        'points_version'
+        'is_pro', 'plan', 'daily_quota_date', 'daily_rooms_created',
+        'daily_ai_queries_used'
       ]);
     }
 
@@ -161,7 +172,7 @@ service cloud.firestore {
           data.gender_preference == null ||
           (data.gender_preference is string &&
            data.gender_preference in [
-             'Kadin', 'Erkek', 'Belirtmek istemiyorum'
+             'Kadin', 'Kadın', 'Erkek', 'Belirtmek istemiyorum'
            ]))
         && (!('gender' in data) || data.gender == null ||
           (data.gender is string && data.gender.size() <= 40))
@@ -177,18 +188,6 @@ service cloud.firestore {
           validExplorePreferences(data.explore_preferences))
         && (!('is_pro' in data) || data.is_pro is bool)
         && (!('plan' in data) || data.plan in ['standard', 'pro'])
-        && (!('navora_points' in data) ||
-          (data.navora_points is int && data.navora_points >= 0 &&
-           data.navora_points <= 10000000))
-        && (!('points_version' in data) || data.points_version == 1)
-        && (!('bonus_chat_rooms' in data) ||
-          (data.bonus_chat_rooms is int && data.bonus_chat_rooms >= 0 &&
-           data.bonus_chat_rooms <= 1000))
-        && (!('bonus_ai_queries' in data) ||
-          (data.bonus_ai_queries is int && data.bonus_ai_queries >= 0 &&
-           data.bonus_ai_queries <= 1000))
-        && (!('pro_discount_unlocked' in data) ||
-          data.pro_discount_unlocked is bool)
         && (!('daily_quota_date' in data) ||
           (data.daily_quota_date is string &&
            data.daily_quota_date.matches('^\\d{4}-\\d{2}-\\d{2}$')))
@@ -211,6 +210,16 @@ service cloud.firestore {
 
     function validOwnedDocument(data) {
       return data.keys().size() <= 40;
+    }
+
+    function validBlockedUser(data) {
+      return data.keys().hasOnly(['display_name', 'blocked_at'])
+          && data.keys().hasAll(['display_name', 'blocked_at'])
+          && data.display_name is string
+          && data.display_name.size() > 0
+          && data.display_name.size() <= 120
+          && data.blocked_at is timestamp
+          && data.blocked_at == request.time;
     }
 
     function validDrivingHistory(data) {
@@ -458,20 +467,33 @@ service cloud.firestore {
           && serverManagedProfileFieldsUnchanged();
       allow delete: if isUser(uid);
 
+      match /blocked_users/{blockedUid} {
+        allow read: if isUser(uid);
+        allow create: if isUser(uid)
+            && blockedUid != uid
+            && validBlockedUser(request.resource.data);
+        allow update: if false;
+        allow delete: if isUser(uid) && blockedUid != uid;
+      }
+
       match /{subcollection}/{documentId} {
         allow read: if isUser(uid)
             && subcollection != 'quota_reservations'
+            && subcollection != 'point_ledger'
             && subcollection != 'room_join_attempts';
         allow create: if isUser(uid)
+            && subcollection != 'blocked_users'
             && !isServerManagedUserSubcollection(subcollection)
             && validOwnedDocument(request.resource.data)
             && (subcollection != 'driving_history'
                 || validDrivingHistory(request.resource.data));
         allow update: if isUser(uid)
+            && subcollection != 'blocked_users'
             && !isServerManagedUserSubcollection(subcollection)
             && subcollection != 'driving_history'
             && validOwnedDocument(request.resource.data);
         allow delete: if isUser(uid)
+            && subcollection != 'blocked_users'
             && !isServerManagedUserSubcollection(subcollection);
       }
     }
@@ -676,9 +698,8 @@ service cloud.firestore {
           && (
             (request.resource.data.diff(resource.data).affectedKeys().hasOnly([
                 'pet_type', 'pet_name', 'description', 'city', 'district',
-                'address', 'latitude', 'longitude', 'contact_phone',
-                'contact_phone_shared', 'photo_urls', 'cover_image_url',
-                'updated_at'
+                'address', 'latitude', 'longitude', 'photo_urls',
+                'cover_image_url', 'updated_at'
               ])
               && request.resource.data.status == 'active')
             ||
@@ -796,8 +817,7 @@ service cloud.firestore {
             (request.resource.data.diff(resource.data).affectedKeys().hasOnly([
                 'pet_type', 'pet_name', 'description', 'city', 'district',
                 'address', 'latitude', 'longitude', 'last_seen_at',
-                'contact_phone', 'contact_phone_shared', 'photo_urls',
-                'cover_image_url', 'updated_at'
+                'photo_urls', 'cover_image_url', 'updated_at'
               ])
               && request.resource.data.status == 'active'
               && validLostPetReport(request.resource.data, resource.data.owner_uid)
@@ -1084,6 +1104,54 @@ service cloud.firestore {
           && request.resource.data.created_at == request.time
           && request.resource.data.status == 'open'
           && validChatMessageReportTarget(request.resource.data);
+      allow read: if isChatAdmin();
+      allow update: if isChatAdmin()
+          && resource.data.status == 'open'
+          && request.resource.data.diff(resource.data).affectedKeys().hasOnly([
+            'status', 'reviewed_by', 'reviewed_at'
+          ])
+          && request.resource.data.status in ['resolved', 'dismissed']
+          && request.resource.data.reviewed_by == request.auth.uid
+          && request.resource.data.reviewed_at == request.time;
+      allow delete: if false;
+    }
+
+    match /content_reports/{reportId} {
+      allow create: if signedIn()
+          && request.resource.data.reported_by == request.auth.uid
+          && request.resource.data.content_owner_uid != request.auth.uid
+          && request.resource.data.keys().hasOnly([
+            'content_type', 'content_id', 'content_owner_uid', 'content_title',
+            'content_description', 'reason', 'reported_by', 'created_at',
+            'status'
+          ])
+          && request.resource.data.keys().hasAll([
+            'content_type', 'content_id', 'content_owner_uid', 'content_title',
+            'content_description', 'reason', 'reported_by', 'created_at',
+            'status'
+          ])
+          && request.resource.data.content_type in [
+            'property_listing', 'lost_pet', 'community_place'
+          ]
+          && request.resource.data.content_id is string
+          && request.resource.data.content_id.matches('^[A-Za-z0-9_-]{1,128}$')
+          && request.resource.data.content_owner_uid is string
+          && request.resource.data.content_owner_uid.size() > 0
+          && request.resource.data.content_owner_uid.size() <= 128
+          && request.resource.data.content_title is string
+          && (request.resource.data.content_title.size() > 0
+              || request.resource.data.content_type == 'lost_pet')
+          && request.resource.data.content_title.size() <= 100
+          && request.resource.data.content_description is string
+          && request.resource.data.content_description.size() <= 1000
+          && request.resource.data.reason in [
+            'Yanıltıcı veya yanlış bilgi', 'Uygunsuz içerik',
+            'Spam veya tekrar eden ilan', 'Başka bir sorun'
+          ]
+          && request.resource.data.created_at is timestamp
+          && request.resource.data.created_at == request.time
+          && request.resource.data.status == 'open'
+          && validContentReportTarget(request.resource.data);
       allow read: if isChatAdmin();
       allow update: if isChatAdmin()
           && resource.data.status == 'open'

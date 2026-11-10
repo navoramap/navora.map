@@ -103,7 +103,7 @@ function buildMigrationPlan(document, now = Timestamp.now()) {
   if ('is_protected' in data && typeof data.is_protected !== 'boolean') {
     issues.push('invalid-protection-flag');
   }
-  if (isProtected && plaintextPassword.length < 12) {
+  if (isProtected && plaintextPassword.length < 6) {
     issues.push('protected-room-password-short-or-missing');
   }
   if (isProtected && plaintextPassword.length > 256) {

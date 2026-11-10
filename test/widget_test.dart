@@ -9,7 +9,9 @@ import 'package:firebase_core/firebase_core.dart';
 import 'package:firebase_core_platform_interface/test.dart'
     show CoreFirebaseOptions, CoreInitializeResponse, TestFirebaseCoreHostApi;
 import 'package:firebase_auth_platform_interface/firebase_auth_platform_interface.dart';
-import 'package:flutter/material.dart' show MaterialApp;
+import 'package:flutter/material.dart'
+    show MaterialApp, SnackBar, TargetPlatform, TextField;
+import 'package:flutter/foundation.dart' show defaultTargetPlatform;
 import 'package:flutter_test/flutter_test.dart';
 import 'package:google_maps_flutter/google_maps_flutter.dart';
 
@@ -32,8 +34,15 @@ void main() {
     await tester.pumpAndSettle();
 
     expect(find.text('NAVORA MAP'), findsOneWidget);
-    expect(find.text('Giris Yap'), findsNWidgets(2));
-    expect(find.text('Kayit Ol'), findsOneWidget);
+    expect(find.text('Giriş Yap'), findsNWidgets(2));
+    expect(find.text('Kayıt Ol'), findsOneWidget);
+    expect(
+      find.text('Apple ile devam et'),
+      defaultTargetPlatform == TargetPlatform.iOS ||
+              defaultTargetPlatform == TargetPlatform.macOS
+          ? findsOneWidget
+          : findsNothing,
+    );
   });
 
   testWidgets('validates empty authentication fields', (
@@ -42,11 +51,94 @@ void main() {
     await tester.pumpWidget(const NavoraMapApp());
     await tester.pumpAndSettle();
 
-    await tester.tap(find.text('Giris Yap').last);
+    await tester.tap(find.text('Giriş Yap').last);
     await tester.pump();
 
-    expect(find.text('Lütfen tüm alanları doldurun.'), findsOneWidget);
-    await tester.pump(const Duration(seconds: 4));
+    expect(
+      find.text('Lütfen e-posta adresinizi ve şifrenizi girin.'),
+      findsOneWidget,
+    );
+    expect(find.byType(SnackBar), findsNothing);
+  });
+
+  testWidgets('shows signup password mismatch in the form error area', (
+    WidgetTester tester,
+  ) async {
+    await tester.pumpWidget(const NavoraMapApp());
+    await tester.pumpAndSettle();
+
+    await tester.tap(find.text('Kayıt Ol').first);
+    await tester.pumpAndSettle();
+
+    await tester.enterText(find.byType(TextField).at(0), 'Test Kullanıcı');
+    await tester.enterText(find.byType(TextField).at(1), 'test@example.com');
+    await tester.enterText(find.byType(TextField).at(2), '05551234567');
+
+    final genderSelector = find.text('Seçiniz');
+    await tester.ensureVisible(genderSelector);
+    await tester.tap(genderSelector);
+    await tester.pumpAndSettle();
+    await tester.tap(find.text('Kadın').last);
+    await tester.pumpAndSettle();
+
+    await tester.enterText(find.byType(TextField).at(3), 'Abcdefghij');
+    await tester.enterText(find.byType(TextField).at(4), 'Abcdefghik');
+
+    final submitButton = find.text('Kayıt Ol').last;
+    await tester.ensureVisible(submitButton);
+    await tester.tap(submitButton);
+    await tester.pump();
+
+    final errorMessage = find.text('Şifreler eşleşmiyor.');
+    await tester.ensureVisible(errorMessage);
+    expect(errorMessage, findsOneWidget);
+    expect(find.byType(SnackBar), findsNothing);
+  });
+
+  testWidgets('requires a 10-character mixed-case signup password', (
+    WidgetTester tester,
+  ) async {
+    await tester.pumpWidget(const NavoraMapApp());
+    await tester.pumpAndSettle();
+
+    await tester.tap(find.text('Kayıt Ol').first);
+    await tester.pumpAndSettle();
+
+    final passwordField = find.byType(TextField).at(3);
+    await tester.ensureVisible(passwordField);
+    await tester.enterText(passwordField, 'abcdefghij');
+    await tester.pump();
+
+    expect(find.text('Şifre en az bir büyük harf içermeli.'), findsOneWidget);
+
+    await tester.enterText(passwordField, 'Abcdefghij');
+    await tester.pump();
+    expect(find.text('Şifre en az bir büyük harf içermeli.'), findsNothing);
+    expect(find.text('Şifre gücü: Güçlü'), findsOneWidget);
+
+    final termsButton = find.text('Sözleşmeyi incele');
+    final privacyButton = find.text('KVKK metnini incele');
+    final publicPrivacyButton = find.text('Web politikasını aç');
+    await tester.ensureVisible(termsButton);
+    await tester.ensureVisible(privacyButton);
+    await tester.ensureVisible(publicPrivacyButton);
+    expect(termsButton, findsOneWidget);
+    expect(privacyButton, findsOneWidget);
+    expect(publicPrivacyButton, findsOneWidget);
+    await tester.tap(termsButton);
+    await tester.pumpAndSettle();
+    expect(find.text('Kullanıcı Sözleşmesi'), findsOneWidget);
+    expect(
+      find.textContaining('çocukların güvenliğini tehlikeye atan'),
+      findsOneWidget,
+    );
+    expect(find.textContaining('hesabı kalıcı olarak kapatma'), findsOneWidget);
+    expect(
+      find.textContaining('uygulama içindeki şikâyet araçlarıyla'),
+      findsOneWidget,
+    );
+    await tester.tap(find.text('Kapat'));
+    await tester.pumpAndSettle();
   });
 
   testWidgets('shows membership upgrade flow in the profile page', (

@@ -40,6 +40,14 @@
         { "fieldPath": "status", "order": "ASCENDING" },
         { "fieldPath": "created_at", "order": "ASCENDING" }
       ]
+    },
+    {
+      "collectionGroup": "content_reports",
+      "queryScope": "COLLECTION",
+      "fields": [
+        { "fieldPath": "status", "order": "ASCENDING" },
+        { "fieldPath": "created_at", "order": "ASCENDING" }
+      ]
     }
   ],
   "fieldOverrides": []

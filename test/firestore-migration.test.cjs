@@ -72,7 +72,7 @@ test('plans schema v2 room/listing/member/message documents without plaintext se
 });
 
 test('blocks protected rooms with short passwords without exposing their contents', () => {
-  const secret = 'old-secret';
+  const secret = 'p4ss!';
   const plan = buildMigrationPlan(
     makeDocument(legacyRoom({ password: secret })),
     now,
@@ -82,6 +82,12 @@ test('blocks protected rooms with short passwords without exposing their content
   assert.ok(plan.issues.includes('protected-room-password-short-or-missing'));
   assert.equal(JSON.stringify(plan).includes(secret), false);
   assert.equal(JSON.stringify(plan).includes('Welcome'), false);
+
+  const sixCharacterPlan = buildMigrationPlan(
+    makeDocument(legacyRoom({ password: 'sixsix' })),
+    now,
+  );
+  assert.equal(sixCharacterPlan.status, 'ready');
 });
 
 test('blocks malformed coordinates, invalid messages, and expired rooms', () => {

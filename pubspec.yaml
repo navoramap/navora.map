@@ -49,6 +49,7 @@ flutter:
 
   assets:
     - assets/logo/navora_app_icon.svg
+    - assets/logo/google_g.svg
 
   # assets:
   #   - images/a_dot_burr.jpeg

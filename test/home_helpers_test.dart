@@ -126,6 +126,30 @@ void main() {
     expect(navoraClusterChatRooms(rooms, zoom: 15), hasLength(3));
   });
 
+  test('map items from different layers share the same cluster', () {
+    final items = [
+      {
+        'id': 'property-1',
+        'type': 'property',
+        'latitude': 41.0,
+        'longitude': 29.0,
+      },
+      {
+        'id': 'room-1',
+        'type': 'room',
+        'latitude': 41.0001,
+        'longitude': 29.0001,
+      },
+      {'id': 'pet-1', 'type': 'pet', 'latitude': 41.5, 'longitude': 29.5},
+    ];
+
+    final clusters = navoraClusterMapItems(items, zoom: 11);
+
+    expect(clusters, hasLength(2));
+    expect(clusters.map((cluster) => cluster.length).toSet(), contains(2));
+    expect(navoraClusterMapItems(items, zoom: 15), hasLength(3));
+  });
+
   test('slow or unavailable internet is flagged for navigation', () {
     expect(navoraIsNetworkDegraded(const Duration(seconds: 2), 204), isFalse);
     expect(navoraIsNetworkDegraded(const Duration(seconds: 4), 204), isTrue);
@@ -177,9 +201,16 @@ void main() {
   });
 
   test('navigation completion waits until the destination is reached', () {
-    expect(navoraIsWithinNavigationCompletionRadius(60), isTrue);
-    expect(navoraIsWithinNavigationCompletionRadius(60.1), isFalse);
+    expect(navoraIsWithinNavigationCompletionRadius(50), isTrue);
+    expect(navoraIsWithinNavigationCompletionRadius(50.1), isFalse);
     expect(navoraIsWithinNavigationCompletionRadius(double.infinity), isFalse);
+  });
+
+  test('nearby distances use meters below one kilometer', () {
+    expect(navoraFormatDistance(500), '500 m');
+    expect(navoraFormatDistance(999), '999 m');
+    expect(navoraFormatDistance(1000), '1.0 km');
+    expect(navoraFormatDistance(1500), '1.5 km');
   });
 
   test('route history requires arrival and measurable travel progress', () {
@@ -251,10 +282,7 @@ void main() {
         {'name': 'Konum sonucu', 'type': 'place'},
       ];
 
-      final filtered = navoraFilterMapSearchResults(
-        results,
-        category: 'Kafe',
-      );
+      final filtered = navoraFilterMapSearchResults(results, category: 'Kafe');
 
       expect(filtered.map((result) => result['name']), [
         'Yakın kafe',

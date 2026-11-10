@@ -17,7 +17,6 @@ const { deleteAllPublicChatMessages } = require('./public_chat_moderation');
 const {
   getDailyQuota,
   getDailyQuotaDate,
-  getDrivingPointAward,
   getQuotaReservationSource,
 } = require('./daily_quota_policy');
 const { getRetentionCutoffs } = require('./retention_policy');
@@ -43,14 +42,8 @@ setGlobalOptions({
 });
 
 const PAGE_SIZE = 100;
-const MAX_DAILY_EARNED_POINTS = 100;
 const QUOTA_RESERVATION_LIFETIME_MS = 10 * 60 * 1000;
 const PUBLIC_CALLABLE_OPTIONS = { invoker: 'public' };
-const REWARDS = {
-  room: { title: 'Ek sohbet odası', cost: 200, field: 'bonus_chat_rooms' },
-  ai: { title: 'Ek Navora AI sorusu', cost: 150, field: 'bonus_ai_queries' },
-  pro_discount: { title: 'Navora Pro indirimi', cost: 500, field: null },
-};
 
 function requireUser(request) {
   if (!request.auth) {
@@ -352,6 +345,104 @@ exports.reviewChatMessageReport = onCall(
     },
 );
 
+exports.reviewContentReport = onCall(
+    PUBLIC_CALLABLE_OPTIONS,
+    async (request) => {
+      const adminUid = requireChatAdmin(request);
+      const { reportId, action } = request.data ?? {};
+      if (
+        typeof reportId !== 'string' ||
+        !/^[A-Za-z0-9_-]{1,128}$/.test(reportId) ||
+        !['dismiss', 'delete'].includes(action)
+      ) {
+        throw new HttpsError('invalid-argument', 'Geçersiz şikayet işlemi.');
+      }
+
+      const db = getFirestore();
+      const reportReference = db.collection('content_reports').doc(reportId);
+      const logReference = db.collection('chat_admin_actions').doc();
+      let targetReference;
+      let storagePrefix;
+
+      await db.runTransaction(async (transaction) => {
+        const reportSnapshot = await transaction.get(reportReference);
+        if (!reportSnapshot.exists || reportSnapshot.data().status !== 'open') {
+          throw new HttpsError(
+              'failed-precondition',
+              'Şikayet artık açık değil.',
+          );
+        }
+
+        const report = reportSnapshot.data();
+        const collectionByType = {
+          property_listing: 'property_listings',
+          lost_pet: 'lost_pet_reports',
+          community_place: 'community_places',
+        };
+        const collectionName = collectionByType[report.content_type];
+        if (
+          !collectionName ||
+          typeof report.content_id !== 'string' ||
+          !/^[A-Za-z0-9_-]{1,128}$/.test(report.content_id) ||
+          typeof report.content_owner_uid !== 'string' ||
+          report.content_owner_uid.length === 0
+        ) {
+          throw new HttpsError(
+              'failed-precondition',
+              'Şikayette geçerli içerik bilgisi bulunamadı.',
+          );
+        }
+
+        targetReference = db.collection(collectionName).doc(report.content_id);
+        const targetSnapshot = await transaction.get(targetReference);
+        if (
+          !targetSnapshot.exists ||
+          targetSnapshot.data().owner_uid !== report.content_owner_uid
+        ) {
+          throw new HttpsError(
+              'not-found',
+              'Şikayet edilen içerik artık bulunamıyor.',
+          );
+        }
+
+        storagePrefix =
+          `${collectionName}/${report.content_owner_uid}/${report.content_id}/`;
+        if (action === 'delete') transaction.delete(targetReference);
+        transaction.update(reportReference, {
+          status: action === 'dismiss' ? 'dismissed' : 'resolved',
+          reviewed_by: adminUid,
+          reviewed_at: FieldValue.serverTimestamp(),
+        });
+        transaction.create(logReference, {
+          actor_uid: adminUid,
+          action: action === 'delete' ? 'content_deleted' : 'report_dismissed',
+          target_uid: report.content_owner_uid,
+          report_id: reportId,
+          content_type: report.content_type,
+          content_id: report.content_id,
+          created_at: FieldValue.serverTimestamp(),
+          expires_at: new Date(
+              Date.now() + CHAT_ADMIN_ACTION_RETENTION_MS,
+          ),
+        });
+      });
+
+      if (action === 'delete' && targetReference) {
+        await db.recursiveDelete(targetReference);
+        try {
+          await getStorage().bucket().deleteFiles({
+            prefix: storagePrefix,
+          });
+        } catch (error) {
+          console.error('Reported content storage cleanup failed:', error);
+          return { completed: true, storageCleanupFailed: true };
+        }
+      }
+
+      return { completed: true, storageCleanupFailed: false };
+    },
+);
+
 exports.getChatAdminActions = onCall(
     PUBLIC_CALLABLE_OPTIONS,
     async (request) => {
@@ -411,13 +502,11 @@ function safeCount(value) {
   return Number.isSafeInteger(value) && value >= 0 ? value : 0;
 }
 
-function quotaResult(usage, profile, date) {
+function quotaResult(usage, date) {
   return {
     date,
     rooms: safeCount(usage.rooms),
     ai: safeCount(usage.ai),
-    bonusChatRooms: safeCount(profile.bonus_chat_rooms),
-    bonusAiQueries: safeCount(profile.bonus_ai_queries),
   };
 }
 
@@ -613,18 +702,15 @@ exports.reserveDailyQuota = onCall(PUBLIC_CALLABLE_OPTIONS, async (request) => {
       throw new HttpsError('already-exists', 'Bu kota işlemi daha önce kullanıldı.');
     }
 
-    const profile = profileSnapshot.data();
     const usage = usageSnapshot.data() ?? {};
     const trustedUsage = usage.quota_version === 1;
     const isAdmin = kind === 'room' && request.auth.token.admin === true;
     const quota = getDailyQuota(kind, request.auth.token.pro === true);
     const currentCount = trustedUsage ? safeCount(usage[quota.field]) : 0;
-    const nextBonus = safeCount(profile[quota.bonusField]);
     const source = getQuotaReservationSource(
         isAdmin,
         currentCount,
         quota.limit,
-        nextBonus,
     );
     if (source === null) {
       throw new HttpsError(
@@ -632,26 +718,17 @@ exports.reserveDailyQuota = onCall(PUBLIC_CALLABLE_OPTIONS, async (request) => {
           'Günlük kullanım hakkınız doldu.',
       );
     }
-    let nextCount = currentCount;
-    if (source === 'daily') {
-      nextCount++;
-    } else if (source === 'bonus') {
-      nextBonus--;
-    }
+    const nextCount = source === 'daily' ? currentCount + 1 : currentCount;
 
     const nextUsage = trustedUsage
       ? { ...usage, date: usageDate, quota_version: 1 }
-      : { date: usageDate, rooms: 0, ai: 0, earned_points: 0, quota_version: 1 };
+      : { date: usageDate, rooms: 0, ai: 0, quota_version: 1 };
     if (source !== 'admin') {
       nextUsage.updated_at = FieldValue.serverTimestamp();
     }
     if (source === 'daily') nextUsage[quota.field] = nextCount;
-    const nextProfile = { [quota.bonusField]: nextBonus };
     if (source !== 'admin') {
       transaction.set(usageReference, nextUsage, { merge: true });
-    }
-    if (source === 'bonus') {
-      transaction.set(userReference, nextProfile, { merge: true });
     }
     transaction.create(reservationReference, {
       uid,
@@ -662,8 +739,7 @@ exports.reserveDailyQuota = onCall(PUBLIC_CALLABLE_OPTIONS, async (request) => {
       created_at: FieldValue.serverTimestamp(),
       expires_at: new Date(Date.now() + QUOTA_RESERVATION_LIFETIME_MS),
     });
-    if (source === 'bonus') nextUsage[quota.field] = currentCount;
-    return quotaResult(nextUsage, { ...profile, ...nextProfile }, usageDate);
+    return quotaResult(nextUsage, usageDate);
   });
 });
 
@@ -735,10 +811,7 @@ exports.cancelDailyQuotaReservation = onCall(
     const usageReference = userReference
         .collection('daily_usage')
         .doc(reservation.date);
-    const [usageSnapshot, profileSnapshot] = await Promise.all([
-      transaction.get(usageReference),
-      transaction.get(userReference),
-    ]);
+    const usageSnapshot = await transaction.get(usageReference);
     const quota = getDailyQuota(reservation.kind, false);
     if (reservation.source === 'daily' && usageSnapshot.exists) {
       const usage = usageSnapshot.data();
@@ -746,167 +819,10 @@ exports.cancelDailyQuotaReservation = onCall(
         [quota.field]: Math.max(0, safeCount(usage[quota.field]) - 1),
         updated_at: FieldValue.serverTimestamp(),
       }, { merge: true });
-    } else if (reservation.source === 'bonus' && profileSnapshot.exists) {
-      const profile = profileSnapshot.data();
-      transaction.set(userReference, {
-        [quota.bonusField]: safeCount(profile[quota.bonusField]) + 1,
-      }, { merge: true });
     }
     transaction.delete(reservationReference);
     return { released: true };
   });
-    },
-);
-
-exports.redeemNavoraReward = onCall(
-    PUBLIC_CALLABLE_OPTIONS,
-    async (request) => {
-  const uid = requireUser(request);
-  const rewardId = request.data?.rewardId;
-  if (typeof rewardId !== 'string' ||
-      !Object.hasOwn(REWARDS, rewardId)) {
-    throw new HttpsError('invalid-argument', 'Geçersiz ödül seçildi.');
-  }
-  const reward = REWARDS[rewardId];
-
-  const db = getFirestore();
-  const userReference = db.collection('users').doc(uid);
-  const ledgerReference = userReference.collection('point_ledger').doc();
-  return db.runTransaction(async (transaction) => {
-    const profileSnapshot = await transaction.get(userReference);
-    if (!profileSnapshot.exists) {
-      throw new HttpsError('failed-precondition', 'Profil bulunamadı.');
-    }
-    const profile = profileSnapshot.data();
-    if (rewardId === 'pro_discount' && profile.pro_discount_unlocked === true) {
-      throw new HttpsError('already-exists', 'Bu ödül daha önce alınmış.');
-    }
-    const points = profile.points_version === 1
-      ? safeCount(profile.navora_points)
-      : 0;
-    if (points < reward.cost) {
-      throw new HttpsError('resource-exhausted', 'Yeterli puanınız yok.');
-    }
-
-    const update = {
-      navora_points: points - reward.cost,
-      points_version: 1,
-      updated_at: FieldValue.serverTimestamp(),
-    };
-    if (reward.field) {
-      update[reward.field] = safeCount(profile[reward.field]) + 1;
-    } else {
-      update.pro_discount_unlocked = true;
-    }
-    transaction.set(userReference, update, { merge: true });
-    transaction.create(ledgerReference, {
-      title: reward.title,
-      detail: 'Takas',
-      amount: -reward.cost,
-      date: 'Şimdi',
-      version: 1,
-      created_at: FieldValue.serverTimestamp(),
-        },
-    );
-    return {
-      points: points - reward.cost,
-      bonusChatRooms: safeCount(update.bonus_chat_rooms ??
-          profile.bonus_chat_rooms),
-      bonusAiQueries: safeCount(update.bonus_ai_queries ??
-          profile.bonus_ai_queries),
-      proDiscountUnlocked: update.pro_discount_unlocked ??
-          profile.pro_discount_unlocked === true,
-    };
-  });
-});
-
-async function awardPointsToUser({
-  uid,
-  eventId,
-  title,
-  detail,
-  amount,
-  occurredAt,
-}) {
-  if (!Number.isSafeInteger(amount) || amount <= 0) return;
-  const db = getFirestore();
-  const userReference = db.collection('users').doc(uid);
-  const ledgerReference = userReference
-      .collection('point_ledger')
-      .doc(eventId);
-  const usageDate = getDailyQuotaDate(occurredAt);
-  const usageReference = userReference
-      .collection('daily_usage')
-      .doc(usageDate);
-
-  await db.runTransaction(async (transaction) => {
-    const [profileSnapshot, usageSnapshot, ledgerSnapshot] =
-        await Promise.all([
-          transaction.get(userReference),
-          transaction.get(usageReference),
-          transaction.get(ledgerReference),
-        ]);
-    if (!profileSnapshot.exists || ledgerSnapshot.exists) return;
-
-    const profile = profileSnapshot.data();
-    const usage = usageSnapshot.data() ?? {};
-    const awardedToday = usage.quota_version === 1
-      ? safeCount(usage.earned_points)
-      : 0;
-    const currentPoints = profile.points_version === 1
-      ? safeCount(profile.navora_points)
-      : 0;
-    const awardAmount = Math.max(0, Math.min(
-        amount,
-        MAX_DAILY_EARNED_POINTS - awardedToday,
-        Math.max(0, 10000000 - currentPoints),
-    ));
-    transaction.create(ledgerReference, {
-      title,
-      detail: typeof detail === 'string' ? detail.slice(0, 200) : '',
-      amount: awardAmount,
-      date: 'Şimdi',
-      version: 1,
-      created_at: FieldValue.serverTimestamp(),
-    });
-    if (awardAmount === 0) return;
-
-    transaction.set(userReference, {
-      navora_points: currentPoints + awardAmount,
-      points_version: 1,
-      updated_at: FieldValue.serverTimestamp(),
-    }, { merge: true });
-    transaction.set(usageReference, {
-      date: usageDate,
-      quota_version: 1,
-      earned_points: awardedToday + awardAmount,
-      updated_at: FieldValue.serverTimestamp(),
-    }, { merge: true });
-  });
-}
-
-exports.awardDrivingHistoryPoints = onDocumentCreated(
-    'users/{uid}/driving_history/{historyId}',
-    async (event) => {
-      const uid = event.params.uid;
-      const history = event.data?.data();
-      if (!history) return;
-      const completedAt = history.completed_at?.toDate?.();
-      const award = getDrivingPointAward(
-          history.distance_km,
-          history.duration_minutes,
-          completedAt,
-      );
-      if (award === 0) return;
-
-      await awardPointsToUser({
-        uid,
-        eventId: `drive_${event.params.historyId}`,
-        title: 'Tamamlanan rota',
-        detail: history.route,
-        amount: award,
-        occurredAt: completedAt,
-      });
     },
 );
 
@@ -1253,12 +1169,11 @@ async function cleanupExpiredQuotaReservations(db = getFirestore(), now = new Da
       const usageReference = userReference
           .collection('daily_usage')
           .doc(reservation.date);
-      const [roomSnapshot, usageSnapshot, profileSnapshot] = await Promise.all([
+      const [roomSnapshot, usageSnapshot] = await Promise.all([
         reservation.kind === 'room'
           ? transaction.get(roomReference)
           : Promise.resolve(null),
         transaction.get(usageReference),
-        transaction.get(userReference),
       ]);
       if (!roomSnapshot?.exists) {
         const quota = getDailyQuota(reservation.kind, false);
@@ -1267,11 +1182,6 @@ async function cleanupExpiredQuotaReservations(db = getFirestore(), now = new Da
           transaction.set(usageReference, {
             [quota.field]: Math.max(0, safeCount(usage[quota.field]) - 1),
             updated_at: FieldValue.serverTimestamp(),
-          }, { merge: true });
-        } else if (reservation.source === 'bonus' && profileSnapshot.exists) {
-          const profile = profileSnapshot.data();
-          transaction.set(userReference, {
-            [quota.bonusField]: safeCount(profile[quota.bonusField]) + 1,
           }, { merge: true });
         }
       }

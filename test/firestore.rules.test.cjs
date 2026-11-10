@@ -786,8 +786,17 @@ test('owner can atomically create a protected room without plaintext password', 
   }
 });
 
-test('users cannot write server-managed quotas, reservations, or point ledger', async () => {
+test('users cannot write server-managed quotas, reservations, or retired point ledgers', async () => {
+  await testEnvironment.withSecurityRulesDisabled(async (context) => {
+    await setDoc(doc(context.firestore(), 'users/owner/point_ledger/old-award'), {
+      title: 'Legacy points',
+      amount: 100,
+    });
+  });
   const firestore = testEnvironment.authenticatedContext('owner').firestore();
+  await assertFails(
+    getDoc(doc(firestore, 'users/owner/point_ledger/old-award')),
+  );
   await assertFails(
     setDoc(doc(firestore, 'users/owner/daily_usage/2026-10-23'), {
       date: '2026-10-23',
@@ -807,6 +816,46 @@ test('users cannot write server-managed quotas, reservations, or point ledger', 
       kind: 'room',
       status: 'pending',
     }),
+  );
+});
+
+test('users can manage only their own blocked-user list', async () => {
+  const firestore = testEnvironment.authenticatedContext('owner').firestore();
+  const blockedUser = doc(firestore, 'users/owner/blocked_users/blocked');
+  await assertSucceeds(
+    setDoc(blockedUser, {
+      display_name: 'Engellenen kullanıcı',
+      blocked_at: serverTimestamp(),
+    }),
+  );
+  await assertSucceeds(getDoc(blockedUser));
+  await assertFails(
+    updateDoc(blockedUser, {
+      display_name: 'Değiştirilmeye çalışılan kullanıcı',
+    }),
+  );
+  await assertSucceeds(deleteDoc(blockedUser));
+  await assertFails(
+    setDoc(doc(firestore, 'users/owner/blocked_users/owner'), {
+      display_name: 'Kendim',
+      blocked_at: serverTimestamp(),
+    }),
+  );
+  await assertFails(
+    setDoc(doc(firestore, 'users/owner/blocked_users/invalid'), {
+      display_name: 'Geçersiz veri',
+      blocked_at: serverTimestamp(),
+      extra: true,
+    }),
+  );
+  await assertFails(
+    setDoc(doc(firestore, 'users/other/blocked_users/blocked'), {
+      display_name: 'Başka kişi',
+      blocked_at: serverTimestamp(),
+    }),
+  );
+  await assertFails(
+    getDoc(doc(firestore, 'users/other/blocked_users/blocked')),
   );
 });
 
@@ -1124,6 +1173,108 @@ test('general chat messages can be reported only with matching message data', as
   );
 });
 
+test('active listings, lost pets, and community places can be reported to admins', async () => {
+  const reporter = testEnvironment.authenticatedContext('visitor').firestore();
+  const communityPlace = {
+    owner_uid: 'owner',
+    name: 'Sahil seyir noktası',
+    category: 'Doğa',
+    description: 'Gün batımında güzel manzara.',
+    address: 'İzmir',
+    latitude: 38.4,
+    longitude: 27.1,
+    created_at: now,
+  };
+  await testEnvironment.withSecurityRulesDisabled(async (context) => {
+    await setDoc(
+      doc(context.firestore(), 'community_places/place-1'),
+      communityPlace,
+    );
+  });
+
+  const reports = [
+    {
+      id: 'property-report',
+      content_type: 'property_listing',
+      content_id: 'rent-1',
+      content_title: activePropertyListing.title,
+      content_description: activePropertyListing.description,
+    },
+    {
+      id: 'pet-report',
+      content_type: 'lost_pet',
+      content_id: 'lost-1',
+      content_title: validLostPetReport.pet_name,
+      content_description: validLostPetReport.description,
+    },
+    {
+      id: 'place-report',
+      content_type: 'community_place',
+      content_id: 'place-1',
+      content_title: communityPlace.name,
+      content_description: communityPlace.description,
+    },
+  ];
+  for (const report of reports) {
+    const { id, ...reportData } = report;
+    await assertSucceeds(
+      setDoc(doc(reporter, `content_reports/${id}`), {
+        ...reportData,
+        content_owner_uid: 'owner',
+        reason: 'Uygunsuz içerik',
+        reported_by: 'visitor',
+        created_at: serverTimestamp(),
+        status: 'open',
+      }),
+    );
+  }
+
+  await assertFails(
+    setDoc(doc(reporter, 'content_reports/forged-report'), {
+      ...reports[0],
+      content_owner_uid: 'someone-else',
+      reason: 'Uygunsuz içerik',
+      reported_by: 'visitor',
+      created_at: serverTimestamp(),
+      status: 'open',
+    }),
+  );
+  await assertFails(
+    setDoc(
+      doc(
+        testEnvironment.authenticatedContext('owner').firestore(),
+        'content_reports/self-report',
+      ),
+      {
+        ...reports[0],
+        content_owner_uid: 'owner',
+        reason: 'Uygunsuz içerik',
+        reported_by: 'owner',
+        created_at: serverTimestamp(),
+        status: 'open',
+      },
+    ),
+  );
+  await assertFails(
+    getDocs(collection(reporter, 'content_reports')),
+  );
+
+  const admin = testEnvironment.authenticatedContext('moderator', {
+    admin: true,
+  }).firestore();
+  const adminReports = await assertSucceeds(
+    getDocs(
+      query(
+        collection(admin, 'content_reports'),
+        where('status', '==', 'open'),
+      ),
+    ),
+  );
+  if (adminReports.size !== 3) {
+    throw new Error('The admin content reports query returned unexpected data');
+  }
+});
+
 test('shared list links are disabled for reads and writes', async () => {
   const owner = testEnvironment.authenticatedContext('owner').firestore();
   const publicContext = testEnvironment.unauthenticatedContext().firestore();
@@ -1298,6 +1449,21 @@ test('monthly driving analytics cannot be created or changed', async () => {
 
 test('profile accepts app fields while enforcing value limits', async () => {
   const firestore = testEnvironment.authenticatedContext('owner').firestore();
+  const newUserFirestore = testEnvironment
+    .authenticatedContext('new-user')
+    .firestore();
+  await assertSucceeds(
+    setDoc(doc(newUserFirestore, 'users/new-user'), {
+      display_name: 'Yeni Kullanıcı',
+      email: 'new-user@example.com',
+      phone: '05551234567',
+      gender_preference: 'Kadın',
+      terms_accepted: true,
+      privacy_accepted: true,
+      email_marketing_accepted: false,
+      created_at: serverTimestamp(),
+    }),
+  );
   await assertSucceeds(
     updateDoc(doc(firestore, 'users/owner'), {
       gender_preference: 'Belirtmek istemiyorum',

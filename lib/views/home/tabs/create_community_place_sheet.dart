@@ -11,6 +11,7 @@ class CreateCommunityPlaceSheet extends StatefulWidget {
   final String initialAddress;
   final String initialCategory;
   final String initialDescription;
+  final List<String> initialPhotoUrls;
   final bool isEditing;
   final Future<void> Function({
     required String name,
@@ -31,6 +32,7 @@ class CreateCommunityPlaceSheet extends StatefulWidget {
     required this.initialAddress,
     this.initialCategory = 'Kafe',
     this.initialDescription = '',
+    this.initialPhotoUrls = const [],
     this.isEditing = false,
     required this.onSubmit,
   });
@@ -72,6 +74,9 @@ class _CreateCommunityPlaceSheetState extends State<CreateCommunityPlaceSheet> {
     text: widget.initialDescription,
   );
   final _imagePicker = ImagePicker();
+  late final List<String> _existingPhotoUrls = List<String>.from(
+    widget.initialPhotoUrls.take(3),
+  );
   final List<Uint8List> _photoBytes = [];
   final List<String> _photoExtensions = [];
   late LatLng _coordinate = LatLng(widget.latitude, widget.longitude);
@@ -211,7 +216,7 @@ class _CreateCommunityPlaceSheetState extends State<CreateCommunityPlaceSheet> {
 
   Future<void> _pickPhotos(ImageSource source) async {
     try {
-      final remaining = 3 - _photoBytes.length;
+      final remaining = 3 - _existingPhotoUrls.length - _photoBytes.length;
       if (remaining <= 0) {
         setState(() => _errorMessage = 'En fazla 3 fotoğraf ekleyebilirsin.');
         return;
@@ -296,11 +301,14 @@ class _CreateCommunityPlaceSheetState extends State<CreateCommunityPlaceSheet> {
       );
       if (mounted) Navigator.pop(context, true);
     } catch (error) {
-      debugPrint('Topluluk mekanı eklenemedi: $error');
+      debugPrint(
+        'Topluluk mekanı ${widget.isEditing ? 'düzenlenemedi' : 'eklenemedi'}: $error',
+      );
       if (mounted) {
         setState(() {
-          _errorMessage =
-              'Mekân eklenemedi. Bağlantını kontrol edip tekrar dene.';
+          _errorMessage = widget.isEditing
+              ? 'Mekân düzenlenemedi. Bağlantını kontrol edip tekrar dene.'
+              : 'Mekân eklenemedi. Bağlantını kontrol edip tekrar dene.';
           _isSubmitting = false;
         });
       }
@@ -385,78 +393,111 @@ class _CreateCommunityPlaceSheetState extends State<CreateCommunityPlaceSheet> {
                   maxLines: 3,
                   decoration: _decoration('Kısa not (isteğe bağlı)'),
                 ),
-                if (!widget.isEditing) ...[
-                  const SizedBox(height: 8),
-                  if (_photoBytes.isNotEmpty) ...[
-                    SizedBox(
-                      height: 160,
-                      child: ListView.separated(
-                        scrollDirection: Axis.horizontal,
-                        itemCount: _photoBytes.length,
-                        separatorBuilder: (context, index) =>
-                            const SizedBox(width: 8),
-                        itemBuilder: (context, index) => Stack(
+                const SizedBox(height: 8),
+                if (_existingPhotoUrls.isNotEmpty ||
+                    _photoBytes.isNotEmpty) ...[
+                  SizedBox(
+                    height: 160,
+                    child: ListView.separated(
+                      scrollDirection: Axis.horizontal,
+                      itemCount: _existingPhotoUrls.length + _photoBytes.length,
+                      separatorBuilder: (context, index) =>
+                          const SizedBox(width: 8),
+                      itemBuilder: (context, index) {
+                        final isExisting = index < _existingPhotoUrls.length;
+                        final photoIndex = index - _existingPhotoUrls.length;
+                        return Stack(
                           children: [
                             ClipRRect(
                               borderRadius: BorderRadius.circular(12),
-                              child: Image.memory(
-                                _photoBytes[index],
-                                width: 220,
-                                height: 160,
-                                fit: BoxFit.cover,
-                              ),
+                              child: isExisting
+                                  ? Image.network(
+                                      _existingPhotoUrls[index],
+                                      width: 220,
+                                      height: 160,
+                                      fit: BoxFit.cover,
+                                      errorBuilder:
+                                          (context, error, stackTrace) =>
+                                              const SizedBox(
+                                                width: 220,
+                                                height: 160,
+                                                child: ColoredBox(
+                                                  color: Color(0xFF252525),
+                                                  child: Icon(
+                                                    Icons.broken_image_outlined,
+                                                    color: Colors.white60,
+                                                  ),
+                                                ),
+                                              ),
+                                    )
+                                  : Image.memory(
+                                      _photoBytes[photoIndex],
+                                      width: 220,
+                                      height: 160,
+                                      fit: BoxFit.cover,
+                                    ),
                             ),
-                            Positioned(
-                              top: 6,
-                              right: 6,
-                              child: IconButton.filled(
-                                tooltip: 'Fotoğrafı kaldır',
-                                onPressed: _isSubmitting
-                                    ? null
-                                    : () => setState(() {
-                                        _photoBytes.removeAt(index);
-                                        _photoExtensions.removeAt(index);
-                                      }),
-                                icon: const Icon(Icons.close_rounded, size: 18),
-                                style: IconButton.styleFrom(
-                                  backgroundColor: Colors.black54,
-                                  foregroundColor: Colors.white,
-                                  minimumSize: const Size(32, 32),
+                            if (!isExisting)
+                              Positioned(
+                                top: 6,
+                                right: 6,
+                                child: IconButton.filled(
+                                  tooltip: 'Fotoğrafı kaldır',
+                                  onPressed: _isSubmitting
+                                      ? null
+                                      : () => setState(() {
+                                          _photoBytes.removeAt(photoIndex);
+                                          _photoExtensions.removeAt(photoIndex);
+                                        }),
+                                  icon: const Icon(
+                                    Icons.close_rounded,
+                                    size: 18,
+                                  ),
+                                  style: IconButton.styleFrom(
+                                    backgroundColor: Colors.black54,
+                                    foregroundColor: Colors.white,
+                                    minimumSize: const Size(32, 32),
+                                  ),
                                 ),
                               ),
-                            ),
                           ],
-                        ),
+                        );
+                      },
+                    ),
+                  ),
+                  const SizedBox(height: 8),
+                ],
+                Row(
+                  children: [
+                    Expanded(
+                      child: Text(
+                        'Fotoğraflar (${_existingPhotoUrls.length + _photoBytes.length}/3)',
+                        style: const TextStyle(color: Colors.white70),
                       ),
                     ),
-                    const SizedBox(height: 8),
+                    OutlinedButton.icon(
+                      onPressed:
+                          _isSubmitting ||
+                              _existingPhotoUrls.length + _photoBytes.length ==
+                                  3
+                          ? null
+                          : () => _pickPhotos(ImageSource.gallery),
+                      icon: const Icon(Icons.photo_library_outlined),
+                      label: const Text('Galeri'),
+                    ),
+                    const SizedBox(width: 8),
+                    OutlinedButton.icon(
+                      onPressed:
+                          _isSubmitting ||
+                              _existingPhotoUrls.length + _photoBytes.length ==
+                                  3
+                          ? null
+                          : () => _pickPhotos(ImageSource.camera),
+                      icon: const Icon(Icons.photo_camera_outlined),
+                      label: const Text('Kamera'),
+                    ),
                   ],
-                  Row(
-                    children: [
-                      Expanded(
-                        child: Text(
-                          'Fotoğraflar (${_photoBytes.length}/3)',
-                          style: const TextStyle(color: Colors.white70),
-                        ),
-                      ),
-                      OutlinedButton.icon(
-                        onPressed: _isSubmitting || _photoBytes.length == 3
-                            ? null
-                            : () => _pickPhotos(ImageSource.gallery),
-                        icon: const Icon(Icons.photo_library_outlined),
-                        label: const Text('Galeri'),
-                      ),
-                      const SizedBox(width: 8),
-                      OutlinedButton.icon(
-                        onPressed: _isSubmitting || _photoBytes.length == 3
-                            ? null
-                            : () => _pickPhotos(ImageSource.camera),
-                        icon: const Icon(Icons.photo_camera_outlined),
-                        label: const Text('Kamera'),
-                      ),
-                    ],
-                  ),
-                ],
+                ),
                 if (_errorMessage != null) ...[
                   const SizedBox(height: 8),
                   Text(

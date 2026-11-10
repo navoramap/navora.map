@@ -3,6 +3,8 @@ import 'dart:math' as math;
 
 import 'package:cryptography/cryptography.dart';
 
+const int navoraMinimumRoomPasswordLength = 6;
+
 String navoraGenerateRoomPasswordSalt() {
   final random = math.Random.secure();
   final bytes = List<int>.generate(24, (_) => random.nextInt(256));

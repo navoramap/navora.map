@@ -5,6 +5,7 @@ import 'package:cloud_functions/cloud_functions.dart';
 import 'package:flutter/material.dart';
 
 import '../../services/app_notification_service.dart';
+import '../../services/blocked_users_service.dart';
 import '../../services/chat_room_service.dart';
 
 Future<void> navoraDeleteChatRoom(
@@ -64,6 +65,9 @@ class _RoomChatPageState extends State<RoomChatPage> {
   bool _showScrollToBottom = false;
   bool _roomChatWasAtBottom = true;
   final List<Map<String, dynamic>> _pendingRoomMessages = [];
+  final Set<String> _blockedUserIds = {};
+  final BlockedUsersService _blockedUsersService = BlockedUsersService();
+  StreamSubscription<List<BlockedUser>>? _blockedUsersSubscription;
 
   bool get _canModerate =>
       widget.userId == widget.ownerId ||
@@ -73,6 +77,26 @@ class _RoomChatPageState extends State<RoomChatPage> {
   void initState() {
     super.initState();
     _scrollController.addListener(_handleRoomChatScroll);
+    _blockedUsersSubscription = _blockedUsersService
+        .watchBlockedUsers(widget.userId)
+        .listen(
+          (blockedUsers) {
+            if (!mounted) return;
+            setState(() {
+              _blockedUserIds
+                ..clear()
+                ..addAll(blockedUsers.map((blockedUser) => blockedUser.uid));
+            });
+          },
+          onError: (Object error) {
+            debugPrint('Engellenen kullanıcılar yüklenemedi: $error');
+            if (mounted) {
+              AppNotificationService.show(
+                'Engellenen kullanıcılar yüklenemedi.',
+              );
+            }
+          },
+        );
   }
 
   bool _isRoomChatNearBottom() {
@@ -103,9 +127,50 @@ class _RoomChatPageState extends State<RoomChatPage> {
 
   @override
   void dispose() {
+    _blockedUsersSubscription?.cancel();
     _controller.dispose();
     _scrollController.dispose();
     super.dispose();
+  }
+
+  Future<void> _blockUser(String blockedUid, String displayName) async {
+    if (blockedUid.isEmpty || blockedUid == widget.userId) return;
+    final confirmed = await showDialog<bool>(
+      context: context,
+      builder: (dialogContext) => AlertDialog(
+        title: const Text('Kullanıcıyı engelle'),
+        content: Text(
+          '$displayName kullanıcısını engellemek istiyor musun? Bu kişinin sohbet mesajları sana gösterilmez.',
+        ),
+        actions: [
+          TextButton(
+            onPressed: () => Navigator.pop(dialogContext, false),
+            child: const Text('Vazgeç'),
+          ),
+          FilledButton(
+            onPressed: () => Navigator.pop(dialogContext, true),
+            child: const Text('Engelle'),
+          ),
+        ],
+      ),
+    );
+    if (confirmed != true) return;
+    try {
+      await _blockedUsersService.blockUser(
+        uid: widget.userId,
+        blockedUid: blockedUid,
+        displayName: displayName,
+      );
+      if (mounted) AppNotificationService.show('$displayName engellendi.');
+    } on FirebaseException catch (error) {
+      debugPrint('Kullanıcı engellenemedi: ${error.code}');
+      if (mounted) {
+        AppNotificationService.show('Kullanıcı engellenemedi. Tekrar deneyin.');
+      }
+    } on ArgumentError catch (error) {
+      debugPrint('Kullanıcı engelleme isteği geçersiz: $error');
+      if (mounted) AppNotificationService.show('Bu kullanıcı engellenemiyor.');
+    }
   }
 
   Future<void> _sendMessage() async {
@@ -390,10 +455,12 @@ class _RoomChatPageState extends State<RoomChatPage> {
                       final wasProtected = data['is_protected'] == true;
                       if (protected &&
                           !wasProtected &&
-                          enteredPassword.length < 12) {
+                          enteredPassword.length <
+                              navoraMinimumRoomPasswordLength) {
                         if (!baseContext.mounted) return;
                         AppNotificationService.show(
-                          'Yeni şifre en az 12 karakter olmalı.',
+                          'Yeni şifre en az '
+                          '$navoraMinimumRoomPasswordLength karakter olmalı.',
                         );
                         return;
                       }
@@ -577,6 +644,9 @@ class _RoomChatPageState extends State<RoomChatPage> {
                       const <QueryDocumentSnapshot<Map<String, dynamic>>>[];
                   for (var index = 0; index < documents.length; index++) {
                     final document = documents[index];
+                    final senderId =
+                        document.data()['sender_id']?.toString() ?? '';
+                    if (_blockedUserIds.contains(senderId)) continue;
                     serverMessages.add(
                       MapEntry(index, {
                         ...document.data(),
@@ -633,7 +703,9 @@ class _RoomChatPageState extends State<RoomChatPage> {
                           final message = entry.value;
                           final isPendingLocalMessage =
                               message['_localTempId'] != null;
-                          final isMe = message['sender'] == widget.userName;
+                          final senderId =
+                              message['sender_id']?.toString() ?? '';
+                          final isMe = senderId == widget.userId;
                           final senderName =
                               message['sender']?.toString() ?? 'Kullanıcı';
                           return Align(
@@ -700,7 +772,8 @@ class _RoomChatPageState extends State<RoomChatPage> {
                                     ),
                                   ),
                                 ),
-                                if (!isPendingLocalMessage)
+                                if (!isPendingLocalMessage &&
+                                    (senderId != widget.userId || _canModerate))
                                   PopupMenuButton<String>(
                                     icon: const Icon(
                                       Icons.more_horiz_rounded,
@@ -715,6 +788,9 @@ class _RoomChatPageState extends State<RoomChatPage> {
                                       if (action == 'report') {
                                         await _reportMessage(message);
                                       }
+                                      if (action == 'block') {
+                                        await _blockUser(senderId, senderName);
+                                      }
                                     },
                                     itemBuilder: (_) => [
                                       if (_canModerate)
@@ -722,10 +798,17 @@ class _RoomChatPageState extends State<RoomChatPage> {
                                           value: 'delete',
                                           child: Text('Mesajı sil'),
                                         ),
-                                      const PopupMenuItem(
-                                        value: 'report',
-                                        child: Text('Şikayet et'),
-                                      ),
+                                      if (senderId.isNotEmpty &&
+                                          senderId != widget.userId) ...[
+                                        const PopupMenuItem(
+                                          value: 'report',
+                                          child: Text('Şikayet et'),
+                                        ),
+                                        const PopupMenuItem(
+                                          value: 'block',
+                                          child: Text('Kullanıcıyı engelle'),
+                                        ),
+                                      ],
                                     ],
                                   ),
                               ],

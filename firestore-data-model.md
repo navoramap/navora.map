@@ -5,8 +5,9 @@ This document records the client-side Firestore paths used by Navora Map.
 - `property_listings/{listingId}`: user-owned rental/sale submissions with full public address, exact geocoded coordinates, up to five photo URLs, and a server-maintained unique `view_count`. Owners create `pending_review` documents; admins can change only the status of a pending listing to `active` or `rejected` under Firestore rules. Owners can edit rejected listings to send them back for review; owner deletion runs through a cleanup callable.
 - `property_listings/{listingId}/_views/{viewerUid}`: private unique-view records written by the `recordPropertyListingView` callable; clients cannot read or write this subcollection.
 - `property_listings/{uid}/{listingId}/{photoIndex}` in Cloud Storage: listing photos, with five fixed slots per pending listing; only the listing owner can upload, and active photos are readable by authenticated users.
-- `lost_pet_reports/{reportId}`: authenticated lost/found pet reports with last-seen address/coordinates, time, an explicitly shared contact phone, and zero to three optional photo URLs. The owner can resolve or delete their own report; active reports appear on the community map.
-- `pet_adoption_listings/{listingId}`: authenticated pet adoption listings with location, an explicitly shared contact phone, and zero to three optional photo URLs. Active listings appear on the community map; the owner can close or delete their own listing.
+- `community_places/{placeId}`: user-submitted map locations with a bounded name, category, optional description/address/photo URL, coordinates and owner UID.
+- `lost_pet_reports/{reportId}`: authenticated lost/found pet reports with last-seen address/coordinates, time, an explicitly shared contact phone, and zero to three optional photo URLs. The owner can update listing details and photos, but not the published contact phone or consent; they can resolve or delete their own report. Active reports appear on the community map.
+- `pet_adoption_listings/{listingId}`: authenticated pet adoption listings with location, an explicitly shared contact phone, and zero to three optional photo URLs. The owner can update listing details and photos, but not the published contact phone or consent; they can close or delete their own listing.
 - `pet_adoption_listings/{uid}/{listingId}/{photoIndex}` in Cloud Storage: up to three adoption listing photos, readable by authenticated users while the listing is active and writable only by the listing owner.
 - `explore_highlights/{highlightId}`: shared active Explore carousel cards containing a title, subtitle, HTTPS image/action URLs, icon key, display order, creator UID, active state, and timestamps. Signed-in users can read active cards; create, update, and delete require the Firebase Auth `admin: true` custom claim.
 
@@ -35,6 +36,10 @@ with an active administrator mute. Chat-report review, one-hour mutes and
 administrator action-history reads are server-side callables; action records
 expire after 90 days.
 
+Users can block other accounts from public or room chat messages. Blocked
+accounts' messages are hidden for that user and can be unblocked from profile
+settings; the block list is private to its owner.
+
 - `users/{uid}`: private profile, consent and quota metadata.
 - `users/{uid}/saved_routes`: saved routes.
 - `users/{uid}/saved_addresses`: saved addresses.
@@ -42,8 +47,8 @@ expire after 90 days.
 - `users/{uid}/route_history`: completed route history.
 - `users/{uid}/sos_contacts`: emergency contacts.
 - `users/{uid}/sos_alerts`: SOS records.
-- `users/{uid}/point_ledger`: versioned, append-only points transactions; only Cloud Functions may write.
-- `users/{uid}/daily_usage/{yyyy-MM-dd}`: server-maintained room, AI and daily points counters. Signed-in clients can read but cannot write.
+- `users/{uid}/blocked_users/{blockedUid}`: private per-user chat block list.
+- `users/{uid}/daily_usage/{yyyy-MM-dd}`: server-maintained room and AI usage counters. Signed-in clients can read but cannot write.
 - `users/{uid}/quota_reservations/{reservationId}`: short-lived, server-created quota reservations for room creation and AI requests; clients cannot read or write.
 - `users/{uid}/room_join_attempts/{roomId}`: server-managed, unreadable protected-room password failure counters and temporary lock state.
 - `chat_message_rate_limits/{uid}`: server-managed shared public/room chat rate-limit state.
@@ -60,7 +65,8 @@ expire after 90 days.
 - `chat_rooms/{roomId}/messages/{messageId}`: append-only room messages created through the moderation callable.
 - `chat_rooms/{roomId}/private/access`: owner-readable salted password verifier.
 - `public_chat_messages/{messageId}`: authenticated public chat messages created through the moderation callable.
-- `chat_message_reports/{reportId}`: moderation reports.
+- `chat_message_reports/{reportId}`: validated chat-message reports.
+- `content_reports/{reportId}`: reports for property listings, lost-pet reports and community places. Reporters cannot read reports; admins review or delete reported content through `reviewContentReport`.
 
 The rules require authentication for shared data and restrict private paths to
 the matching user UID or room membership. `chat_room_listings` must not contain
@@ -76,17 +82,14 @@ authenticated and limited to the latest 80 records.
 
 Signed-in room creation and Navora AI requests reserve daily quota through
 Cloud Functions in `europe-west1`; a room write requires its server-created
-reservation. Point balances, redeemed benefits and the append-only point ledger
-are server-managed. Completed-drive history earns idempotent points through
-Firestore triggers, capped at 100 points per Istanbul calendar day. City-visit
-points are inactive until a server-verifiable location proof is available.
+reservation. Room and AI usage is limited to the applicable daily quota; there
+are no point awards, point redemptions, or bonus quota grants.
 The Firebase Storage bucket `navoramapa.firebasestorage.app` is in
 `europe-west1`, with access controlled by `storage.rules`.
 
 User profile fields editable by the client are limited to identity/contact,
 consent, biography, gender preference, and vehicle preferences. `is_pro`, `plan`,
-reward points, reward entitlements, and quota counters are server-owned and
-must not be client-writable. Points with `points_version: 1` are trusted; older
-local balances and unversioned ledger entries are deliberately ignored. Pro
-quota limits require a trusted Firebase Auth `pro` custom claim; legacy profile
-flags are not used to grant Pro access.
+and quota counters are server-owned and must not be client-writable. Legacy
+point balances and ledger records are no longer used or exposed by the app.
+Pro quota limits require a trusted Firebase Auth `pro` custom claim; legacy
+profile flags are not used to grant Pro access.

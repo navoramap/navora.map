@@ -27,7 +27,6 @@ import 'package:sensors_plus/sensors_plus.dart' as sensors;
 import 'package:shared_preferences/shared_preferences.dart';
 import 'package:url_launcher/url_launcher.dart';
 
-import 'navora_points_sheet.dart';
 import 'search_page.dart';
 import 'room_chat_page.dart';
 import 'tabs/create_property_listing_sheet.dart';
@@ -39,6 +38,7 @@ import 'property_listing_moderation_page.dart';
 import 'chat_message_moderation_page.dart';
 import '../../services/places_service.dart';
 import '../../services/chat_room_service.dart';
+import '../../services/blocked_users_service.dart';
 import '../../services/property_listing_service.dart';
 import '../../services/app_notification_service.dart';
 
@@ -251,11 +251,17 @@ List<List<Map<String, dynamic>>> navoraClusterChatRooms(
   List<Map<String, dynamic>> rooms, {
   required double zoom,
   double cellSize = 64,
+}) => navoraClusterMapItems(rooms, zoom: zoom, cellSize: cellSize);
+
+List<List<Map<String, dynamic>>> navoraClusterMapItems(
+  List<Map<String, dynamic>> items, {
+  required double zoom,
+  double cellSize = 64,
 }) {
   final clusters = <String, List<Map<String, dynamic>>>{};
-  for (final room in rooms) {
-    final latitude = (room['latitude'] as num?)?.toDouble();
-    final longitude = (room['longitude'] as num?)?.toDouble();
+  for (final item in items) {
+    final latitude = (item['latitude'] as num?)?.toDouble();
+    final longitude = (item['longitude'] as num?)?.toDouble();
     if (latitude == null ||
         longitude == null ||
         !latitude.isFinite ||
@@ -268,9 +274,9 @@ List<List<Map<String, dynamic>>> navoraClusterChatRooms(
     }
 
     final key = zoom >= 14
-        ? 'room-${room['id'] ?? identityHashCode(room)}'
+        ? 'item-${item['id'] ?? identityHashCode(item)}'
         : _navoraChatRoomGridKey(latitude, longitude, zoom, cellSize);
-    clusters.putIfAbsent(key, () => []).add(room);
+    clusters.putIfAbsent(key, () => []).add(item);
   }
   return clusters.values.toList(growable: false);
 }
@@ -317,7 +323,12 @@ bool navoraIsWithinArrivalRadius(double distanceMeters) =>
     distanceMeters.isFinite && distanceMeters <= 300;
 
 bool navoraIsWithinNavigationCompletionRadius(double distanceMeters) =>
-    distanceMeters.isFinite && distanceMeters <= 60;
+    distanceMeters.isFinite && distanceMeters <= 50;
+
+String navoraFormatDistance(double distanceMeters) {
+  if (distanceMeters < 1000) return '${distanceMeters.round()} m';
+  return '${(distanceMeters / 1000).toStringAsFixed(1)} km';
+}
 
 bool navoraHasCompletedRouteProgress({
   required double traveledDistanceKm,
@@ -656,9 +667,10 @@ class HomePage extends StatefulWidget {
   State<HomePage> createState() => _HomePageState();
 }
 
-class _HomePageState extends State<HomePage> {
+class _HomePageState extends State<HomePage> with WidgetsBindingObserver {
   final PropertyListingService _propertyListingService =
       PropertyListingService();
+  bool _isRefreshingVerifiedEmail = false;
 
   Future<void> _recordPetListingView(Map<String, dynamic> listing) async {
     final user = FirebaseAuth.instance.currentUser;
@@ -722,6 +734,7 @@ class _HomePageState extends State<HomePage> {
   int? _navigationDurationMinutes;
   double? _navigationDurationSeconds;
   bool _isNavigationActive = false;
+  LatLng? _navigationStartPosition;
   bool _isOpeningDirections = false;
   bool _isMapTilted = false;
   bool _isFollowingCurrentPosition = true;
@@ -810,15 +823,14 @@ class _HomePageState extends State<HomePage> {
   _mapAdoptionListingsSubscription;
   StreamSubscription<QuerySnapshot<Map<String, dynamic>>>?
   _publicChatSubscription;
+  StreamSubscription<List<BlockedUser>>? _blockedUsersSubscription;
   StreamSubscription<QuerySnapshot<Map<String, dynamic>>>?
   _searchHistorySubscription;
   StreamSubscription<QuerySnapshot<Map<String, dynamic>>>? _aiChatsSubscription;
-  StreamSubscription<QuerySnapshot<Map<String, dynamic>>>?
-  _pointLedgerSubscription;
   StreamSubscription<DocumentSnapshot<Map<String, dynamic>>>?
   _dailyQuotaSubscription;
   StreamSubscription<DocumentSnapshot<Map<String, dynamic>>>?
-  _pointsProfileSubscription;
+  _userProfileSubscription;
   StreamSubscription<QuerySnapshot<Map<String, dynamic>>>?
   _savedRoutesSubscription;
   StreamSubscription<QuerySnapshot<Map<String, dynamic>>>?
@@ -861,10 +873,10 @@ class _HomePageState extends State<HomePage> {
   bool _canManageExploreHighlights = false;
   BitmapDescriptor? _chatRoomMarkerIcon;
   final Map<int, BitmapDescriptor> _chatRoomMarkerIcons = {};
-  final Map<int, BitmapDescriptor> _chatRoomClusterMarkerIcons = {};
+  final Map<int, BitmapDescriptor> _mapClusterMarkerIcons = {};
   final Set<int> _loadingRoomMarkerIconCounts = {};
-  final Set<int> _loadingRoomClusterIconCounts = {};
-  bool _clusterRoomMarkers = true;
+  final Set<int> _loadingMapClusterIconCounts = {};
+  double? _lastClusteredMapZoom;
   BitmapDescriptor? _navigationDestinationMarkerIcon;
   bool _locationPermissionGranted = false;
   static const int _dailyRoomLimit = 3;
@@ -875,15 +887,8 @@ class _HomePageState extends State<HomePage> {
   int _freeAiQueriesUsedToday = 0;
   String? _dailyQuotaDate;
 
-  int _navoraPoints = 0;
-  int _bonusChatRooms = 0;
-  int _bonusAiQueries = 0;
-  bool _proDiscountUnlocked = false;
-  bool _isRedeemingReward = false;
   final List<String> _visitedCities = [];
   final List<Map<String, String>> _savedRoutes = [];
-
-  final List<Map<String, dynamic>> _pointLedger = [];
 
   final List<Map<String, String>> _savedAddresses = [];
 
@@ -923,10 +928,13 @@ class _HomePageState extends State<HomePage> {
 
   // Yakındaki Herkese Açık Mesajlar
   final List<Map<String, dynamic>> _publicFeedMessages = [];
+  final Set<String> _blockedUserIds = {};
+  final BlockedUsersService _blockedUsersService = BlockedUsersService();
 
   @override
   void initState() {
     super.initState();
+    WidgetsBinding.instance.addObserver(this);
     if (!kIsWeb && defaultTargetPlatform == TargetPlatform.android) {
       unawaited(SystemChrome.setEnabledSystemUIMode(SystemUiMode.edgeToEdge));
       SystemChrome.setSystemUIOverlayStyle(
@@ -960,6 +968,7 @@ class _HomePageState extends State<HomePage> {
     _loadExploreAdminClaim();
     _listenToCommunityPlaces();
     _subscribeToLiveRooms();
+    _subscribeToBlockedUsers();
     _subscribeToPublicChat();
     _publicChatScrollController.addListener(_handlePublicChatScroll);
     _roomExpiryTimer = Timer.periodic(
@@ -967,6 +976,211 @@ class _HomePageState extends State<HomePage> {
       (_) => _removeExpiredRoomsFromView(),
     );
     WidgetsBinding.instance.addPostFrameCallback((_) => _initializeLocation());
+  }
+
+  @override
+  void didChangeAppLifecycleState(AppLifecycleState state) {
+    if (state == AppLifecycleState.resumed) {
+      unawaited(_refreshVerifiedEmail());
+    }
+  }
+
+  List<Map<String, dynamic>> get _visiblePublicFeedMessages =>
+      _publicFeedMessages.where((message) {
+        final senderId = message['senderId']?.toString() ?? '';
+        return !_blockedUserIds.contains(senderId);
+      }).toList();
+
+  List<Map<String, dynamic>> get _visibleRooms => _liveRooms
+      .where((room) => !_blockedUserIds.contains(room['ownerId']?.toString()))
+      .toList();
+
+  List<Map<String, dynamic>> get _visibleCommunityPlaces => _communityPlaces
+      .where(
+        (place) => !_blockedUserIds.contains(place['ownerUid']?.toString()),
+      )
+      .toList();
+
+  List<Map<String, dynamic>> get _visiblePropertyListings => _propertyListings
+      .where(
+        (listing) =>
+            !_blockedUserIds.contains(listing['owner_uid']?.toString()),
+      )
+      .toList();
+
+  List<Map<String, dynamic>> get _visibleLostPetReports => _lostPetReports
+      .where(
+        (report) => !_blockedUserIds.contains(report['owner_uid']?.toString()),
+      )
+      .toList();
+
+  void _subscribeToBlockedUsers() {
+    final userId = FirebaseAuth.instance.currentUser?.uid;
+    if (userId == null) return;
+    _blockedUsersSubscription = _blockedUsersService
+        .watchBlockedUsers(userId)
+        .listen(
+          (blockedUsers) {
+            if (!mounted || FirebaseAuth.instance.currentUser?.uid != userId) {
+              return;
+            }
+            setState(() {
+              _blockedUserIds
+                ..clear()
+                ..addAll(blockedUsers.map((blockedUser) => blockedUser.uid));
+            });
+          },
+          onError: (Object error) {
+            debugPrint('Engellenen kullanıcılar yüklenemedi: $error');
+            if (mounted) {
+              _showTrackingMessage('Engellenen kullanıcılar yüklenemedi.');
+            }
+          },
+        );
+  }
+
+  Future<void> _blockUser(String blockedUid, String displayName) async {
+    final user = FirebaseAuth.instance.currentUser;
+    if (user == null || blockedUid.isEmpty || blockedUid == user.uid) return;
+    final confirmed = await showDialog<bool>(
+      context: context,
+      builder: (dialogContext) => AlertDialog(
+        title: const Text('Kullanıcıyı engelle'),
+        content: Text(
+          '$displayName kullanıcısını engellemek istiyor musun? Bu kişinin sohbet mesajları sana gösterilmez.',
+        ),
+        actions: [
+          TextButton(
+            onPressed: () => Navigator.pop(dialogContext, false),
+            child: const Text('Vazgeç'),
+          ),
+          FilledButton(
+            onPressed: () => Navigator.pop(dialogContext, true),
+            child: const Text('Engelle'),
+          ),
+        ],
+      ),
+    );
+    if (confirmed != true) return;
+
+    try {
+      await _blockedUsersService.blockUser(
+        uid: user.uid,
+        blockedUid: blockedUid,
+        displayName: displayName,
+      );
+      if (mounted) _showTrackingMessage('$displayName engellendi.');
+    } on FirebaseException catch (error) {
+      debugPrint('Kullanıcı engellenemedi: ${error.code}');
+      if (mounted) {
+        _showTrackingMessage('Kullanıcı engellenemedi. Tekrar deneyin.');
+      }
+    } on ArgumentError catch (error) {
+      debugPrint('Kullanıcı engelleme isteği geçersiz: $error');
+      if (mounted) _showTrackingMessage('Bu kullanıcı engellenemiyor.');
+    }
+  }
+
+  void _showBlockedUsersSheet() {
+    final userId = FirebaseAuth.instance.currentUser?.uid;
+    if (userId == null) return;
+    showModalBottomSheet<void>(
+      context: context,
+      isScrollControlled: true,
+      backgroundColor: const Color(0xFF191919),
+      showDragHandle: true,
+      builder: (sheetContext) => SafeArea(
+        child: SizedBox(
+          height: MediaQuery.sizeOf(sheetContext).height * 0.6,
+          child: Column(
+            children: [
+              const Padding(
+                padding: EdgeInsets.fromLTRB(20, 8, 20, 16),
+                child: Align(
+                  alignment: Alignment.centerLeft,
+                  child: Text(
+                    'Engellenen Kullanıcılar',
+                    style: TextStyle(
+                      color: Colors.white,
+                      fontSize: 18,
+                      fontWeight: FontWeight.bold,
+                    ),
+                  ),
+                ),
+              ),
+              Expanded(
+                child: StreamBuilder<List<BlockedUser>>(
+                  stream: _blockedUsersService.watchBlockedUsers(userId),
+                  builder: (context, snapshot) {
+                    if (snapshot.hasError) {
+                      return const Center(
+                        child: Text('Liste yüklenemedi. Tekrar deneyin.'),
+                      );
+                    }
+                    if (!snapshot.hasData) {
+                      return const Center(child: CircularProgressIndicator());
+                    }
+                    final blockedUsers = snapshot.data!;
+                    if (blockedUsers.isEmpty) {
+                      return const Center(
+                        child: Text(
+                          'Engellediğin kullanıcı bulunmuyor.',
+                          style: TextStyle(color: Colors.white70),
+                        ),
+                      );
+                    }
+                    return ListView.builder(
+                      itemCount: blockedUsers.length,
+                      itemBuilder: (context, index) {
+                        final blockedUser = blockedUsers[index];
+                        return ListTile(
+                          leading: const CircleAvatar(
+                            backgroundColor: Color(0xFF2A180D),
+                            child: Icon(
+                              Icons.person_off_outlined,
+                              color: Color(0xFFFF9A3D),
+                            ),
+                          ),
+                          title: Text(
+                            blockedUser.displayName,
+                            style: const TextStyle(color: Colors.white),
+                          ),
+                          trailing: TextButton(
+                            onPressed: () async {
+                              try {
+                                await _blockedUsersService.unblockUser(
+                                  uid: userId,
+                                  blockedUid: blockedUser.uid,
+                                );
+                                if (mounted) {
+                                  _showTrackingMessage(
+                                    '${blockedUser.displayName} engeli kaldırıldı.',
+                                  );
+                                }
+                              } on FirebaseException catch (error) {
+                                debugPrint(
+                                  'Kullanıcı engeli kaldırılamadı: ${error.code}',
+                                );
+                                if (mounted) {
+                                  _showTrackingMessage(
+                                    'Engel kaldırılamadı. Tekrar deneyin.',
+                                  );
+                                }
+                              }
+                            },
+                            child: const Text('Engeli kaldır'),
+                          ),
+                        );
+                      },
+                    );
+                  },
+                ),
+              ),
+            ],
+          ),
+        ),
+      ),
+    );
   }
 
   bool _isPublicChatNearBottom() {
@@ -991,7 +1205,7 @@ class _HomePageState extends State<HomePage> {
       _activePropertyListingType = listingType;
       _isLostPetMapActive = false;
     });
-    final listings = _propertyListings
+    final listings = _visiblePropertyListings
         .where((listing) => listing['listing_type'] == listingType)
         .toList();
     if (listings.isNotEmpty && _mapController != null) {
@@ -1029,7 +1243,7 @@ class _HomePageState extends State<HomePage> {
     final targetCollection = adoptionMode
         ? 'pet_adoption_listings'
         : 'lost_pet_reports';
-    final reports = _lostPetReports
+    final reports = _visibleLostPetReports
         .where((report) => report['collection'] == targetCollection)
         .toList();
     if (reports.isNotEmpty && _mapController != null) {
@@ -1662,22 +1876,46 @@ class _HomePageState extends State<HomePage> {
                           ),
                         ),
                       )
-                    else if (phone.isNotEmpty)
-                      SizedBox(
-                        width: double.infinity,
-                        child: FilledButton.icon(
-                          onPressed: () =>
-                              unawaited(_callLostPetContact(phone)),
-                          style: FilledButton.styleFrom(
-                            backgroundColor: const Color(0xFF55765D),
-                            foregroundColor: Colors.white,
-                          ),
-                          icon: const Icon(Icons.call_rounded),
-                          label: Text(
-                            isAdoption ? 'İletişime geç' : 'Sahibi ara',
+                    else ...[
+                      if (phone.isNotEmpty)
+                        SizedBox(
+                          width: double.infinity,
+                          child: FilledButton.icon(
+                            onPressed: () =>
+                                unawaited(_callLostPetContact(phone)),
+                            style: FilledButton.styleFrom(
+                              backgroundColor: const Color(0xFF55765D),
+                              foregroundColor: Colors.white,
+                            ),
+                            icon: const Icon(Icons.call_rounded),
+                            label: Text(
+                              isAdoption ? 'İletişime geç' : 'Sahibi ara',
+                            ),
                           ),
                         ),
-                      ),
+                      if (!isAdoption &&
+                          report['status'] == 'active' &&
+                          report['id'] != null) ...[
+                        const SizedBox(height: 8),
+                        SizedBox(
+                          width: double.infinity,
+                          child: OutlinedButton.icon(
+                            onPressed: () => unawaited(
+                              _reportCommunityContent(
+                                contentType: 'lost_pet',
+                                contentId: report['id'].toString(),
+                                ownerUid: report['owner_uid']?.toString() ?? '',
+                                title: petName,
+                                description:
+                                    report['description']?.toString() ?? '',
+                              ),
+                            ),
+                            icon: const Icon(Icons.flag_outlined),
+                            label: const Text('Şikayet et'),
+                          ),
+                        ),
+                      ],
+                    ],
                   ],
                 ),
               ),
@@ -1853,6 +2091,30 @@ class _HomePageState extends State<HomePage> {
                           color: Color(0xFFE0E0E0),
                           height: 1.45,
                           fontSize: 14,
+                        ),
+                      ),
+                    ],
+                    if (listing['status'] == 'active' &&
+                        listing['owner_uid'] !=
+                            FirebaseAuth.instance.currentUser?.uid &&
+                        listingId != null) ...[
+                      const SizedBox(height: 14),
+                      SizedBox(
+                        width: double.infinity,
+                        child: OutlinedButton.icon(
+                          onPressed: () => unawaited(
+                            _reportCommunityContent(
+                              contentType: 'property_listing',
+                              contentId: listingId,
+                              ownerUid: listing['owner_uid']?.toString() ?? '',
+                              title:
+                                  listing['title']?.toString() ?? 'Konut ilanı',
+                              description:
+                                  listing['description']?.toString() ?? '',
+                            ),
+                          ),
+                          icon: const Icon(Icons.flag_outlined),
+                          label: const Text('Şikayet et'),
                         ),
                       ),
                     ],
@@ -2222,6 +2484,76 @@ class _HomePageState extends State<HomePage> {
     }
   }
 
+  Future<void> _reportCommunityContent({
+    required String contentType,
+    required String contentId,
+    required String ownerUid,
+    required String title,
+    required String description,
+  }) async {
+    final user = FirebaseAuth.instance.currentUser;
+    if (user == null) {
+      _showTrackingMessage('Şikayet etmek için hesabına giriş yap.');
+      return;
+    }
+    if (contentId.isEmpty ||
+        ownerUid.isEmpty ||
+        (contentType != 'lost_pet' && title.trim().isEmpty)) {
+      _showTrackingMessage('İçerik şikayet edilemedi. Tekrar deneyin.');
+      return;
+    }
+    if (ownerUid == user.uid) {
+      _showTrackingMessage('Kendi içeriğini şikayet edemezsin.');
+      return;
+    }
+
+    final reason = await showDialog<String>(
+      context: context,
+      builder: (dialogContext) => AlertDialog(
+        title: const Text('Şikayet nedeni'),
+        content: Column(
+          mainAxisSize: MainAxisSize.min,
+          children: [
+            for (final option in const [
+              'Yanıltıcı veya yanlış bilgi',
+              'Uygunsuz içerik',
+              'Spam veya tekrar eden ilan',
+              'Başka bir sorun',
+            ])
+              ListTile(
+                contentPadding: EdgeInsets.zero,
+                title: Text(option),
+                onTap: () => Navigator.pop(dialogContext, option),
+              ),
+          ],
+        ),
+      ),
+    );
+    if (reason == null || !mounted) return;
+
+    try {
+      await FirebaseFirestore.instance.collection('content_reports').add({
+        'content_type': contentType,
+        'content_id': contentId,
+        'content_owner_uid': ownerUid,
+        'content_title': title.trim(),
+        'content_description': description.trim(),
+        'reason': reason,
+        'reported_by': user.uid,
+        'created_at': FieldValue.serverTimestamp(),
+        'status': 'open',
+      });
+      if (mounted) {
+        _showTrackingMessage('Şikayetin yöneticilere iletildi.');
+      }
+    } catch (error) {
+      debugPrint('İçerik şikayeti gönderilemedi: $error');
+      if (mounted) {
+        _showTrackingMessage('Şikayet gönderilemedi. Tekrar deneyin.');
+      }
+    }
+  }
+
   Future<void> _resetPublicChat() async {
     if (!_canManageExploreHighlights || _isResettingPublicChat) return;
     final confirmed = await showDialog<bool>(
@@ -2366,7 +2698,7 @@ class _HomePageState extends State<HomePage> {
       room['distance'] =
           _distanceFromCurrentPosition(latitude, longitude) ?? room['distance'];
     }
-    for (final message in _publicFeedMessages) {
+    for (final message in _visiblePublicFeedMessages) {
       final latitude = (message['latitude'] as num?)?.toDouble();
       final longitude = (message['longitude'] as num?)?.toDouble();
       if (latitude == null || longitude == null) continue;
@@ -2923,6 +3255,34 @@ class _HomePageState extends State<HomePage> {
                   ),
                 ],
               ),
+              if (placeDetails['source'] == 'community_place' &&
+                  placeDetails['id'] != null &&
+                  placeDetails['ownerUid'] !=
+                      FirebaseAuth.instance.currentUser?.uid) ...[
+                const SizedBox(height: 8),
+                Align(
+                  alignment: Alignment.center,
+                  child: TextButton.icon(
+                    onPressed: () async {
+                      didChoosePlaceAction = true;
+                      Navigator.pop(sheetContext);
+                      await _reportCommunityContent(
+                        contentType: 'community_place',
+                        contentId: placeDetails['id'].toString(),
+                        ownerUid: placeDetails['ownerUid']?.toString() ?? '',
+                        title:
+                            placeDetails['name']?.toString() ??
+                            _selectedDestinationName ??
+                            '',
+                        description:
+                            placeDetails['description']?.toString() ?? '',
+                      );
+                    },
+                    icon: const Icon(Icons.flag_outlined),
+                    label: const Text('Şikayet et'),
+                  ),
+                ),
+              ],
               if (placeDetails['source'] != 'community_place') ...[
                 const SizedBox(height: 4),
                 Align(
@@ -4063,6 +4423,7 @@ class _HomePageState extends State<HomePage> {
     _isOffRoute = false;
     _isCompletingNavigation = false;
     _navigationStartDistanceToDestinationMeters = null;
+    _navigationStartPosition = null;
     _isNetworkDegraded = false;
     _isCheckingNavigationNetwork = false;
     _navigationConnectivityTimer?.cancel();
@@ -4258,12 +4619,10 @@ out center tags;
   }
 
   String _formatNearbyDistance(double meters) {
-    if (meters < 1000) return '${meters.round()} m';
-    return '${(meters / 1000).toStringAsFixed(1)} km';
+    return navoraFormatDistance(meters);
   }
 
-  String _formatSearchDistance(double meters) =>
-      '${(meters / 1000).toStringAsFixed(1)} km';
+  String _formatSearchDistance(double meters) => navoraFormatDistance(meters);
 
   Future<Map<String, String>> _resolveAddressCoordinates(
     Map<String, String> address,
@@ -5126,6 +5485,15 @@ out center tags;
                                   Navigator.pop(modalContext);
                                   setState(() {
                                     _isNavigationActive = true;
+                                    _navigationStartPosition =
+                                        _currentPosition != null
+                                        ? LatLng(
+                                            _currentPosition!.latitude,
+                                            _currentPosition!.longitude,
+                                          )
+                                        : _routePolylines.isNotEmpty
+                                        ? _routePolylines.first.points.first
+                                        : null;
                                     _isMapTilted = true;
                                     _isFollowingCurrentPosition = true;
                                     _hasMapBearing = false;
@@ -5839,14 +6207,6 @@ out center tags;
     );
   }
 
-  int get _monthEarned => _pointLedger
-      .where((e) => (e['amount'] as int) > 0)
-      .fold(0, (sum, e) => sum + (e['amount'] as int));
-
-  int get _monthSpent => _pointLedger
-      .where((e) => (e['amount'] as int) < 0)
-      .fold(0, (sum, e) => sum + -(e['amount'] as int));
-
   int get _citiesVisited => _visitedCities.length;
 
   int get _savedRouteCount => _savedRoutes.length;
@@ -5857,7 +6217,7 @@ out center tags;
       0,
       dailyLimit,
     );
-    return freeLeft + _bonusAiQueries;
+    return freeLeft;
   }
 
   DateTime? _historyDate(Map<String, dynamic> data) {
@@ -5963,8 +6323,6 @@ out center tags;
       _dailyQuotaDate = data['date']?.toString();
       _roomsCreatedToday = (data['rooms'] as num?)?.toInt() ?? 0;
       _freeAiQueriesUsedToday = (data['ai'] as num?)?.toInt() ?? 0;
-      _bonusChatRooms = (data['bonusChatRooms'] as num?)?.toInt() ?? 0;
-      _bonusAiQueries = (data['bonusAiQueries'] as num?)?.toInt() ?? 0;
     });
   }
 
@@ -6069,12 +6427,12 @@ out center tags;
         );
   }
 
-  void _subscribeToAccountPoints(String userId) {
+  void _subscribeToUserProfile(String userId) {
     final userReference = FirebaseFirestore.instance
         .collection('users')
         .doc(userId);
-    _pointsProfileSubscription?.cancel();
-    _pointsProfileSubscription = userReference.snapshots().listen(
+    _userProfileSubscription?.cancel();
+    _userProfileSubscription = userReference.snapshots().listen(
       (snapshot) {
         if (!mounted ||
             FirebaseAuth.instance.currentUser?.uid != userId ||
@@ -6083,12 +6441,6 @@ out center tags;
         }
         final data = snapshot.data()!;
         setState(() {
-          _navoraPoints = data['points_version'] == 1
-              ? (data['navora_points'] as num?)?.toInt() ?? 0
-              : 0;
-          _bonusChatRooms = (data['bonus_chat_rooms'] as num?)?.toInt() ?? 0;
-          _bonusAiQueries = (data['bonus_ai_queries'] as num?)?.toInt() ?? 0;
-          _proDiscountUnlocked = data['pro_discount_unlocked'] == true;
           _isProUser = false;
           final photoUrl = data['photo_url']?.toString().trim();
           if (photoUrl != null && photoUrl.isNotEmpty) {
@@ -6108,44 +6460,9 @@ out center tags;
         });
       },
       onError: (Object error) {
-        debugPrint('Navora puan bakiyesi dinlenemedi: $error');
-        if (mounted) _showTrackingMessage('Puan bakiyesi güncellenemedi.');
+        debugPrint('Kullanıcı profili dinlenemedi: $error');
       },
     );
-    _pointLedgerSubscription?.cancel();
-    _pointLedgerSubscription = userReference
-        .collection('point_ledger')
-        .orderBy('created_at', descending: true)
-        .limit(100)
-        .snapshots()
-        .listen(
-          (snapshot) {
-            if (!mounted || FirebaseAuth.instance.currentUser?.uid != userId) {
-              return;
-            }
-            setState(() {
-              _pointLedger
-                ..clear()
-                ..addAll(
-                  snapshot.docs
-                      .where((document) => document.data()['version'] == 1)
-                      .map((document) {
-                        final entry = document.data();
-                        return <String, dynamic>{
-                          'title': entry['title']?.toString() ?? 'Puan işlemi',
-                          'detail': entry['detail']?.toString() ?? '',
-                          'amount': (entry['amount'] as num?)?.toInt() ?? 0,
-                          'date': entry['date']?.toString() ?? 'Şimdi',
-                        };
-                      }),
-                );
-            });
-          },
-          onError: (Object error) {
-            debugPrint('Navora puan geçmişi yüklenemedi: $error');
-            if (mounted) _showTrackingMessage('Puan geçmişi yüklenemedi.');
-          },
-        );
   }
 
   void _subscribeToUserCollections(String userId) {
@@ -6383,6 +6700,7 @@ out center tags;
   }
 
   Future<void> _loadProfileData() async {
+    await _refreshVerifiedEmail();
     final user = FirebaseAuth.instance.currentUser;
     if (user == null) {
       _showTrackingMessage('Oda oluşturmak için önce hesabına giriş yap.');
@@ -6419,14 +6737,6 @@ out center tags;
           .collection('users')
           .doc(user.uid)
           .collection('sos_contacts')
-          .get();
-      final pointLedgerCollection = FirebaseFirestore.instance
-          .collection('users')
-          .doc(user.uid)
-          .collection('point_ledger');
-      final pointLedgerSnapshot = await pointLedgerCollection
-          .orderBy('created_at', descending: true)
-          .limit(100)
           .get();
       final today = _dailyQuotaKey(DateTime.now());
       final dailyQuotaSnapshot = await _dailyQuotaReference(
@@ -6535,13 +6845,6 @@ out center tags;
                 ? visitedCities.whereType<String>()
                 : const [],
           );
-        final storedPoints = data['navora_points'];
-        _navoraPoints = data['points_version'] == 1 && storedPoints is num
-            ? storedPoints.toInt()
-            : 0;
-        _bonusChatRooms = (data['bonus_chat_rooms'] as num?)?.toInt() ?? 0;
-        _bonusAiQueries = (data['bonus_ai_queries'] as num?)?.toInt() ?? 0;
-        _proDiscountUnlocked = data['pro_discount_unlocked'] == true;
         _dailyQuotaDate = today;
         if (dailyQuotaSnapshot.exists &&
             dailyQuotaSnapshot.data()?['quota_version'] == 1) {
@@ -6552,24 +6855,9 @@ out center tags;
           _roomsCreatedToday = 0;
           _freeAiQueriesUsedToday = 0;
         }
-        final pointLedger = pointLedgerSnapshot.docs
-            .where((document) => document.data()['version'] == 1)
-            .map((document) {
-              final entry = document.data();
-              return <String, dynamic>{
-                'title': entry['title']?.toString() ?? 'Puan işlemi',
-                'detail': entry['detail']?.toString() ?? '',
-                'amount': (entry['amount'] as num?)?.toInt() ?? 0,
-                'date': entry['date']?.toString() ?? 'Şimdi',
-              };
-            })
-            .toList();
-        _pointLedger
-          ..clear()
-          ..addAll(pointLedger);
         final phone = data['phone'];
         final email =
-            data['email']?.toString() ?? user.email ?? widget.userEmail;
+            user.email ?? data['email']?.toString() ?? widget.userEmail;
         final gender =
             data['gender_preference']?.toString() ??
             data['gender']?.toString() ??
@@ -6588,7 +6876,7 @@ out center tags;
         }
         if (phone is String && phone.isNotEmpty) _userPhone = phone;
       });
-      _subscribeToAccountPoints(user.uid);
+      _subscribeToUserProfile(user.uid);
       _subscribeToUserCollections(user.uid);
       await _subscribeToDailyQuota(user.uid, today);
     } catch (error) {
@@ -6596,6 +6884,41 @@ out center tags;
       if (mounted) {
         _showTrackingMessage('Profil verileri yüklenemedi.');
       }
+    }
+  }
+
+  Future<void> _refreshVerifiedEmail() async {
+    if (_isRefreshingVerifiedEmail) return;
+    final user = FirebaseAuth.instance.currentUser;
+    if (user == null) return;
+
+    _isRefreshingVerifiedEmail = true;
+    try {
+      await user.reload();
+      final refreshedUser = FirebaseAuth.instance.currentUser;
+      final email = refreshedUser?.email;
+      if (refreshedUser == null || email == null || email.isEmpty) return;
+
+      if (mounted && _userEmail != email) {
+        setState(() => _userEmail = email);
+      }
+
+      final profileReference = FirebaseFirestore.instance
+          .collection('users')
+          .doc(refreshedUser.uid);
+      final profile = await profileReference.get();
+      if (profile.data()?['email'] != email) {
+        await profileReference.set({
+          'email': email,
+          'updated_at': FieldValue.serverTimestamp(),
+        }, SetOptions(merge: true));
+      }
+    } on FirebaseAuthException catch (error) {
+      debugPrint('E-posta durumu yenilenemedi: ${error.code}');
+    } on FirebaseException catch (error) {
+      debugPrint('Doğrulanmış e-posta profili güncellenemedi: ${error.code}');
+    } finally {
+      _isRefreshingVerifiedEmail = false;
     }
   }
 
@@ -7134,19 +7457,11 @@ out center tags;
       currentUserUid: FirebaseAuth.instance.currentUser?.uid,
       canManageHighlights: _canManageExploreHighlights,
       savedAddresses: _savedAddresses,
-      communityPlaces: _communityPlaces,
+      communityPlaces: _visibleCommunityPlaces,
       onAddCommunityPlace: () => unawaited(_createCommunityPlace()),
       onSelectCommunityPlace: (place) =>
           unawaited(_openCommunityPlaceFromExplore(place)),
       onShowCommunityPlaces: () => unawaited(_showCommunityPlacesOnMap()),
-      recentSearches: _searchHistory
-          .map(
-            (search) => <String, String>{
-              'name': search['name']?.toString() ?? '',
-              'query': search['query']?.toString() ?? '',
-            },
-          )
-          .toList(),
       onSearchCategory: (label, query) {
         setState(() => _selectedIndex = 1);
         unawaited(_searchCategory(label, query));
@@ -7297,7 +7612,7 @@ out center tags;
   }
 
   Future<void> _showCommunityPlacesOnMap() async {
-    final places = _communityPlaces.where((place) {
+    final places = _visibleCommunityPlaces.where((place) {
       return place['latitude'] is num && place['longitude'] is num;
     }).toList();
     if (places.isEmpty) {
@@ -7386,7 +7701,7 @@ out center tags;
 
   Widget _buildLostPetMapToolbar() {
     final hasError = _lostPetReportsError != null;
-    final visibleReports = _lostPetReports
+    final visibleReports = _visibleLostPetReports
         .where(
           (report) =>
               report['collection'] ==
@@ -7528,10 +7843,10 @@ out center tags;
 
   Widget _buildPropertyMapToolbar() {
     final selectedType = _activePropertyListingType!;
-    final matchingListings = _propertyListings
+    final matchingListings = _visiblePropertyListings
         .where((listing) => _matchesPropertyMapFilters(listing, selectedType))
         .length;
-    final totalListings = _propertyListings
+    final totalListings = _visiblePropertyListings
         .where((listing) => listing['listing_type'] == selectedType)
         .length;
     final status =
@@ -7710,7 +8025,7 @@ out center tags;
       builder: (sheetContext) => StatefulBuilder(
         builder: (context, setSheetState) {
           final cities =
-              _propertyListings
+              _visiblePropertyListings
                   .map((listing) => listing['city']?.toString().trim() ?? '')
                   .where((city) => city.isNotEmpty)
                   .toSet()
@@ -7720,7 +8035,7 @@ out center tags;
             cities.add(selectedCity);
           }
           final districts =
-              _propertyListings
+              _visiblePropertyListings
                   .where(
                     (listing) =>
                         selectedCity.isEmpty ||
@@ -8101,7 +8416,9 @@ out center tags;
         : [
             Marker(
               markerId: const MarkerId('navigation-route-start'),
-              position: _routePolylines.first.points.first,
+              position:
+                  _navigationStartPosition ??
+                  _routePolylines.first.points.first,
               icon: _navigationEndpointMarkerIcon!,
               anchor: const Offset(0.5, 0.5),
               zIndexInt: 1000,
@@ -8116,154 +8433,127 @@ out center tags;
               zIndexInt: 1000,
             ),
           ];
+    final mapItems = <Map<String, dynamic>>[];
+    void addMapItem(String type, Map<String, dynamic> data, String id) {
+      mapItems.add({
+        'id': id,
+        'type': type,
+        'data': data,
+        'latitude': data['latitude'],
+        'longitude': data['longitude'],
+      });
+    }
+
+    if (_isMapLayerVisible('rooms')) {
+      for (final room in _visibleRooms) {
+        addMapItem('room', room, 'room-${room['id'] ?? room['name']}');
+      }
+    }
+    if (_isMapLayerVisible('community')) {
+      for (final place in _visibleCommunityPlaces) {
+        addMapItem('community', place, 'community-place-${place['id']}');
+      }
+    }
+    for (final report in _visibleLostPetReports) {
+      final isAdoption = report['collection'] == 'pet_adoption_listings';
+      if (_isMapLayerVisible(isAdoption ? 'adoptions' : 'lostPets')) {
+        addMapItem(
+          'pet',
+          report,
+          '${isAdoption ? 'adoption' : 'lost-pet'}-${report['id']}',
+        );
+      }
+    }
+    if (_isMapLayerVisible('properties')) {
+      for (final listing in _visiblePropertyListings) {
+        if (_activePropertyListingType == null ||
+            _matchesPropertyMapFilters(listing, _activePropertyListingType!)) {
+          addMapItem('property', listing, 'property-${listing['id']}');
+        }
+      }
+    }
+
     final roomZoom = _mapCameraPosition?.zoom ?? 11.5;
-    final roomClusters =
-        !_isMapLayerVisible('rooms') || _chatRoomMarkerIcon == null
-        ? const <List<Map<String, dynamic>>>[]
-        : navoraClusterChatRooms(
-            _liveRooms,
-            zoom: _clusterRoomMarkers
-                ? math.min(roomZoom, 13.99)
-                : math.max(roomZoom, 14),
-          );
-    final roomMarkers = !_isMapLayerVisible('rooms')
-        ? <Marker>[]
-        : roomClusters.map((cluster) {
-            if (cluster.length == 1) {
-              final room = cluster.single;
-              final userCount =
-                  (room['activeUsersCount'] as num?)?.toInt() ?? 1;
-              return Marker(
-                markerId: MarkerId('room-${room['id'] ?? room['name']}'),
-                position: LatLng(
-                  (room['latitude'] as num).toDouble(),
-                  (room['longitude'] as num).toDouble(),
-                ),
-                icon: _roomMarkerIconForCount(userCount),
-                infoWindow: InfoWindow(
-                  title: room['name']?.toString() ?? 'Sohbet Odası',
-                  snippet: '$userCount kişi aktif',
-                ),
-                onTap: () => _showRoomMarkerDialog(room),
-              );
-            }
-
-            final center = _roomClusterCenter(cluster);
-            return Marker(
-              markerId: MarkerId(
-                'room-cluster-${cluster.map((room) => room['id']).join('-')}',
-              ),
-              position: center,
-              icon: _roomClusterMarkerIconForCount(cluster.length),
-              infoWindow: InfoWindow(
-                title: '${cluster.length} sohbet odası',
-                snippet: 'Yakınlaştırmak için dokunun',
-              ),
-              onTap: () => _zoomToRoomCluster(center),
-              zIndexInt: 100,
-            );
-          }).toList();
-    final communityPlaceMarkers = !_isMapLayerVisible('community')
-        ? <Marker>[]
-        : _communityPlaces
-              .map(
-                (place) => Marker(
-                  markerId: MarkerId('community-place-${place['id']}'),
-                  position: LatLng(
-                    (place['latitude'] as num).toDouble(),
-                    (place['longitude'] as num).toDouble(),
-                  ),
-                  anchor: const Offset(0.5, 0.5),
-                  icon:
-                      _communityPlaceMarkerIcon ??
-                      BitmapDescriptor.defaultMarkerWithHue(
-                        BitmapDescriptor.hueCyan,
-                      ),
-                  onTap: () => _showCommunityPlaceOnMap(place),
-                ),
-              )
-              .toList();
-    final lostPetMarkers = _lostPetReports
-        .where((report) {
-          return report['collection'] == 'pet_adoption_listings'
-              ? _isMapLayerVisible('adoptions')
-              : _isMapLayerVisible('lostPets');
-        })
-        .map((report) {
-          final isAdoption = report['collection'] == 'pet_adoption_listings';
-          final latitude = (report['latitude'] as num).toDouble();
-          final longitude = (report['longitude'] as num).toDouble();
-          final petName = report['pet_name']?.toString() ?? '';
-          final petType = _lostPetTypeLabel(report['pet_type']?.toString());
-          return Marker(
+    final mapClusters = navoraClusterMapItems(mapItems, zoom: roomZoom);
+    final mapContentMarkers = <Marker>[];
+    for (final cluster in mapClusters) {
+      if (cluster.length > 1) {
+        final center = _mapClusterCenter(cluster);
+        final categoryCounts = <String, int>{};
+        for (final item in cluster) {
+          final label = switch (item['type']) {
+            'room' => 'sohbet odası',
+            'property' => 'emlak ilanı',
+            'pet' => 'hayvan ilanı',
+            'community' => 'mekân',
+            _ => 'öğe',
+          };
+          categoryCounts.update(label, (count) => count + 1, ifAbsent: () => 1);
+        }
+        final summary = categoryCounts.entries
+            .map((entry) => '${entry.value} ${entry.key}')
+            .join(' • ');
+        mapContentMarkers.add(
+          Marker(
             markerId: MarkerId(
-              '${isAdoption ? 'adoption' : 'lost-pet'}-${report['id']}',
+              'map-cluster-${cluster.map((item) => item['id']).join('-')}',
             ),
-            position: LatLng(latitude, longitude),
-            anchor: const Offset(0.5, 0.5),
-            icon: isAdoption
-                ? _adoptionMarkerIcon ??
-                      _lostPetMarkerIcon ??
-                      BitmapDescriptor.defaultMarkerWithHue(
-                        BitmapDescriptor.hueGreen,
-                      )
-                : _lostPetMarkerIcon ??
-                      BitmapDescriptor.defaultMarkerWithHue(
-                        BitmapDescriptor.hueRose,
-                      ),
+            position: center,
+            icon: _mapClusterMarkerIconForCount(cluster.length),
             infoWindow: InfoWindow(
-              title: petName.isEmpty
-                  ? isAdoption
-                        ? 'Sahiplendirme ilanı'
-                        : 'Kayıp ${petType.toLowerCase()}'
-                  : petName,
-              snippet: isAdoption
-                  ? 'Sahiplendiriliyor • $petType • ${report['address']}'
-                  : '$petType • ${report['address']}',
+              title: '${cluster.length} içerik',
+              snippet: summary,
             ),
-            onTap: () => _showLostPetReport(report),
-          );
-        })
-        .toList();
-    final propertyMarkers = _propertyListings
-        .where((listing) {
-          return _isMapLayerVisible('properties') &&
-              (_activePropertyListingType == null
-                  ? true
-                  : _matchesPropertyMapFilters(
-                      listing,
-                      _activePropertyListingType!,
-                    ));
-        })
-        .map((listing) {
-          final latitude = (listing['latitude'] as num).toDouble();
-          final longitude = (listing['longitude'] as num).toDouble();
-          final icon = listing['listing_type'] == 'kiralik'
-              ? _rentalPropertyMarkerIcon
-              : _salePropertyMarkerIcon;
-          if (icon == null) return null;
-          return Marker(
-            markerId: MarkerId('property-${listing['id']}'),
-            position: LatLng(latitude, longitude),
-            anchor: const Offset(0.5, 0.5),
-            icon: icon,
-            infoWindow: InfoWindow(
-              title: listing['title']?.toString() ?? 'Konut ilanı',
-              snippet: _formatListingPrice(listing['price']),
-            ),
-            onTap: () => _showPropertyListing(listing),
-          );
-        })
-        .whereType<Marker>()
-        .toList();
+            onTap: () => _zoomToMapCluster(center),
+            zIndexInt: 100,
+          ),
+        );
+        continue;
+      }
 
-    final mapMarkers = <Marker>{
-      ..._searchMarkers,
-      ...roomMarkers,
-      ...communityPlaceMarkers,
-      ...lostPetMarkers,
-      ...propertyMarkers,
-    };
+      final item = cluster.single;
+      final data = Map<String, dynamic>.from(item['data'] as Map);
+      final latitude = (item['latitude'] as num).toDouble();
+      final longitude = (item['longitude'] as num).toDouble();
+      final position = LatLng(latitude, longitude);
+      final marker = switch (item['type']) {
+        'room' =>
+          _chatRoomMarkerIcon == null
+              ? null
+              : Marker(
+                  markerId: MarkerId(item['id'] as String),
+                  position: position,
+                  icon: _roomMarkerIconForCount(
+                    (data['activeUsersCount'] as num?)?.toInt() ?? 1,
+                  ),
+                  infoWindow: InfoWindow(
+                    title: data['name']?.toString() ?? 'Sohbet Odası',
+                    snippet:
+                        '${(data['activeUsersCount'] as num?)?.toInt() ?? 1} kişi aktif',
+                  ),
+                  onTap: () => _showRoomMarkerDialog(data),
+                ),
+        'community' => Marker(
+          markerId: MarkerId(item['id'] as String),
+          position: position,
+          anchor: const Offset(0.5, 0.5),
+          icon:
+              _communityPlaceMarkerIcon ??
+              BitmapDescriptor.defaultMarkerWithHue(BitmapDescriptor.hueCyan),
+          onTap: () => _showCommunityPlaceOnMap(data),
+        ),
+        'pet' => _buildPetMapMarker(data, item['id'] as String, position),
+        'property' => _buildPropertyMapMarker(
+          data,
+          item['id'] as String,
+          position,
+        ),
+        _ => null,
+      };
+      if (marker != null) mapContentMarkers.add(marker);
+    }
+
+    final mapMarkers = <Marker>{..._searchMarkers, ...mapContentMarkers};
     mapMarkers.addAll(navigationEndpointMarkers);
 
     return Listener(
@@ -8339,9 +8629,10 @@ out center tags;
               _mapCameraPosition = cameraPosition;
             },
             onCameraIdle: () {
-              final shouldCluster = (_mapCameraPosition?.zoom ?? 11.5) < 14;
-              if (shouldCluster != _clusterRoomMarkers && mounted) {
-                setState(() => _clusterRoomMarkers = shouldCluster);
+              final zoom = _mapCameraPosition?.zoom ?? 11.5;
+              if (_lastClusteredMapZoom != zoom && mounted) {
+                _lastClusteredMapZoom = zoom;
+                setState(() {});
               }
             },
           ),
@@ -8424,9 +8715,9 @@ out center tags;
                   }
                   if (room['isProtected'] == true &&
                       !_canManageExploreHighlights) {
-                    _showPasswordPromptDialog(room);
+                    unawaited(_showPasswordPromptDialog(room));
                   } else {
-                    _openRoomChat(room);
+                    unawaited(_openRoomChat(room));
                   }
                 },
               ),
@@ -8462,6 +8753,7 @@ out center tags;
 
   @override
   void dispose() {
+    WidgetsBinding.instance.removeObserver(this);
     _publicChatScrollController.dispose();
     _searchController.dispose();
     _roomSearchController.dispose();
@@ -8475,11 +8767,11 @@ out center tags;
     _mapLostPetReportsSubscription?.cancel();
     _mapAdoptionListingsSubscription?.cancel();
     _publicChatSubscription?.cancel();
+    _blockedUsersSubscription?.cancel();
     _searchHistorySubscription?.cancel();
     _aiChatsSubscription?.cancel();
-    _pointLedgerSubscription?.cancel();
     _dailyQuotaSubscription?.cancel();
-    _pointsProfileSubscription?.cancel();
+    _userProfileSubscription?.cancel();
     _savedRoutesSubscription?.cancel();
     _savedAddressesSubscription?.cancel();
     _drivingHistorySubscription?.cancel();
@@ -8952,12 +9244,13 @@ out center tags;
   }
 
   Widget _buildPublicFeedList() {
+    final visibleMessages = _visiblePublicFeedMessages;
     return ListView.builder(
       controller: _publicChatScrollController,
       padding: const EdgeInsets.all(16),
-      itemCount: _publicFeedMessages.length,
+      itemCount: visibleMessages.length,
       itemBuilder: (context, index) {
-        final msg = _publicFeedMessages[index];
+        final msg = visibleMessages[index];
         final senderName = msg['sender']?.toString() ?? '';
         final senderId = msg['senderId']?.toString() ?? '';
         final messageId = msg['_document_id']?.toString() ?? '';
@@ -9067,13 +9360,36 @@ out center tags;
                               showModalBottomSheet<void>(
                                 context: context,
                                 builder: (sheetContext) => SafeArea(
-                                  child: ListTile(
-                                    leading: const Icon(Icons.flag_outlined),
-                                    title: const Text('Şikayet et'),
-                                    onTap: () {
-                                      Navigator.pop(sheetContext);
-                                      unawaited(_reportPublicChatMessage(msg));
-                                    },
+                                  child: Column(
+                                    mainAxisSize: MainAxisSize.min,
+                                    children: [
+                                      ListTile(
+                                        leading: const Icon(
+                                          Icons.flag_outlined,
+                                        ),
+                                        title: const Text('Şikayet et'),
+                                        onTap: () {
+                                          Navigator.pop(sheetContext);
+                                          unawaited(
+                                            _reportPublicChatMessage(msg),
+                                          );
+                                        },
+                                      ),
+                                      ListTile(
+                                        leading: const Icon(
+                                          Icons.block_rounded,
+                                        ),
+                                        title: const Text(
+                                          'Kullanıcıyı engelle',
+                                        ),
+                                        onTap: () {
+                                          Navigator.pop(sheetContext);
+                                          unawaited(
+                                            _blockUser(senderId, senderName),
+                                          );
+                                        },
+                                      ),
+                                    ],
                                   ),
                                 ),
                               );
@@ -9100,7 +9416,7 @@ out center tags;
   Widget _buildRoomsList() {
     final search = _roomSearchController.text.trim().toLowerCase();
     final roomsToDisplay =
-        _liveRooms.where((room) {
+        _visibleRooms.where((room) {
           final matchesSearch =
               search.isEmpty ||
               '${room['name']} ${room['type']} ${room['category']}'
@@ -9228,7 +9544,7 @@ out center tags;
                           ),
                         ),
                         const SizedBox(height: 8),
-                        ..._publicFeedMessages
+                        ..._visiblePublicFeedMessages
                             .take(4)
                             .map(
                               (m) => Container(
@@ -9454,9 +9770,9 @@ out center tags;
                           return;
                         }
                         if (isProtected && !_canManageExploreHighlights) {
-                          _showPasswordPromptDialog(room);
+                          unawaited(_showPasswordPromptDialog(room));
                         } else {
-                          _openRoomChat(room);
+                          unawaited(_openRoomChat(room));
                         }
                       },
                       child: Text(
@@ -9489,9 +9805,7 @@ out center tags;
       return;
     }
     final roomLimit = _isProUser ? _proRoomLimit : _dailyRoomLimit;
-    if (!_canManageExploreHighlights &&
-        _roomsCreatedToday >= roomLimit &&
-        _bonusChatRooms == 0) {
+    if (!_canManageExploreHighlights && _roomsCreatedToday >= roomLimit) {
       _showProUpgradeModal();
       return;
     }
@@ -9583,6 +9897,11 @@ out center tags;
                   ),
                   filled: true,
                   fillColor: const Color(0xFF191919),
+                  helperText: 'En az $navoraMinimumRoomPasswordLength karakter',
+                  helperStyle: const TextStyle(
+                    color: Color(0xFF8F8F8F),
+                    fontSize: 11,
+                  ),
                   enabledBorder: OutlineInputBorder(
                     borderRadius: BorderRadius.circular(14),
                     borderSide: BorderSide(color: const Color(0xFF2B2B2B)),
@@ -9709,9 +10028,12 @@ out center tags;
                             return;
                           }
                           final password = roomPassController.text.trim();
-                          if (requiresPassword && password.length < 12) {
+                          if (requiresPassword &&
+                              password.length <
+                                  navoraMinimumRoomPasswordLength) {
                             _showTrackingMessage(
-                              'Oda şifresi en az 12 karakter olmalı.',
+                              'Oda şifresi en az '
+                              '$navoraMinimumRoomPasswordLength karakter olmalı.',
                             );
                             return;
                           }
@@ -9975,120 +10297,213 @@ out center tags;
     }
   }
 
-  void _showPasswordPromptDialog(Map<String, dynamic> room) {
+  Future<void> _showPasswordPromptDialog(Map<String, dynamic> room) async {
     final currentUser = FirebaseAuth.instance.currentUser;
     final ownerId = (room['ownerId'] ?? room['owner_id'])?.toString() ?? '';
     final isOwner = currentUser != null && ownerId == currentUser.uid;
 
     if (isOwner || room['isProtected'] != true) {
-      _openRoomChat(room);
+      await _openRoomChat(room);
       return;
     }
 
-    final TextEditingController passController = TextEditingController();
-    showDialog<void>(
+    final passController = TextEditingController();
+    final enteredPassword = await showDialog<String>(
       context: context,
-      builder: (dialogContext) => AlertDialog(
-        backgroundColor: const Color(0xFF171717),
-        shape: RoundedRectangleBorder(
-          borderRadius: BorderRadius.circular(22),
-          side: const BorderSide(color: Color(0xFFFF8A3D), width: 1.2),
-        ),
-        title: Row(
-          children: [
-            Container(
-              padding: const EdgeInsets.all(8),
-              decoration: BoxDecoration(
-                color: const Color(0xFF2A180D),
-                borderRadius: BorderRadius.circular(10),
-              ),
-              child: const Icon(
-                Icons.lock_outline_rounded,
-                color: Color(0xFFFF8A3D),
-                size: 18,
-              ),
-            ),
-            const SizedBox(width: 10),
-            Expanded(
-              child: Text(
-                '${room['name']} (Şifreli)',
-                style: const TextStyle(
-                  fontSize: 16,
-                  fontWeight: FontWeight.w700,
-                  color: Colors.white,
-                ),
-              ),
-            ),
-          ],
-        ),
-        content: TextField(
-          controller: passController,
-          obscureText: true,
-          style: const TextStyle(color: Colors.white, fontSize: 14),
-          decoration: InputDecoration(
-            labelText: 'Oda şifresini girin',
-            labelStyle: const TextStyle(color: Color(0xFFBDBDBD)),
-            hintStyle: const TextStyle(color: Color(0xFFBDBDBD)),
-            filled: true,
-            fillColor: const Color(0xFF1B1B1B),
-            prefixIcon: const Icon(
-              Icons.vpn_key_rounded,
-              color: Color(0xFFFF8A3D),
-            ),
-            enabledBorder: OutlineInputBorder(
-              borderRadius: BorderRadius.circular(14),
-              borderSide: BorderSide(color: const Color(0xFF2D2D2D)),
-            ),
-            focusedBorder: OutlineInputBorder(
-              borderRadius: BorderRadius.circular(14),
-              borderSide: BorderSide(color: const Color(0xFFFF8A3D)),
-            ),
-          ),
-        ),
-        actions: [
-          TextButton(
-            onPressed: () =>
-                Navigator.of(dialogContext, rootNavigator: true).pop(),
-            child: const Text(
-              'İptal',
-              style: TextStyle(color: Color(0xFFBDBDBD)),
-            ),
-          ),
-          ElevatedButton(
-            style: ElevatedButton.styleFrom(
-              backgroundColor: const Color(0xFFFF6B00),
-              foregroundColor: Colors.white,
-              padding: const EdgeInsets.symmetric(horizontal: 18, vertical: 10),
-              shape: RoundedRectangleBorder(
-                borderRadius: BorderRadius.circular(12),
-              ),
-            ),
-            onPressed: () async {
-              final enteredPassword = passController.text.trim();
-              final salt = room['passwordSalt']?.toString() ?? '';
-              if (enteredPassword.length < 12 || salt.isEmpty) {
-                AppNotificationService.show('Oda şifresi geçersiz.');
+      builder: (dialogContext) {
+        var obscurePassword = true;
+        var validationMessage = '';
+
+        return StatefulBuilder(
+          builder: (context, setDialogState) {
+            void submitPassword() {
+              final value = passController.text.trim();
+              if (value.length < navoraMinimumRoomPasswordLength) {
+                setDialogState(
+                  () => validationMessage =
+                      'Şifre en az $navoraMinimumRoomPasswordLength karakter olmalı.',
+                );
                 return;
               }
-              Navigator.of(dialogContext, rootNavigator: true).pop();
-              await _openRoomChat(
-                room,
-                passwordHash: await navoraHashRoomPassword(
-                  enteredPassword,
-                  salt,
-                ),
-              );
-            },
-            child: const Text(
-              'Giriş Yap',
-              style: TextStyle(
-                color: Colors.white,
-                fontWeight: FontWeight.w700,
+              Navigator.of(dialogContext).pop(value);
+            }
+
+            return Dialog(
+              backgroundColor: const Color(0xFF191919),
+              insetPadding: const EdgeInsets.symmetric(horizontal: 24),
+              shape: RoundedRectangleBorder(
+                borderRadius: BorderRadius.circular(24),
+                side: const BorderSide(color: Color(0xFF49301F)),
               ),
-            ),
-          ),
-        ],
-      ),
+              child: SingleChildScrollView(
+                padding: const EdgeInsets.all(22),
+                child: ConstrainedBox(
+                  constraints: const BoxConstraints(maxWidth: 380),
+                  child: Column(
+                    mainAxisSize: MainAxisSize.min,
+                    crossAxisAlignment: CrossAxisAlignment.stretch,
+                    children: [
+                      Row(
+                        children: [
+                          Container(
+                            width: 44,
+                            height: 44,
+                            decoration: BoxDecoration(
+                              color: const Color(0xFF332115),
+                              borderRadius: BorderRadius.circular(14),
+                            ),
+                            child: const Icon(
+                              Icons.lock_outline_rounded,
+                              color: Color(0xFFFF9A3D),
+                            ),
+                          ),
+                          const SizedBox(width: 12),
+                          Expanded(
+                            child: Column(
+                              crossAxisAlignment: CrossAxisAlignment.start,
+                              children: [
+                                const Text(
+                                  'Şifreli oda',
+                                  style: TextStyle(
+                                    color: Colors.white70,
+                                    fontSize: 12,
+                                  ),
+                                ),
+                                const SizedBox(height: 3),
+                                Text(
+                                  room['name']?.toString() ?? 'Sohbet odası',
+                                  maxLines: 1,
+                                  overflow: TextOverflow.ellipsis,
+                                  style: const TextStyle(
+                                    color: Colors.white,
+                                    fontSize: 17,
+                                    fontWeight: FontWeight.w700,
+                                  ),
+                                ),
+                              ],
+                            ),
+                          ),
+                          IconButton(
+                            tooltip: 'Kapat',
+                            visualDensity: VisualDensity.compact,
+                            onPressed: () => Navigator.of(dialogContext).pop(),
+                            icon: const Icon(
+                              Icons.close_rounded,
+                              color: Colors.white60,
+                            ),
+                          ),
+                        ],
+                      ),
+                      const SizedBox(height: 20),
+                      TextField(
+                        controller: passController,
+                        autofocus: true,
+                        obscureText: obscurePassword,
+                        onSubmitted: (_) => submitPassword(),
+                        style: const TextStyle(color: Colors.white),
+                        decoration: InputDecoration(
+                          labelText: 'Oda şifresi',
+                          hintText:
+                              'En az $navoraMinimumRoomPasswordLength karakter',
+                          errorText: validationMessage.isEmpty
+                              ? null
+                              : validationMessage,
+                          prefixIcon: const Icon(
+                            Icons.key_rounded,
+                            color: Color(0xFFFF9A3D),
+                          ),
+                          suffixIcon: IconButton(
+                            tooltip: obscurePassword
+                                ? 'Şifreyi göster'
+                                : 'Şifreyi gizle',
+                            onPressed: () => setDialogState(
+                              () => obscurePassword = !obscurePassword,
+                            ),
+                            icon: Icon(
+                              obscurePassword
+                                  ? Icons.visibility_rounded
+                                  : Icons.visibility_off_rounded,
+                              color: Colors.white60,
+                            ),
+                          ),
+                          filled: true,
+                          fillColor: const Color(0xFF222222),
+                          border: OutlineInputBorder(
+                            borderRadius: BorderRadius.circular(14),
+                            borderSide: const BorderSide(
+                              color: Color(0xFF3A3A3A),
+                            ),
+                          ),
+                          enabledBorder: OutlineInputBorder(
+                            borderRadius: BorderRadius.circular(14),
+                            borderSide: const BorderSide(
+                              color: Color(0xFF3A3A3A),
+                            ),
+                          ),
+                          focusedBorder: OutlineInputBorder(
+                            borderRadius: BorderRadius.circular(14),
+                            borderSide: const BorderSide(
+                              color: Color(0xFFFF9A3D),
+                            ),
+                          ),
+                        ),
+                      ),
+                      const SizedBox(height: 22),
+                      Row(
+                        children: [
+                          Expanded(
+                            child: OutlinedButton(
+                              onPressed: () =>
+                                  Navigator.of(dialogContext).pop(),
+                              style: OutlinedButton.styleFrom(
+                                foregroundColor: Colors.white70,
+                                minimumSize: const Size.fromHeight(48),
+                                side: const BorderSide(color: Colors.white24),
+                                shape: RoundedRectangleBorder(
+                                  borderRadius: BorderRadius.circular(14),
+                                ),
+                              ),
+                              child: const Text('Vazgeç'),
+                            ),
+                          ),
+                          const SizedBox(width: 12),
+                          Expanded(
+                            child: ElevatedButton.icon(
+                              onPressed: submitPassword,
+                              style: ElevatedButton.styleFrom(
+                                backgroundColor: const Color(0xFFFF7A18),
+                                foregroundColor: Colors.white,
+                                minimumSize: const Size.fromHeight(48),
+                                shape: RoundedRectangleBorder(
+                                  borderRadius: BorderRadius.circular(14),
+                                ),
+                              ),
+                              icon: const Icon(Icons.login_rounded, size: 18),
+                              label: const Text('Odaya katıl'),
+                            ),
+                          ),
+                        ],
+                      ),
+                    ],
+                  ),
+                ),
+              ),
+            );
+          },
+        );
+      },
+    );
+    passController.dispose();
+    if (enteredPassword == null || !mounted) return;
+
+    final salt = room['passwordSalt']?.toString() ?? '';
+    if (salt.isEmpty) {
+      AppNotificationService.show('Oda şifresi doğrulanamıyor.');
+      return;
+    }
+    await _openRoomChat(
+      room,
+      passwordHash: await navoraHashRoomPassword(enteredPassword, salt),
     );
   }
 
@@ -10806,18 +11221,6 @@ out center tags;
                               onTap: _showSavedRoutesSheet,
                             ),
                           ),
-                          Container(
-                            height: 28,
-                            width: 1,
-                            color: Colors.white30,
-                          ),
-                          Expanded(
-                            child: _buildProfileStat(
-                              formatNavoraPoints(_navoraPoints),
-                              'Puan',
-                              onTap: _showNavoraPointsSheet,
-                            ),
-                          ),
                         ],
                       ),
                     ),
@@ -10848,8 +11251,8 @@ out center tags;
             ),
             _buildProfileMenuItem(
               icon: Icons.report_gmailerrorred_rounded,
-              title: 'Sohbet şikayetleri',
-              subtitle: 'Bildirilen mesajları incele ve işlem yap',
+              title: 'Şikayetler',
+              subtitle: 'Sohbet, ilan ve mekân bildirimlerini incele',
               onTap: () => unawaited(
                 Navigator.of(context).push<void>(
                   MaterialPageRoute<void>(
@@ -10871,13 +11274,13 @@ out center tags;
             ),
           ),
           const SizedBox(height: 10),
-          _buildProfileMenuItem(
-            icon: Icons.stars_rounded,
-            title: 'Navora Puan & Takas',
-            subtitle:
-                '${formatNavoraPoints(_navoraPoints)} puan • ${NavoraRank.current(_navoraPoints).name}',
-            onTap: _showNavoraPointsSheet,
-          ),
+          if (!isGuest)
+            _buildProfileMenuItem(
+              icon: Icons.block_rounded,
+              title: 'Engellenen Kullanıcılar',
+              subtitle: 'Engellediğin kullanıcıları yönet',
+              onTap: _showBlockedUsersSheet,
+            ),
           _buildProfileMenuItem(
             icon: Icons.bookmark_added_rounded,
             title: 'Kayıtlı Adreslerim',
@@ -11298,7 +11701,11 @@ out center tags;
     final latitude = (place['latitude'] as num?)?.toDouble();
     final longitude = (place['longitude'] as num?)?.toDouble();
     final placeId = place['id']?.toString();
-    if (latitude == null || longitude == null || placeId == null) {
+    final user = FirebaseAuth.instance.currentUser;
+    if (latitude == null ||
+        longitude == null ||
+        placeId == null ||
+        user == null) {
       AppNotificationService.show('Mekân bilgileri düzenlenemedi.');
       return;
     }
@@ -11317,6 +11724,11 @@ out center tags;
         initialAddress: place['address']?.toString() ?? '',
         initialCategory: place['category']?.toString() ?? 'Diğer',
         initialDescription: place['description']?.toString() ?? '',
+        initialPhotoUrls:
+            (place['photo_urls'] as List?)?.whereType<String>().toList() ??
+            (place['photo_url']?.toString().isNotEmpty == true
+                ? [place['photo_url'].toString()]
+                : const <String>[]),
         isEditing: true,
         onSubmit:
             ({
@@ -11328,17 +11740,71 @@ out center tags;
               required photoExtensions,
               required coordinate,
             }) async {
-              await FirebaseFirestore.instance
+              if (photoBytes.length != photoExtensions.length ||
+                  photoBytes.length +
+                          ((place['photo_urls'] as List?)?.length ??
+                              (place['photo_url']?.toString().isNotEmpty == true
+                                  ? 1
+                                  : 0)) >
+                      3) {
+                throw StateError('Mekân en fazla 3 fotoğraf içerebilir.');
+              }
+              final existingPhotoUrls =
+                  (place['photo_urls'] as List?)
+                      ?.whereType<String>()
+                      .toList() ??
+                  (place['photo_url']?.toString().isNotEmpty == true
+                      ? [place['photo_url'].toString()]
+                      : <String>[]);
+              final photoUrls = List<String>.from(existingPhotoUrls);
+              final uploadedReferences = <Reference>[];
+              final placeReference = FirebaseFirestore.instance
                   .collection('community_places')
-                  .doc(placeId)
-                  .update({
-                    'name': name,
-                    'category': category,
-                    'description': description,
-                    'address': address,
-                    'latitude': coordinate.latitude,
-                    'longitude': coordinate.longitude,
-                  });
+                  .doc(placeId);
+              try {
+                for (var index = 0; index < photoBytes.length; index++) {
+                  final extension = photoExtensions[index];
+                  final contentType = switch (extension) {
+                    'jpg' || 'jpeg' => 'image/jpeg',
+                    'png' => 'image/png',
+                    'webp' => 'image/webp',
+                    _ => throw StateError(
+                      'JPG, PNG veya WebP fotoğraf seçmelisin.',
+                    ),
+                  };
+                  final photoReference = FirebaseStorage.instance.ref().child(
+                    'community_places/${user.uid}/$placeId/${photoUrls.length}',
+                  );
+                  uploadedReferences.add(photoReference);
+                  await photoReference.putData(
+                    photoBytes[index],
+                    SettableMetadata(contentType: contentType),
+                  );
+                  photoUrls.add(await photoReference.getDownloadURL());
+                }
+
+                await placeReference.update({
+                  'name': name,
+                  'category': category,
+                  'description': description,
+                  'address': address,
+                  'latitude': coordinate.latitude,
+                  'longitude': coordinate.longitude,
+                  if (photoUrls.isNotEmpty) ...{
+                    'photo_urls': photoUrls,
+                    'photo_url': photoUrls.first,
+                  },
+                });
+              } catch (_) {
+                for (final reference in uploadedReferences) {
+                  try {
+                    await reference.delete();
+                  } catch (cleanupError) {
+                    debugPrint('Mekân fotoğrafı temizlenemedi: $cleanupError');
+                  }
+                }
+                rethrow;
+              }
             },
       ),
     );
@@ -11416,8 +11882,9 @@ out center tags;
       }
     } catch (error, stackTrace) {
       debugPrint('Topluluk mekânı silinemedi: $error\n$stackTrace');
-      if (mounted)
+      if (mounted) {
         AppNotificationService.show('Mekân silinemedi. Tekrar dene.');
+      }
     }
   }
 
@@ -13446,6 +13913,12 @@ out center tags;
       ).timeout(const Duration(seconds: 20));
       _lastDrivePosition = position;
       _currentPosition = position;
+      if (startedForNavigation) {
+        _navigationStartPosition = LatLng(
+          position.latitude,
+          position.longitude,
+        );
+      }
       _driveStartedAt = DateTime.now();
       _driveDistanceKm = 0;
       _driveStartedForNavigation = startedForNavigation;
@@ -13460,9 +13933,9 @@ out center tags;
             )
           : null;
       _positionSubscription = geo.Geolocator.getPositionStream(
-        locationSettings: const geo.LocationSettings(
+        locationSettings: geo.LocationSettings(
           accuracy: geo.LocationAccuracy.high,
-          distanceFilter: 5,
+          distanceFilter: startedForNavigation ? 1 : 5,
         ),
       ).listen(_handleDrivePosition);
       if (!mounted) return;
@@ -14157,7 +14630,7 @@ out center tags;
       _pendingNavigationCameraPosition = position;
       if (_navigationCameraUpdateTimer != null) return;
       _navigationCameraUpdateTimer = Timer(
-        const Duration(milliseconds: 500),
+        const Duration(milliseconds: 200),
         () {
           _navigationCameraUpdateTimer = null;
           final latestPosition = _pendingNavigationCameraPosition;
@@ -14228,7 +14701,7 @@ out center tags;
                 : 60,
           ),
         ),
-        duration: const Duration(milliseconds: 500),
+        duration: const Duration(milliseconds: 200),
       );
     } finally {
       _isProgrammaticCameraMove = false;
@@ -15293,7 +15766,11 @@ out center tags;
                     }
 
                     try {
-                      if (user != null && user.email != email) {
+                      final currentEmail = user?.email ?? _userEmail;
+                      final emailChangeRequested =
+                          user != null &&
+                          user.email?.toLowerCase() != email.toLowerCase();
+                      if (user != null && emailChangeRequested) {
                         await user.verifyBeforeUpdateEmail(email);
                       }
                       await user?.updateDisplayName(name);
@@ -15303,7 +15780,7 @@ out center tags;
                             .doc(user.uid)
                             .set({
                               'display_name': name,
-                              'email': email,
+                              'email': currentEmail,
                               'photo_url': user.photoURL,
                               'phone': phoneController.text.trim(),
                               'gender_preference': selectedGender,
@@ -15314,16 +15791,39 @@ out center tags;
                       if (!mounted) return;
                       setState(() {
                         _userName = name;
-                        _userEmail = email;
+                        _userEmail = currentEmail;
                         _userPhone = phoneController.text.trim();
                         _userGender = selectedGender;
                       });
 
                       if (!mounted) return;
                       AppNotificationService.show(
-                        'Profil bilgileri güncellendi!',
+                        emailChangeRequested
+                            ? 'Yeni e-posta adresinize doğrulama bağlantısı gönderildi. Onaylayana kadar eski e-posta adresiniz kullanılacak.'
+                            : 'Profil bilgileri güncellendi!',
                       );
-                    } catch (_) {
+                    } on FirebaseAuthException catch (error) {
+                      debugPrint(
+                        'Profil e-posta değişikliği başarısız: ${error.code}',
+                      );
+                      if (!mounted) return;
+                      AppNotificationService.show(switch (error.code) {
+                        'email-already-in-use' => 'Bu e-posta başka bir hesapta kayıtlı. Farklı bir e-posta deneyin.',
+                        'invalid-email' => 'Geçerli bir e-posta adresi girin.',
+                        'requires-recent-login' => 'Güvenlik için çıkış yapıp yeniden giriş yaptıktan sonra deneyin.',
+                        _ =>
+                          'E-posta doğrulama isteği gönderilemedi (${error.code}).',
+                      });
+                    } on FirebaseException catch (error) {
+                      debugPrint(
+                        'Profil bilgileri kaydedilemedi: ${error.code}',
+                      );
+                      if (!mounted) return;
+                      AppNotificationService.show(
+                        'Profil bilgileri kaydedilemedi (${error.code}).',
+                      );
+                    } catch (error) {
+                      debugPrint('Profil güncellenemedi: $error');
                       if (!mounted) return;
                       AppNotificationService.show(
                         'Profil kaydedilemedi. Lütfen tekrar deneyin.',
@@ -15460,7 +15960,7 @@ out center tags;
 
   Future<void> _loadCommunityPlaceMarkerIcon() async {
     final icon = await _createStandaloneMarkerIcon(
-      Icons.storefront_rounded,
+      Icons.star_rounded,
       bubbleColor: const Color(0xFF008C95),
       circular: true,
     );
@@ -15504,14 +16004,14 @@ out center tags;
     return _chatRoomMarkerIcon!;
   }
 
-  BitmapDescriptor _roomClusterMarkerIconForCount(int roomCount) {
-    final count = roomCount.clamp(2, 99);
-    final cached = _chatRoomClusterMarkerIcons[count];
+  BitmapDescriptor _mapClusterMarkerIconForCount(int itemCount) {
+    final count = itemCount.clamp(2, 99);
+    final cached = _mapClusterMarkerIcons[count];
     if (cached != null) return cached;
-    if (_loadingRoomClusterIconCounts.add(count)) {
-      unawaited(_loadChatRoomClusterMarkerIcon(count));
+    if (_loadingMapClusterIconCounts.add(count)) {
+      unawaited(_loadMapClusterMarkerIcon(count));
     }
-    return _chatRoomMarkerIcon!;
+    return BitmapDescriptor.defaultMarkerWithHue(BitmapDescriptor.hueAzure);
   }
 
   Future<void> _loadChatRoomCountMarkerIcon(int count) async {
@@ -15530,33 +16030,88 @@ out center tags;
     }
   }
 
-  Future<void> _loadChatRoomClusterMarkerIcon(int count) async {
+  Future<void> _loadMapClusterMarkerIcon(int count) async {
     try {
       final icon = await _createStandaloneMarkerIcon(
-        Icons.forum_rounded,
+        Icons.layers_rounded,
         badgeText: count >= 99 ? '99+' : '$count',
+        bubbleColor: const Color(0xFF315C87),
+        circular: true,
       );
       if (!mounted) return;
-      setState(() => _chatRoomClusterMarkerIcons[count] = icon);
+      setState(() => _mapClusterMarkerIcons[count] = icon);
     } catch (error) {
-      _loadingRoomClusterIconCounts.remove(count);
-      debugPrint('Sohbet odası küme rozeti çizilemedi: $error');
+      debugPrint('Harita küme rozeti çizilemedi: $error');
     } finally {
-      _loadingRoomClusterIconCounts.remove(count);
+      _loadingMapClusterIconCounts.remove(count);
     }
   }
 
-  LatLng _roomClusterCenter(List<Map<String, dynamic>> cluster) {
+  LatLng _mapClusterCenter(List<Map<String, dynamic>> cluster) {
     var latitude = 0.0;
     var longitude = 0.0;
-    for (final room in cluster) {
-      latitude += (room['latitude'] as num).toDouble();
-      longitude += (room['longitude'] as num).toDouble();
+    for (final item in cluster) {
+      latitude += (item['latitude'] as num).toDouble();
+      longitude += (item['longitude'] as num).toDouble();
     }
     return LatLng(latitude / cluster.length, longitude / cluster.length);
   }
 
-  Future<void> _zoomToRoomCluster(LatLng center) async {
+  Marker _buildPetMapMarker(
+    Map<String, dynamic> report,
+    String markerId,
+    LatLng position,
+  ) {
+    final isAdoption = report['collection'] == 'pet_adoption_listings';
+    final petName = report['pet_name']?.toString() ?? '';
+    final petType = _lostPetTypeLabel(report['pet_type']?.toString());
+    return Marker(
+      markerId: MarkerId(markerId),
+      position: position,
+      anchor: const Offset(0.5, 0.5),
+      icon: isAdoption
+          ? _adoptionMarkerIcon ??
+                _lostPetMarkerIcon ??
+                BitmapDescriptor.defaultMarkerWithHue(BitmapDescriptor.hueGreen)
+          : _lostPetMarkerIcon ??
+                BitmapDescriptor.defaultMarkerWithHue(BitmapDescriptor.hueRose),
+      infoWindow: InfoWindow(
+        title: petName.isEmpty
+            ? isAdoption
+                  ? 'Sahiplendirme ilanı'
+                  : 'Kayıp ${petType.toLowerCase()}'
+            : petName,
+        snippet: isAdoption
+            ? 'Sahiplendiriliyor • $petType • ${report['address']}'
+            : '$petType • ${report['address']}',
+      ),
+      onTap: () => _showLostPetReport(report),
+    );
+  }
+
+  Marker? _buildPropertyMapMarker(
+    Map<String, dynamic> listing,
+    String markerId,
+    LatLng position,
+  ) {
+    final icon = listing['listing_type'] == 'kiralik'
+        ? _rentalPropertyMarkerIcon
+        : _salePropertyMarkerIcon;
+    if (icon == null) return null;
+    return Marker(
+      markerId: MarkerId(markerId),
+      position: position,
+      anchor: const Offset(0.5, 0.5),
+      icon: icon,
+      infoWindow: InfoWindow(
+        title: listing['title']?.toString() ?? 'Konut ilanı',
+        snippet: _formatListingPrice(listing['price']),
+      ),
+      onTap: () => _showPropertyListing(listing),
+    );
+  }
+
+  Future<void> _zoomToMapCluster(LatLng center) async {
     final controller = _mapController;
     if (controller == null) return;
     final currentZoom = _mapCameraPosition?.zoom ?? 11.5;
@@ -15565,11 +16120,11 @@ out center tags;
       await controller.animateCamera(
         CameraUpdate.newLatLngZoom(
           center,
-          math.min(16.0, math.max(currentZoom + 2.5, 14.5)),
+          math.min(18.0, math.max(currentZoom + 2.5, 14.5)),
         ),
       );
     } catch (error) {
-      debugPrint('Sohbet odası kümesi yakınlaştırılamadı: $error');
+      debugPrint('Harita kümesi yakınlaştırılamadı: $error');
     } finally {
       _isProgrammaticCameraMove = false;
     }
@@ -15754,7 +16309,7 @@ out center tags;
     final text = _aiController.text.trim();
     if (text.isEmpty) return;
     final aiLimit = _isProUser ? _proAiQueriesPerDay : _freeAiQueriesPerDay;
-    if (_freeAiQueriesUsedToday >= aiLimit && _bonusAiQueries == 0) {
+    if (_freeAiQueriesUsedToday >= aiLimit) {
       _showTrackingMessage('Günlük yapay zeka soru hakkınız doldu.');
       return;
     }
@@ -15988,94 +16543,6 @@ $text''';
       }
     } finally {
       if (mounted) setState(() => _isClearingAiChats = false);
-    }
-  }
-
-  void _showNavoraPointsSheet() {
-    showModalBottomSheet(
-      context: context,
-      isScrollControlled: true,
-      showDragHandle: false,
-      backgroundColor: const Color(0xFF191919),
-      builder: (context) {
-        return StatefulBuilder(
-          builder: (context, setModalState) {
-            return NavoraPointsSheet(
-              points: _navoraPoints,
-              monthEarned: _monthEarned,
-              monthSpent: _monthSpent,
-              bonusChatRooms: _bonusChatRooms,
-              bonusAiQueries: _bonusAiQueries,
-              hasProDiscount: _proDiscountUnlocked,
-              ledger: _pointLedger,
-              onChanged: () {
-                setState(() {});
-                setModalState(() {});
-              },
-              onRedeem: _redeemNavoraReward,
-            );
-          },
-        );
-      },
-    );
-  }
-
-  Future<bool> _redeemNavoraReward(NavoraReward reward) async {
-    if (_isRedeemingReward) return false;
-    if (reward.id == 'pro_discount' && _proDiscountUnlocked) return false;
-    if (_navoraPoints < reward.cost) {
-      AppNotificationService.show('Bu takas için puanın yetersiz.');
-      return false;
-    }
-
-    final user = FirebaseAuth.instance.currentUser;
-    if (user == null) {
-      _showTrackingMessage('Puan takası için hesabına giriş yap.');
-      return false;
-    }
-
-    setState(() => _isRedeemingReward = true);
-    try {
-      final result = await FirebaseFunctions.instanceFor(region: 'europe-west1')
-          .httpsCallable('redeemNavoraReward')
-          .call({'rewardId': reward.id});
-      final data = result.data;
-      if (data is! Map) {
-        throw StateError('Puan takası yanıtı geçersiz.');
-      }
-      if (mounted) {
-        setState(() {
-          _navoraPoints = (data['points'] as num?)?.toInt() ?? _navoraPoints;
-          _bonusChatRooms =
-              (data['bonusChatRooms'] as num?)?.toInt() ?? _bonusChatRooms;
-          _bonusAiQueries =
-              (data['bonusAiQueries'] as num?)?.toInt() ?? _bonusAiQueries;
-          _proDiscountUnlocked =
-              data['proDiscountUnlocked'] == true || _proDiscountUnlocked;
-        });
-        AppNotificationService.show('${reward.title} hesabına eklendi.');
-      }
-      return true;
-    } on FirebaseFunctionsException catch (error) {
-      debugPrint(
-        'Navora puan takası başarısız: ${error.code} ${error.message}',
-      );
-      if (mounted) {
-        _showTrackingMessage(
-          error.code == 'resource-exhausted'
-              ? 'Puan bakiyeniz bu takas için yetersiz.'
-              : 'Puan takası tamamlanamadı. Tekrar deneyin.',
-        );
-      }
-      return false;
-    } catch (error) {
-      debugPrint('Navora puan takası başarısız: $error');
-      if (mounted) {
-        _showTrackingMessage('Puan takası tamamlanamadı. Tekrar deneyin.');
-      }
-      return false;
-    } finally {
-      if (mounted) setState(() => _isRedeemingReward = false);
     }
   }
 

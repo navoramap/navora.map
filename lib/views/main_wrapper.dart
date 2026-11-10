@@ -20,6 +20,7 @@ class _MainWrapperState extends State<MainWrapper> {
   String? _genderPreference;
   bool _obscurePassword = true;
   bool _obscureConfirmPassword = true;
+  String? _authError;
   String? _emailError;
   String? _passwordError;
 
@@ -41,41 +42,43 @@ Bu Kullanıcı Sözleşmesi, Navora Map mobil uygulamasını kullanan kişi ile 
 Kayıt sırasında verdiğiniz bilgilerin doğru ve güncel olması gerekir. Hesabınızın güvenliğinden siz sorumlusunuz. Hesabınızı başka bir kişiye devredemez veya başkasının hesabını kullanamazsınız.
 
 3. Uygulama Hizmetleri
-Navora Map; harita, rota, konum, kayıtlı adresler, sohbet ve sürüş destek özellikleri sunar. Harita ve trafik bilgileri gecikeli olabilir veya hatalı olabilir. Uygulama, sürüş sırasında dikkatinizin yerine geçmez; trafik kurallarına ve güvenli sürüş ilkelerine uymalısınız.
+Navora Map; harita ve konum özelliklerinin yanı sıra kullanıcıların sohbet etmesine, sohbet odaları oluşturmasına, emlak ilanları ve kayıp hayvan/sahiplendirme ilanları paylaşmasına, kayıtlı yerleri keşfetmesine ve yol bildirimleri oluşturmasına imkân tanır. Kullanıcılar ayrıca yer ve rota araması yapabilir, adres ve rotalarını kaydedebilir. Harita, konum, arama ve rota bilgileri üçüncü taraf hizmetlerden gelebilir; güncel olmayabilir veya hatalı olabilir.
 
-4. Kullanıcı Sorumlulukları
-Uygulamayı hukuka aykırı, başkalarını rahatsız edecek, tehdit içeren veya yanıltıcı içerik paylaşacak şekilde kullanamazsınız. Başkalarının kişisel verilerini izinsiz paylaşmamalısınız.
+4. Kullanıcı İçerikleri ve Yasaklı Kullanım
+Sohbet, ilan, yorum, görsel ve diğer kullanıcı içeriklerinden bunları paylaşan kişi sorumludur. Hukuka aykırı veya başkalarının haklarını ihlal eden; tehdit, taciz, zorbalık, nefret söylemi ya da ayrımcılık içeren; şiddeti veya kendine zarar vermeyi teşvik eden; cinsel istismar veya çocukların güvenliğini tehlikeye atan; dolandırıcılık, spam ya da kötüye kullanım amacı taşıyan; fikri mülkiyet veya kişisel verileri ihlal eden içerikleri paylaşamazsınız. Başkalarına ait kişisel bilgileri, açık izin veya hukuki dayanak olmadan yayımlayamazsınız.
 
-5. Hesabın Askıya Alınması
-Sözleşmeye veya yürürlükteki mevzuata aykırı kullanım tespit edilirse hesabınız geçici olarak askıya alınabilir ya da kapatılabilir.
+5. Şikâyet, İnceleme ve Yaptırımlar
+Uygunsuz olduğunu düşündüğünüz kullanıcı içeriğini uygulama içindeki şikâyet araçlarıyla veya navora.map@gmail.com adresinden bildirebilirsiniz. Bildirimler incelenir; ihlal oluşturan içerik kaldırılabilir. İhlalin niteliğine ve tekrarına göre içerik kaldırma, özelliklere erişimi kısıtlama, hesabı geçici olarak askıya alma veya hesabı kalıcı olarak kapatma uygulanabilir. Ağır ya da tekrarlanan ihlallerde, yürürlükteki mevzuatın izin verdiği ölçüde önceden bildirim yapılmaksızın işlem uygulanabilir. Kanunen gerekli hâllerde ilgili bilgiler yetkili makamlarla paylaşılabilir.
 
-6. Fikri Mülkiyet
+6. Hizmetin Sınırlandırılması ve Hesap Kapatma
+Sözleşmeye veya yürürlükteki mevzuata aykırı kullanım tespit edilirse hesabınız geçici olarak askıya alınabilir veya kalıcı olarak kapatılabilir; ihlalli içerikler hizmetten kaldırılabilir. Hesabınızı uygulamadaki hesap silme seçeneğiyle kapatabilirsiniz. Yasal yükümlülükler veya uyuşmazlıkların çözümü için tutulması gereken kayıtlar, ilgili mevzuatın gerektirdiği süre boyunca saklanabilir.
+
+7. Fikri Mülkiyet
 Uygulamanın yazılımı, tasarımı, adı ve içerikleri, kanunen izin verilen ölçüde Navora Map'e veya ilgili hak sahiplerine aittir. İzinsiz kopyalanamaz veya dağıtılamaz.
 
-7. Değişiklikler ve İletişim
+8. Değişiklikler ve İletişim
 Hizmetlerde veya bu sözleşmede değişiklik yapılabilir. Önemli değişiklikler uygulama veya e-posta yoluyla bildirilebilir. Sorularınız için: navora.map@gmail.com.
 
-Son güncelleme: 03.09.2026
+Son güncelleme: 10.11.2026
 ''';
 
   static const String _privacyText = '''
-1. İşlenen Veriler
-Hesap ve profil bilgileri (ad, e-posta, isteğe bağlı telefon, fotoğraf ve tercihler); harita, arama, kayıtlı yer ve rota kullanımı; uygulama açıkken alınan konum; kullanıcı tarafından oluşturulan sohbet, oda, ilan, fotoğraf ve raporlar işlenebilir. Şifreli oda giriş denemeleri kötüye kullanımı önlemek için sayılır ve geçici olarak saklanır.
+Veri sorumlusu: İbrahim Can Özdemir. Adres: Konya, Meram, Sahibata Mahallesi, Esenlerli Sokak, No: 19. İletişim: navora.map@gmail.com.
 
-2. Konum ve Harita Hizmetleri
-Konum, haritada bulunduğun yeri göstermek, yakındaki arama ve rota özelliklerini sunmak ve sen başlattığında sürüş kaydı oluşturmak için kullanılır. Uygulama arka planda sürekli konum takibi yapmaz. Yer arama ve rota istekleri, arama metni veya gerekli konum bilgisiyle Google Maps Platform ve OpenStreetMap hizmetlerine gönderilebilir. Yolculuk paylaşımı yalnızca düğmeye bastığında sistem paylaşım menüsünü açar; canlı konum takibi başlatmaz. Sesli arama için mikrofon ve işletim sisteminin konuşma tanıma hizmeti kullanılır; konuşma tanıma sağlayıcısının veriyi nasıl işlediği cihazın işletim sistemi ayarlarına ve sağlayıcı politikasına bağlıdır.
+Navora Map; hesap ve profil bilgilerini (ad, e-posta, telefon ve tercihlerin), konum ve rota bilgilerini (yalnızca ilgili özellikleri kullandığında), sohbet/ilan/rapor içeriklerini, eklediğin görselleri ve hizmet güvenliği için gerekli teknik kayıtları işler. Bu bilgiler hesabını ve uygulama özelliklerini sağlamak, kullanıcı içeriklerini göstermek, şikâyetleri incelemek, kötüye kullanımı önlemek, hizmeti güvenli tutmak ve yasal yükümlülükleri yerine getirmek için kullanılır. E-posta kampanya tercihi isteğe bağlıdır.
 
-3. Sohbet, İlanlar ve Yapay Zekâ
-Sohbet ve ilan içeriğin hizmetin çalışması, diğer kullanıcılara gösterilmesi ve moderasyon için Navora altyapısında saklanabilir. Yapay zekâ özelliğine yazdığın mesajlar yanıt üretmek amacıyla ilgili Firebase AI hizmetine iletilir. İlan oluştururken eklediğin adres, konum, telefon ve fotoğraflar, seçtiğin paylaşım ve ilan ayarlarına göre diğer kullanıcılara gösterilebilir.
+Hesap ve uygulama altyapısı için Firebase; harita, yer ve rota özellikleri için Google Maps Platform; bazı yer aramaları için OpenStreetMap/Nominatim; yapay zekâ yanıtları için Firebase AI; çökme tanılama için Firebase Crashlytics kullanılır. Google veya Apple ile giriş yaparsan ilgili kimlik doğrulama sağlayıcısı da sürece katılır. Sesli arama işletim sisteminin konuşma tanıma hizmetini kullanabilir. Bu hizmetlere gönderilen veriler ilgili sağlayıcıların kendi gizlilik koşullarına tabidir; hizmet altyapısına bağlı olarak veriler Türkiye dışında işlenebilir.
 
-4. Hizmet Sağlayıcılar ve Saklama
-Hesap, veritabanı, dosya ve sunucu işlevleri için Firebase; harita, yer ve rota özellikleri için Google Maps Platform; bazı yer aramaları için OpenStreetMap altyapısı kullanılır. Sohbet odaları 24 saat, genel sohbet mesajları 30 gün sonra temizlenir. Yeni sürüş ve rota geçmişi kayıtları 30 gün sonra temizlenmek üzere işaretlenir; temizleme hizmetinin çalışması için sunucu işlevlerinin etkin olması gerekir. Arama geçmişi açıksa en fazla beş arama hesabında tutulur. Arama geçmişini kapatabilir veya silebilir, hesabını uygulamadaki hesap silme seçeneğiyle kaldırabilirsin. İlan ve kullanıcı içerikleri, silinene veya ilgili hizmetin saklama süresi dolana kadar saklanabilir.
+Konum arka planda sürekli izlenmez; konum, konum izni ve ilgili özellik kullanımın kapsamında işlenir. Genel sohbet mesajları 30 gün, şifreli oda verileri 24 saat; sürüş ve tamamlanmış rota geçmişi en fazla 30 gün saklanacak şekilde temizleme işlemine alınır. İlan ve profil içerikleri sen silene, hesap silme işlemi tamamlanana veya içerik moderasyon kapsamında kaldırılana kadar saklanabilir. Hesap silme isteğini uygulamadaki “Hesabımı sil” seçeneğinden başlatabilirsin. Yasal yükümlülükler, güvenlik kayıtları ve yedekleme döngüleri nedeniyle bazı veriler gerekli süre boyunca kalabilir.
 
-5. Seçimler ve İletişim
-Hesap oluşturma sırasında gerekli sözleşme ve gizlilik bilgilendirmeleri gösterilir. E-posta kampanya tercihi ayrıdır ve isteğe bağlıdır. Gizlilik ve kişisel veri talepleri için navora.map@gmail.com adresine yazabilirsin.
+KVKK kapsamındaki kişisel veri taleplerin için navora.map@gmail.com adresine veya yukarıdaki adrese başvurabilirsin. Ayrıntılı bilgiye kamuya açık gizlilik politikamızdan ulaşabilirsin:
+https://navoramapa.web.app/gizlilik-politikasi
 
-Bu uygulama içi açıklama, işletmecinin yasal unvanı, adresi, güncel saklama süreleri ve hizmet sağlayıcı sözleşmeleriyle birlikte yayına çıkmadan önce doğrulanmalıdır.
+Son güncelleme: 10.11.2026
 ''';
+
+  static const String _publicPrivacyPolicyUrl =
+      'https://navoramapa.web.app/gizlilik-politikasi';
 
   @override
   void initState() {
@@ -112,7 +115,7 @@ Bu uygulama içi açıklama, işletmecinin yasal unvanı, adresi, güncel saklam
       if (mounted) {
         setState(() {
           _currentUserName = profileName.isEmpty
-              ? (currentUser.email?.split('@').first ?? 'Kullanici')
+              ? (currentUser.email?.split('@').first ?? 'Kullanıcı')
               : profileName;
           _currentUserEmail = currentUser.email ?? '';
           _isLoggedIn = true;
@@ -130,36 +133,49 @@ Bu uygulama içi açıklama, işletmecinin yasal unvanı, adresi, güncel saklam
     final password = _passwordController.text.trim();
 
     if (email.isEmpty || password.isEmpty) {
-      _showSnackBar('Lütfen tüm alanları doldurun.');
+      _setAuthError('Lütfen e-posta adresinizi ve şifrenizi girin.');
       return;
     }
 
     if (_isSignUpMode && _nameController.text.trim().isEmpty) {
-      _showSnackBar('Lütfen adınızı girin.');
+      _setAuthError('Lütfen adınızı girin.');
       return;
     }
 
+    if (_isSignUpMode) {
+      final passwordError = _passwordValidationError(password);
+      if (passwordError != null) {
+        _setAuthError(passwordError);
+        return;
+      }
+    }
+
     if (_isSignUpMode && _phoneController.text.trim().isEmpty) {
-      _showSnackBar('Lütfen telefon numaranızı girin.');
+      _setAuthError('Lütfen telefon numaranızı girin.');
       return;
     }
 
     if (_isSignUpMode && _genderPreference == null) {
-      _showSnackBar('Lütfen bir tercih seçin.');
+      _setAuthError('Lütfen bir tercih seçin.');
       return;
     }
 
     if (_isSignUpMode && password != _confirmPasswordController.text.trim()) {
-      _showSnackBar('Sifreler eslesmiyor.');
+      _setAuthError('Şifreler eşleşmiyor.');
       return;
     }
 
     if (_isSignUpMode && (!_termsAccepted || !_privacyAccepted)) {
-      _showSnackBar('Kayıt olmak için zorunlu metinleri onaylayın.');
+      _setAuthError(
+        'Kayıt olmak için kullanıcı sözleşmesini ve KVKK metnini onaylayın.',
+      );
       return;
     }
 
-    setState(() => _isAuthLoading = true);
+    setState(() {
+      _isAuthLoading = true;
+      _authError = null;
+    });
 
     try {
       final credential = _isSignUpMode
@@ -195,20 +211,31 @@ Bu uygulama içi açıklama, işletmecinin yasal unvanı, adresi, güncel saklam
         _currentUserName =
             (user.displayName ?? _nameController.text.trim()).isNotEmpty
             ? (user.displayName ?? _nameController.text.trim())
-            : (user.email?.split('@').first ?? 'Kullanici');
+            : (user.email?.split('@').first ?? 'Kullanıcı');
         _currentUserEmail = user.email ?? email;
         _isLoggedIn = true;
       });
     } on FirebaseAuthException catch (error) {
       debugPrint('E-posta kimlik doğrulaması başarısız: ${error.code}');
+      if (!_isSignUpMode &&
+          (error.code == 'wrong-password' ||
+              error.code == 'invalid-credential' ||
+              error.code == 'user-not-found')) {
+        setState(() {
+          _authError = 'E-posta veya şifre hatalı. Bilgilerinizi kontrol edin.';
+        });
+        return;
+      }
+
       final message = switch (error.code) {
         'email-already-in-use' =>
-          'Bu e-posta ile kayitli bir kullanici zaten var.',
+          'Bu e-posta ile kayıtlı bir kullanıcı zaten var.',
         'invalid-email' => 'Geçerli bir e-posta adresi girin.',
         'wrong-password' ||
         'invalid-credential' ||
         'user-not-found' => 'E-posta veya şifre hatalı.',
-        'weak-password' => 'Şifre en az 6 karakter olmalı.',
+        'weak-password' =>
+          'Şifre en az 10 karakter olmalı; küçük ve büyük harf içermeli.',
         'operation-not-allowed' =>
           'E-posta ve şifre ile giriş Firebase projesinde etkin değil.',
         'user-disabled' => 'Bu hesap devre dışı bırakılmış.',
@@ -223,12 +250,31 @@ Bu uygulama içi açıklama, işletmecinin yasal unvanı, adresi, güncel saklam
         _ =>
           'İşlem tamamlanamadı (Firebase: ${error.code}). Lütfen tekrar deneyin.',
       };
-      _showSnackBar(message);
+      _setAuthError(message);
+    } on FirebaseException catch (error) {
+      debugPrint('Kimlik doğrulama verisi kaydedilemedi: ${error.code}');
+      final message = switch (error.code) {
+        'permission-denied' => 'Hesabınız oluşturuldu ancak profil bilgileri kaydedilemedi. Uygulamayı kapatıp açarak devam edin.',
+        'unavailable' || 'deadline-exceeded' => 'Bağlantı kurulamadı. İnternet bağlantınızı kontrol edip tekrar deneyin.',
+        _ =>
+          'Profil bilgileri kaydedilemedi (${error.code}). Lütfen tekrar deneyin.',
+      };
+      _setAuthError(message);
     } finally {
       if (mounted) {
         setState(() => _isAuthLoading = false);
       }
     }
+  }
+
+  void _setAuthError(String message) {
+    if (!mounted) return;
+    setState(() => _authError = message);
+  }
+
+  void _clearAuthError() {
+    if (_authError == null) return;
+    setState(() => _authError = null);
   }
 
   Future<void> _handlePasswordReset() async {
@@ -285,9 +331,20 @@ Bu uygulama içi açıklama, işletmecinin yasal unvanı, adresi, güncel saklam
     );
   }
 
+  Future<void> _openPublicPrivacyPolicy() async {
+    final opened = await launchUrl(
+      Uri.parse(_publicPrivacyPolicyUrl),
+      mode: LaunchMode.externalApplication,
+    );
+    if (!opened) {
+      _showSnackBar('Gizlilik politikası açılamadı. Lütfen tekrar deneyin.');
+    }
+  }
+
   void _validateEmail(String value) {
     final email = value.trim();
     setState(() {
+      _authError = null;
       _emailError = email.isEmpty || !email.contains('@')
           ? 'Geçerli bir e-posta adresi girin.'
           : null;
@@ -296,21 +353,129 @@ Bu uygulama içi açıklama, işletmecinin yasal unvanı, adresi, güncel saklam
 
   void _validatePassword(String value) {
     setState(() {
-      _passwordError = value.isNotEmpty && value.length < 6
-          ? 'Sifre en az 6 karakter olmali.'
-          : null;
+      _authError = null;
+      _passwordError = _isSignUpMode ? _passwordValidationError(value) : null;
     });
+  }
+
+  String? _passwordValidationError(String password) {
+    if (password.isEmpty) return null;
+    if (password.length < 10) return 'Şifre en az 10 karakter olmalı.';
+    if (!RegExp(r'[a-z]').hasMatch(password)) {
+      return 'Şifre en az bir küçük harf içermeli.';
+    }
+    if (!RegExp(r'[A-Z]').hasMatch(password)) {
+      return 'Şifre en az bir büyük harf içermeli.';
+    }
+    return null;
   }
 
   String get _passwordStrength {
     final password = _passwordController.text;
-    if (password.length < 6) return 'Zayif';
-    if (password.length < 10 ||
-        !RegExp(r'[A-Z]').hasMatch(password) ||
-        !RegExp(r'[0-9]').hasMatch(password)) {
-      return 'Orta';
-    }
-    return 'Güçlü';
+    final completedRules = [
+      password.length >= 10,
+      RegExp(r'[a-z]').hasMatch(password),
+      RegExp(r'[A-Z]').hasMatch(password),
+    ].where((isMet) => isMet).length;
+    if (completedRules == 3) return 'Güçlü';
+    if (completedRules == 0) return 'Zayıf';
+    return 'Gelişiyor';
+  }
+
+  Widget _buildPasswordStrengthIndicator() {
+    final colors = Theme.of(context).colorScheme;
+    final textTheme = Theme.of(context).textTheme;
+    final password = _passwordController.text;
+    final requirements = [
+      ('10+ karakter', password.length >= 10),
+      ('Küçük harf', RegExp(r'[a-z]').hasMatch(password)),
+      ('Büyük harf', RegExp(r'[A-Z]').hasMatch(password)),
+    ];
+    final completedRules = requirements.where((rule) => rule.$2).length;
+    final strengthColor = switch (completedRules) {
+      0 => colors.error,
+      1 => colors.error,
+      2 => colors.primary,
+      _ => const Color(0xFF4CAF50),
+    };
+
+    return Container(
+      width: double.infinity,
+      padding: const EdgeInsets.all(14),
+      decoration: BoxDecoration(
+        color: colors.surfaceContainerLow,
+        borderRadius: BorderRadius.circular(14),
+        border: Border.all(color: colors.outlineVariant),
+      ),
+      child: Column(
+        crossAxisAlignment: CrossAxisAlignment.start,
+        children: [
+          Row(
+            children: [
+              Icon(Icons.shield_outlined, size: 18, color: strengthColor),
+              const SizedBox(width: 8),
+              Expanded(
+                child: Text(
+                  'Şifre gücü: $_passwordStrength',
+                  style: textTheme.bodySmall?.copyWith(
+                    fontWeight: FontWeight.w700,
+                    color: strengthColor,
+                  ),
+                ),
+              ),
+              Text(
+                '$completedRules/3',
+                style: textTheme.labelSmall?.copyWith(
+                  color: colors.onSurfaceVariant,
+                ),
+              ),
+            ],
+          ),
+          const SizedBox(height: 10),
+          Row(
+            children: List.generate(3, (index) {
+              return Expanded(
+                child: Container(
+                  height: 4,
+                  margin: EdgeInsets.only(right: index == 2 ? 0 : 6),
+                  decoration: BoxDecoration(
+                    color: index < completedRules
+                        ? strengthColor
+                        : colors.outlineVariant,
+                    borderRadius: BorderRadius.circular(4),
+                  ),
+                ),
+              );
+            }),
+          ),
+          const SizedBox(height: 12),
+          Wrap(
+            spacing: 12,
+            runSpacing: 8,
+            children: requirements.map((requirement) {
+              final isMet = requirement.$2;
+              return Row(
+                mainAxisSize: MainAxisSize.min,
+                children: [
+                  Icon(
+                    isMet ? Icons.check_circle_rounded : Icons.circle_outlined,
+                    size: 15,
+                    color: isMet ? const Color(0xFF4CAF50) : colors.outline,
+                  ),
+                  const SizedBox(width: 5),
+                  Text(
+                    requirement.$1,
+                    style: textTheme.labelSmall?.copyWith(
+                      color: isMet ? colors.onSurface : colors.onSurfaceVariant,
+                    ),
+                  ),
+                ],
+              );
+            }).toList(),
+          ),
+        ],
+      ),
+    );
   }
 
   Future<void> _handleSocialAuth(String provider) async {
@@ -334,6 +499,13 @@ Bu uygulama içi açıklama, işletmecinin yasal unvanı, adresi, güncel saklam
           GoogleAuthProvider.credential(idToken: idToken),
         );
       } else {
+        if (defaultTargetPlatform == TargetPlatform.android || kIsWeb) {
+          _showSnackBar(
+            'Android ve web için Apple girişinin kullanılabilmesi adına Apple Service ID ve yönlendirme adresi yapılandırılmalı.',
+          );
+          return;
+        }
+
         final rawNonce = generateNonce();
         final nonce = sha256.convert(utf8.encode(rawNonce)).toString();
 
@@ -358,7 +530,7 @@ Bu uygulama içi açıklama, işletmecinin yasal unvanı, adresi, güncel saklam
       if (user == null) return;
 
       await FirebaseFirestore.instance.collection('users').doc(user.uid).set({
-        'display_name': user.displayName ?? '$provider Kullanicisi',
+        'display_name': user.displayName ?? '$provider Kullanıcısı',
         'email': user.email,
         'provider': provider,
         'photo_url': user.photoURL,
@@ -367,7 +539,7 @@ Bu uygulama içi açıklama, işletmecinin yasal unvanı, adresi, güncel saklam
 
       if (!mounted) return;
       setState(() {
-        _currentUserName = user.displayName ?? '$provider Kullanicisi';
+        _currentUserName = user.displayName ?? '$provider Kullanıcısı';
         _currentUserEmail = user.email ?? '';
         _isLoggedIn = true;
       });
@@ -379,7 +551,7 @@ Bu uygulama içi açıklama, işletmecinin yasal unvanı, adresi, güncel saklam
         _ => 'Giriş yapılamadı. Lütfen tekrar deneyin.',
       });
     } catch (_) {
-      _showSnackBar('Giris iptal edildi veya tamamlanamadi.');
+      _showSnackBar('Giriş iptal edildi veya tamamlanamadı.');
     } finally {
       if (mounted) {
         setState(() => _isAuthLoading = false);
@@ -411,7 +583,7 @@ Bu uygulama içi açıklama, işletmecinin yasal unvanı, adresi, güncel saklam
     if (!mounted) return;
 
     setState(() {
-      _currentUserName = 'Misafir Kullanici';
+      _currentUserName = 'Misafir Kullanıcı';
       _currentUserEmail = 'misafir@navora.app';
       _isLoggedIn = true;
     });
@@ -447,7 +619,13 @@ Bu uygulama içi açıklama, işletmecinin yasal unvanı, adresi, güncel saklam
     return GestureDetector(
       onTap: () {
         if (_isSignUpMode != signupMode) {
-          setState(() => _isSignUpMode = signupMode);
+          setState(() {
+            _isSignUpMode = signupMode;
+            _authError = null;
+            _passwordError = signupMode
+                ? _passwordValidationError(_passwordController.text)
+                : null;
+          });
         }
       },
       child: AnimatedContainer(
@@ -477,20 +655,124 @@ Bu uygulama içi açıklama, işletmecinin yasal unvanı, adresi, güncel saklam
     );
   }
 
+  Widget _buildConsentCard({
+    required bool value,
+    required ValueChanged<bool?> onChanged,
+    required String title,
+    required String actionLabel,
+    required VoidCallback onView,
+    String? externalActionLabel,
+    VoidCallback? onExternalView,
+  }) {
+    final colors = Theme.of(context).colorScheme;
+    final textTheme = Theme.of(context).textTheme;
+
+    return Container(
+      margin: const EdgeInsets.only(bottom: 10),
+      decoration: BoxDecoration(
+        color: colors.surfaceContainerLow,
+        borderRadius: BorderRadius.circular(16),
+        border: Border.all(
+          color: value ? colors.primary.withValues(alpha: 0.6) : colors.outline,
+        ),
+      ),
+      child: Row(
+        crossAxisAlignment: CrossAxisAlignment.start,
+        children: [
+          Checkbox(value: value, onChanged: onChanged),
+          Expanded(
+            child: Padding(
+              padding: const EdgeInsets.only(
+                left: 2,
+                top: 12,
+                right: 12,
+                bottom: 8,
+              ),
+              child: Column(
+                crossAxisAlignment: CrossAxisAlignment.start,
+                children: [
+                  Text(
+                    title,
+                    style: textTheme.bodySmall?.copyWith(
+                      fontWeight: FontWeight.w600,
+                    ),
+                  ),
+                  const SizedBox(height: 4),
+                  Wrap(
+                    spacing: 4,
+                    runSpacing: 0,
+                    children: [
+                      TextButton.icon(
+                        onPressed: onView,
+                        style: TextButton.styleFrom(
+                          padding: const EdgeInsets.symmetric(horizontal: 8),
+                          minimumSize: const Size(0, 34),
+                          tapTargetSize: MaterialTapTargetSize.shrinkWrap,
+                          visualDensity: VisualDensity.compact,
+                        ),
+                        icon: const Icon(Icons.description_outlined, size: 16),
+                        label: Text(actionLabel),
+                      ),
+                      if (externalActionLabel != null && onExternalView != null)
+                        TextButton.icon(
+                          onPressed: onExternalView,
+                          style: TextButton.styleFrom(
+                            padding: const EdgeInsets.symmetric(horizontal: 8),
+                            minimumSize: const Size(0, 34),
+                            tapTargetSize: MaterialTapTargetSize.shrinkWrap,
+                            visualDensity: VisualDensity.compact,
+                          ),
+                          icon: const Icon(Icons.open_in_new_rounded, size: 15),
+                          label: Text(externalActionLabel),
+                        ),
+                    ],
+                  ),
+                ],
+              ),
+            ),
+          ),
+        ],
+      ),
+    );
+  }
+
   Widget _buildAuthScreen() {
     final theme = Theme.of(context);
     final colors = theme.colorScheme;
     final textTheme = theme.textTheme;
     final showAppleButton =
-        Theme.of(context).platform == TargetPlatform.iOS ||
-        Theme.of(context).platform == TargetPlatform.macOS;
+        defaultTargetPlatform == TargetPlatform.iOS ||
+        defaultTargetPlatform == TargetPlatform.macOS;
 
     return Scaffold(
+      backgroundColor: colors.surfaceContainerLowest,
       body: Container(
-        color: colors.surfaceContainerLowest,
+        decoration: BoxDecoration(
+          gradient: LinearGradient(
+            begin: Alignment.topLeft,
+            end: Alignment.bottomRight,
+            colors: [
+              colors.surfaceContainerLowest,
+              colors.surface,
+              colors.surfaceContainerLowest,
+            ],
+          ),
+        ),
         child: SafeArea(
           child: Stack(
             children: [
+              Positioned(
+                top: -110,
+                left: -100,
+                child: Container(
+                  width: 260,
+                  height: 260,
+                  decoration: BoxDecoration(
+                    shape: BoxShape.circle,
+                    color: colors.primary.withValues(alpha: 0.08),
+                  ),
+                ),
+              ),
               Positioned(
                 top: 12,
                 right: 12,
@@ -508,39 +790,29 @@ Bu uygulama içi açıklama, işletmecinin yasal unvanı, adresi, güncel saklam
               Center(
                 child: SingleChildScrollView(
                   padding: const EdgeInsets.symmetric(
-                    horizontal: 24,
-                    vertical: 32,
+                    horizontal: 28,
+                    vertical: 56,
                   ),
-                  child: Container(
-                    constraints: const BoxConstraints(maxWidth: 420),
-                    padding: const EdgeInsets.all(24),
-                    decoration: BoxDecoration(
-                      color: colors.surface,
-                      borderRadius: BorderRadius.circular(28),
-                      border: Border.all(color: colors.outlineVariant),
-                      boxShadow: [
-                        BoxShadow(
-                          color: colors.primary.withValues(alpha: 0.2),
-                          blurRadius: 24,
-                          offset: const Offset(0, 18),
-                        ),
-                      ],
-                    ),
+                  child: ConstrainedBox(
+                    constraints: const BoxConstraints(maxWidth: 460),
                     child: Column(
                       children: [
                         Container(
-                          padding: const EdgeInsets.all(16),
+                          padding: const EdgeInsets.all(18),
                           decoration: BoxDecoration(
-                            color: colors.primary,
-                            shape: BoxShape.circle,
+                            color: colors.primaryContainer,
+                            borderRadius: BorderRadius.circular(22),
+                            border: Border.all(
+                              color: colors.primary.withValues(alpha: 0.35),
+                            ),
                           ),
                           child: Icon(
-                            Icons.map_rounded,
-                            size: 46,
-                            color: colors.onPrimary,
+                            Icons.explore_rounded,
+                            size: 40,
+                            color: colors.primary,
                           ),
                         ),
-                        const SizedBox(height: 12),
+                        const SizedBox(height: 18),
                         Text(
                           'NAVORA MAP',
                           style: textTheme.headlineMedium?.copyWith(
@@ -549,7 +821,17 @@ Bu uygulama içi açıklama, işletmecinin yasal unvanı, adresi, güncel saklam
                             letterSpacing: 2,
                           ),
                         ),
-                        const SizedBox(height: 6),
+                        const SizedBox(height: 8),
+                        Text(
+                          _isSignUpMode
+                              ? 'Yolculuğuna hemen başla'
+                              : 'Hesabına güvenle giriş yap',
+                          textAlign: TextAlign.center,
+                          style: textTheme.bodyMedium?.copyWith(
+                            color: colors.onSurfaceVariant,
+                          ),
+                        ),
+                        const SizedBox(height: 28),
                         Container(
                           padding: const EdgeInsets.all(4),
                           decoration: BoxDecoration(
@@ -559,26 +841,19 @@ Bu uygulama içi açıklama, işletmecinin yasal unvanı, adresi, güncel saklam
                           child: Row(
                             children: [
                               Expanded(
-                                child: _buildAuthModeButton('Giris Yap', false),
+                                child: _buildAuthModeButton('Giriş Yap', false),
                               ),
                               Expanded(
-                                child: _buildAuthModeButton('Kayit Ol', true),
+                                child: _buildAuthModeButton('Kayıt Ol', true),
                               ),
                             ],
                           ),
                         ),
-                        Text(
-                          _isSignUpMode
-                              ? 'Yeni bir hesap olusturun'
-                              : 'Hesabiniza giris yapin',
-                          style: textTheme.bodySmall?.copyWith(
-                            color: colors.onSurfaceVariant,
-                          ),
-                        ),
-                        const SizedBox(height: 28),
+                        const SizedBox(height: 22),
                         if (_isSignUpMode) ...[
                           TextField(
                             controller: _nameController,
+                            onChanged: (_) => _clearAuthError(),
                             decoration: InputDecoration(
                               labelText: 'Ad Soyad',
                               prefixIcon: const Icon(Icons.person_outline),
@@ -591,7 +866,7 @@ Bu uygulama içi açıklama, işletmecinin yasal unvanı, adresi, güncel saklam
                           keyboardType: TextInputType.emailAddress,
                           onChanged: _validateEmail,
                           decoration: InputDecoration(
-                            labelText: 'E-Posta Adresi',
+                            labelText: 'E-posta adresi',
                             prefixIcon: const Icon(Icons.email_outlined),
                             errorText: _emailError,
                           ),
@@ -600,9 +875,10 @@ Bu uygulama içi açıklama, işletmecinin yasal unvanı, adresi, güncel saklam
                         if (_isSignUpMode) ...[
                           TextField(
                             controller: _phoneController,
+                            onChanged: (_) => _clearAuthError(),
                             keyboardType: TextInputType.phone,
                             decoration: InputDecoration(
-                              labelText: 'Telefon Numarasi',
+                              labelText: 'Telefon numarası',
                               prefixIcon: const Icon(Icons.phone_outlined),
                             ),
                           ),
@@ -612,11 +888,13 @@ Bu uygulama içi açıklama, işletmecinin yasal unvanı, adresi, güncel saklam
                           PopupMenuButton<String>(
                             position: PopupMenuPosition.under,
                             color: colors.surface,
-                            onSelected: (value) =>
-                                setState(() => _genderPreference = value),
+                            onSelected: (value) => setState(() {
+                              _genderPreference = value;
+                              _authError = null;
+                            }),
                             itemBuilder: (context) => const [
                               PopupMenuItem(
-                                value: 'Kadin',
+                                value: 'Kadın',
                                 child: Text('Kadın'),
                               ),
                               PopupMenuItem(
@@ -682,7 +960,10 @@ Bu uygulama içi açıklama, işletmecinin yasal unvanı, adresi, güncel saklam
                           obscureText: _obscurePassword,
                           onChanged: _validatePassword,
                           decoration: InputDecoration(
-                            labelText: 'Sifre',
+                            labelText: 'Şifre',
+                            helperText: _isSignUpMode
+                                ? 'En az 10 karakter; küçük ve büyük harf içermeli'
+                                : null,
                             prefixIcon: const Icon(Icons.lock_outline),
                             errorText: _passwordError,
                             suffixIcon: IconButton(
@@ -699,29 +980,17 @@ Bu uygulama içi açıklama, işletmecinin yasal unvanı, adresi, güncel saklam
                         ),
                         if (_isSignUpMode &&
                             _passwordController.text.isNotEmpty) ...[
-                          const SizedBox(height: 8),
-                          Align(
-                            alignment: Alignment.centerLeft,
-                            child: Text(
-                              'Şifre gücü: $_passwordStrength',
-                              style: textTheme.bodySmall?.copyWith(
-                                fontWeight: FontWeight.w600,
-                                color: _passwordStrength == 'Güçlü'
-                                    ? colors.secondary
-                                    : _passwordStrength == 'Orta'
-                                    ? colors.primary
-                                    : colors.error,
-                              ),
-                            ),
-                          ),
+                          const SizedBox(height: 10),
+                          _buildPasswordStrengthIndicator(),
                         ],
                         if (_isSignUpMode) ...[
                           const SizedBox(height: 14),
                           TextField(
                             controller: _confirmPasswordController,
                             obscureText: _obscureConfirmPassword,
+                            onChanged: (_) => _clearAuthError(),
                             decoration: InputDecoration(
-                              labelText: 'Sifre Tekrar',
+                              labelText: 'Şifre tekrar',
                               prefixIcon: const Icon(Icons.lock_reset_outlined),
                               suffixIcon: IconButton(
                                 onPressed: () => setState(
@@ -737,62 +1006,41 @@ Bu uygulama içi açıklama, işletmecinin yasal unvanı, adresi, güncel saklam
                             ),
                           ),
                           const SizedBox(height: 10),
-                          CheckboxListTile(
+                          _buildConsentCard(
                             value: _termsAccepted,
-                            onChanged: (value) =>
-                                setState(() => _termsAccepted = value ?? false),
-                            controlAffinity: ListTileControlAffinity.leading,
-                            contentPadding: EdgeInsets.zero,
-                            dense: true,
-                            title: Row(
-                              children: [
-                                Expanded(
-                                  child: Text(
-                                    'Kullanıcı Sözleşmesi\'ni kabul ediyorum *',
-                                    style: textTheme.bodySmall,
-                                  ),
-                                ),
-                                TextButton(
-                                  onPressed: () => _showLegalDocument(
-                                    'Kullanıcı Sözleşmesi',
-                                    _termsText,
-                                  ),
-                                  child: const Text('Metni oku'),
-                                ),
-                              ],
+                            onChanged: (value) => setState(() {
+                              _termsAccepted = value ?? false;
+                              _authError = null;
+                            }),
+                            title: 'Kullanıcı Sözleşmesi\'ni kabul ediyorum *',
+                            actionLabel: 'Sözleşmeyi incele',
+                            onView: () => _showLegalDocument(
+                              'Kullanıcı Sözleşmesi',
+                              _termsText,
                             ),
                           ),
-                          CheckboxListTile(
+                          _buildConsentCard(
                             value: _privacyAccepted,
-                            onChanged: (value) => setState(
-                              () => _privacyAccepted = value ?? false,
+                            onChanged: (value) => setState(() {
+                              _privacyAccepted = value ?? false;
+                              _authError = null;
+                            }),
+                            title: 'KVKK Açık Rıza Metni\'ni kabul ediyorum *',
+                            actionLabel: 'KVKK metnini incele',
+                            onView: () => _showLegalDocument(
+                              'KVKK Açık Rıza Metni',
+                              _privacyText,
                             ),
-                            controlAffinity: ListTileControlAffinity.leading,
-                            contentPadding: EdgeInsets.zero,
-                            dense: true,
-                            title: Row(
-                              children: [
-                                Expanded(
-                                  child: Text(
-                                    'KVKK Açık Rıza Metni\'ni kabul ediyorum *',
-                                    style: textTheme.bodySmall,
-                                  ),
-                                ),
-                                TextButton(
-                                  onPressed: () => _showLegalDocument(
-                                    'KVKK Açık Rıza Metni',
-                                    _privacyText,
-                                  ),
-                                  child: const Text('Metni oku'),
-                                ),
-                              ],
-                            ),
+                            externalActionLabel: 'Web politikasını aç',
+                            onExternalView: () =>
+                                unawaited(_openPublicPrivacyPolicy()),
                           ),
                           CheckboxListTile(
                             value: _emailMarketingAccepted,
-                            onChanged: (value) => setState(
-                              () => _emailMarketingAccepted = value ?? false,
-                            ),
+                            onChanged: (value) => setState(() {
+                              _emailMarketingAccepted = value ?? false;
+                              _authError = null;
+                            }),
                             controlAffinity: ListTileControlAffinity.leading,
                             contentPadding: EdgeInsets.zero,
                             dense: true,
@@ -813,11 +1061,49 @@ Bu uygulama içi açıklama, işletmecinin yasal unvanı, adresi, güncel saklam
                               child: Text(
                                 _resetCooldownSeconds > 0
                                     ? 'Tekrar gönder (${_resetCooldownSeconds}s)'
-                                    : 'Şifremi Unuttum',
+                                    : 'Şifremi unuttum',
                               ),
                             ),
                           ),
-                        if (!_isSignUpMode) const SizedBox(height: 4),
+                        if (_authError != null) ...[
+                          const SizedBox(height: 8),
+                          Container(
+                            width: double.infinity,
+                            padding: const EdgeInsets.symmetric(
+                              horizontal: 12,
+                              vertical: 10,
+                            ),
+                            decoration: BoxDecoration(
+                              color: colors.error.withValues(alpha: 0.1),
+                              borderRadius: BorderRadius.circular(12),
+                              border: Border.all(
+                                color: colors.error.withValues(alpha: 0.45),
+                              ),
+                            ),
+                            child: Row(
+                              crossAxisAlignment: CrossAxisAlignment.center,
+                              children: [
+                                Icon(
+                                  Icons.error_outline_rounded,
+                                  size: 18,
+                                  color: colors.error,
+                                ),
+                                const SizedBox(width: 8),
+                                Expanded(
+                                  child: Text(
+                                    _authError!,
+                                    textAlign: TextAlign.center,
+                                    style: textTheme.bodySmall?.copyWith(
+                                      color: colors.error,
+                                      fontWeight: FontWeight.w600,
+                                    ),
+                                  ),
+                                ),
+                              ],
+                            ),
+                          ),
+                          const SizedBox(height: 12),
+                        ],
                         SizedBox(
                           width: double.infinity,
                           height: 52,
@@ -832,7 +1118,7 @@ Bu uygulama içi açıklama, işletmecinin yasal unvanı, adresi, güncel saklam
                                     ),
                                   )
                                 : Text(
-                                    _isSignUpMode ? 'Kayit Ol' : 'Giris Yap',
+                                    _isSignUpMode ? 'Kayıt Ol' : 'Giriş Yap',
                                     style: textTheme.labelLarge,
                                   ),
                           ),
@@ -846,7 +1132,7 @@ Bu uygulama içi açıklama, işletmecinin yasal unvanı, adresi, güncel saklam
                                 horizontal: 12,
                               ),
                               child: Text(
-                                'veya sununla devam et',
+                                'veya şununla devam et',
                                 style: textTheme.bodySmall?.copyWith(
                                   color: colors.onSurfaceVariant,
                                 ),
@@ -856,30 +1142,35 @@ Bu uygulama içi açıklama, işletmecinin yasal unvanı, adresi, güncel saklam
                           ],
                         ),
                         const SizedBox(height: 20),
-                        Row(
-                          children: [
-                            Expanded(
-                              child: OutlinedButton.icon(
-                                onPressed: () => _handleSocialAuth('Google'),
-                                icon: Icon(
-                                  Icons.g_mobiledata_rounded,
-                                  color: colors.primary,
-                                ),
-                                label: const Text('Google'),
-                              ),
+                        SizedBox(
+                          width: double.infinity,
+                          height: 52,
+                          child: OutlinedButton.icon(
+                            onPressed: _isAuthLoading
+                                ? null
+                                : () => _handleSocialAuth('Google'),
+                            icon: SvgPicture.asset(
+                              'assets/logo/google_g.svg',
+                              width: 22,
+                              height: 22,
                             ),
-                            if (showAppleButton) ...[
-                              const SizedBox(width: 12),
-                              Expanded(
-                                child: OutlinedButton.icon(
-                                  onPressed: () => _handleSocialAuth('Apple'),
-                                  icon: const Icon(Icons.apple),
-                                  label: const Text('Apple'),
-                                ),
-                              ),
-                            ],
-                          ],
+                            label: const Text('Google ile devam et'),
+                          ),
                         ),
+                        const SizedBox(height: 12),
+                        if (showAppleButton) ...[
+                          SizedBox(
+                            width: double.infinity,
+                            height: 52,
+                            child: OutlinedButton.icon(
+                              onPressed: _isAuthLoading
+                                  ? null
+                                  : () => _handleSocialAuth('Apple'),
+                              icon: const Icon(Icons.apple, size: 22),
+                              label: const Text('Apple ile devam et'),
+                            ),
+                          ),
+                        ],
                       ],
                     ),
                   ),

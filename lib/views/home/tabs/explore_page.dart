@@ -11,7 +11,6 @@ class ExplorePage extends StatefulWidget {
   final VoidCallback? onSelectLostPet;
   final List<Map<String, String>> savedAddresses;
   final List<Map<String, dynamic>> communityPlaces;
-  final List<Map<String, String>> recentSearches;
   final void Function(String label, String query) onSearchCategory;
   final VoidCallback onAddCommunityPlace;
   final ValueChanged<Map<String, dynamic>> onSelectCommunityPlace;
@@ -24,7 +23,6 @@ class ExplorePage extends StatefulWidget {
     required this.onSelectListingType,
     required this.savedAddresses,
     required this.communityPlaces,
-    required this.recentSearches,
     required this.onSearchCategory,
     required this.onAddCommunityPlace,
     required this.onSelectCommunityPlace,
@@ -280,24 +278,6 @@ class _ExplorePageState extends State<ExplorePage> {
                             onTap: () => widget.onSearchCategory(
                               'Kayıtlı yer',
                               address['address'] ?? address['title'] ?? '',
-                            ),
-                          ),
-                        ),
-                  ],
-                  if (widget.recentSearches.isNotEmpty) ...[
-                    const SizedBox(height: 26),
-                    const _SectionHeading(title: 'SON BAKTIKLARIN'),
-                    const SizedBox(height: 8),
-                    ...widget.recentSearches
-                        .take(4)
-                        .map(
-                          (search) => _ExploreListTile(
-                            icon: Icons.history_rounded,
-                            title: search['name'] ?? search['query'] ?? 'Arama',
-                            subtitle: search['query'] ?? '',
-                            onTap: () => widget.onSearchCategory(
-                              'Son aramalar',
-                              search['query'] ?? search['name'] ?? '',
                             ),
                           ),
                         ),
