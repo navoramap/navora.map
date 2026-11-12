@@ -6,6 +6,7 @@ This document records the client-side Firestore paths used by Navora Map.
 - `property_listings/{listingId}/_views/{viewerUid}`: private unique-view records written by the `recordPropertyListingView` callable; clients cannot read or write this subcollection.
 - `property_listings/{uid}/{listingId}/{photoIndex}` in Cloud Storage: listing photos, with five fixed slots per pending listing; only the listing owner can upload, and active photos are readable by authenticated users.
 - `community_places/{placeId}`: user-submitted map locations with a bounded name, category, optional description/address/photo URL, coordinates and owner UID.
+- `public_routes/{routeId}`: routes explicitly published by signed-in users for authenticated community discovery. Each document includes the owner's UID, route title, start/destination labels and coordinates, distance, duration, travel mode, and creation time. Only the owner can publish or remove a route; public route documents cannot be edited.
 - `lost_pet_reports/{reportId}`: authenticated lost/found pet reports with last-seen address/coordinates, time, an explicitly shared contact phone, and zero to three optional photo URLs. The owner can update listing details and photos, but not the published contact phone or consent; they can resolve or delete their own report. Active reports appear on the community map.
 - `pet_adoption_listings/{listingId}`: authenticated pet adoption listings with location, an explicitly shared contact phone, and zero to three optional photo URLs. The owner can update listing details and photos, but not the published contact phone or consent; they can close or delete their own listing.
 - `pet_adoption_listings/{uid}/{listingId}/{photoIndex}` in Cloud Storage: up to three adoption listing photos, readable by authenticated users while the listing is active and writable only by the listing owner.
@@ -45,8 +46,6 @@ settings; the block list is private to its owner.
 - `users/{uid}/saved_addresses`: saved addresses.
 - `users/{uid}/driving_history`: driving history.
 - `users/{uid}/route_history`: completed route history.
-- `users/{uid}/sos_contacts`: emergency contacts.
-- `users/{uid}/sos_alerts`: SOS records.
 - `users/{uid}/blocked_users/{blockedUid}`: private per-user chat block list.
 - `users/{uid}/daily_usage/{yyyy-MM-dd}`: server-maintained room and AI usage counters. Signed-in clients can read but cannot write.
 - `users/{uid}/quota_reservations/{reservationId}`: short-lived, server-created quota reservations for room creation and AI requests; clients cannot read or write.

@@ -19,6 +19,7 @@ import 'package:url_launcher/url_launcher.dart';
 
 import 'services/app_notification_service.dart';
 import 'views/home/home_page.dart';
+import 'views/navora_loading_screen.dart';
 import 'firebase_options.dart';
 
 part 'views/main_wrapper.dart';

@@ -6,7 +6,7 @@ import 'dart:math' as math;
 import 'dart:ui' as ui;
 
 import 'package:http/http.dart' as http;
-import 'package:flutter_tts/flutter_tts.dart';
+import 'package:share_plus/share_plus.dart';
 import 'package:speech_to_text/speech_to_text.dart';
 import 'package:flutter/foundation.dart'
     show defaultTargetPlatform, kIsWeb, TargetPlatform;
@@ -18,7 +18,6 @@ import 'package:firebase_auth/firebase_auth.dart';
 import 'package:firebase_ai/firebase_ai.dart';
 import 'package:cloud_firestore/cloud_firestore.dart';
 import 'package:firebase_storage/firebase_storage.dart';
-import 'package:crypto/crypto.dart';
 import 'package:geolocator/geolocator.dart' as geo;
 import 'package:geocoding/geocoding.dart' as geo_coding;
 import 'package:image_picker/image_picker.dart';
@@ -26,6 +25,7 @@ import 'package:google_maps_flutter/google_maps_flutter.dart';
 import 'package:sensors_plus/sensors_plus.dart' as sensors;
 import 'package:shared_preferences/shared_preferences.dart';
 import 'package:url_launcher/url_launcher.dart';
+import 'package:wakelock_plus/wakelock_plus.dart';
 
 import 'search_page.dart';
 import 'room_chat_page.dart';
@@ -41,6 +41,7 @@ import '../../services/chat_room_service.dart';
 import '../../services/blocked_users_service.dart';
 import '../../services/property_listing_service.dart';
 import '../../services/app_notification_service.dart';
+import '../navora_loading_screen.dart';
 
 class NavoraTrafficService {
   static const String _googleRoutesApiKey = String.fromEnvironment(
@@ -87,6 +88,7 @@ class NavoraTrafficService {
         ),
       );
     }
+
     return polylines;
   }
 
@@ -346,6 +348,22 @@ bool navoraShouldSaveDriveHistory({
   required bool startedForNavigation,
   required bool hasCompletedNavigationProgress,
 }) => !startedForNavigation || hasCompletedNavigationProgress;
+
+List<Map<String, String>> navoraCombineDrivingHistory(
+  List<Map<String, String>> drivingHistory,
+  List<Map<String, String>> routeHistory,
+) {
+  final gpsDrives = drivingHistory.where((drive) {
+    if (drive['route'] != 'GPS sürüşü') return true;
+    return !routeHistory.any(
+      (route) =>
+          route['date'] == drive['date'] &&
+          route['duration'] == drive['duration'] &&
+          route['km'] == drive['km'],
+    );
+  });
+  return [...gpsDrives, ...routeHistory];
+}
 
 double navoraSmoothBearing(
   double currentBearing,
@@ -700,6 +718,7 @@ class _HomePageState extends State<HomePage> with WidgetsBindingObserver {
   static const Duration _chatRoomLifetime = Duration(hours: 24);
   static const double _bottomNavigationBarHeight = 68;
   static const double _bottomNavigationGap = 16;
+  static const double _navigationDockHeight = 132;
   static const String _darkGoogleMapStyle = '''[
     {"featureType":"all","elementType":"geometry","stylers":[{"color":"#22282c"}]},
     {"featureType":"all","elementType":"labels.text.fill","stylers":[{"color":"#f5f5f5"}]},
@@ -714,6 +733,8 @@ class _HomePageState extends State<HomePage> with WidgetsBindingObserver {
   int _selectedIndex = 1;
   final MapType _mapType = MapType.normal;
   GoogleMapController? _mapController;
+  bool _isMapLoaded = false;
+  Timer? _mapLoadingTimer;
   CameraPosition? _mapCameraPosition;
   final TextEditingController _searchController = TextEditingController();
   final FocusNode _searchFocusNode = FocusNode();
@@ -751,7 +772,6 @@ class _HomePageState extends State<HomePage> with WidgetsBindingObserver {
   bool _isCheckingNavigationNetwork = false;
   bool _isCheckingFasterRoute = false;
   bool _hasShownRouteUpdateError = false;
-  bool _isNavigationVoiceEnabled = true;
   BitmapDescriptor? _navigationEndpointMarkerIcon;
   BitmapDescriptor? _lostPetMarkerIcon;
   BitmapDescriptor? _adoptionMarkerIcon;
@@ -773,7 +793,6 @@ class _HomePageState extends State<HomePage> with WidgetsBindingObserver {
   Timer? _navigationConnectivityTimer;
   String? _activeNavigationTitle;
   String? _activeNavigationDestination;
-  final FlutterTts _tts = FlutterTts();
   final SpeechToText _speech = SpeechToText();
   bool _isListening = false;
   final List<Map<String, dynamic>> _liveRooms = [];
@@ -839,8 +858,6 @@ class _HomePageState extends State<HomePage> with WidgetsBindingObserver {
   _drivingHistorySubscription;
   StreamSubscription<QuerySnapshot<Map<String, dynamic>>>?
   _routeHistorySubscription;
-  StreamSubscription<QuerySnapshot<Map<String, dynamic>>>?
-  _sosContactsSubscription;
   Timer? _roomExpiryTimer;
   geo.Position? _currentPosition;
   String? _currentAddress;
@@ -854,14 +871,14 @@ class _HomePageState extends State<HomePage> with WidgetsBindingObserver {
   geo.Position? _lastDrivePosition;
   DateTime? _driveStartedAt;
   bool _isDriveTracking = false;
+  Future<void> _screenWakeLockQueue = Future<void>.value();
   bool _isStartingDriveTracking = false;
   bool _driveStartedForNavigation = false;
   double _driveDistanceKm = 0;
-  DateTime? _lastCrashAlertAt;
 
   late String _userName;
   late String _userEmail;
-  String _userPhone = '+90 532 000 0000';
+  String _userPhone = '';
   String _userGender = 'Belirtmek istemiyorum';
   String _selectedVehicle = 'Araba';
 
@@ -892,8 +909,6 @@ class _HomePageState extends State<HomePage> with WidgetsBindingObserver {
 
   final List<Map<String, String>> _savedAddresses = [];
 
-  final List<Map<String, String>> _sosContacts = [];
-
   final List<Map<String, String>> _drivingHistory = [];
   final List<Map<String, String>> _liveDrivingHistory = [];
   final List<Map<String, String>> _liveRouteHistory = [];
@@ -908,8 +923,6 @@ class _HomePageState extends State<HomePage> with WidgetsBindingObserver {
       TextEditingController();
   final TextEditingController _routeDistanceController =
       TextEditingController();
-  LatLng? _activeRouteStart;
-  LatLng? _activeRouteDestination;
   final List<Map<String, String>> _aiMessages = [
     {
       'sender': 'ai',
@@ -934,6 +947,7 @@ class _HomePageState extends State<HomePage> with WidgetsBindingObserver {
   @override
   void initState() {
     super.initState();
+    _scheduleMapLoadingFallback(const Duration(seconds: 8));
     WidgetsBinding.instance.addObserver(this);
     if (!kIsWeb && defaultTargetPlatform == TargetPlatform.android) {
       unawaited(SystemChrome.setEnabledSystemUIMode(SystemUiMode.edgeToEdge));
@@ -951,7 +965,6 @@ class _HomePageState extends State<HomePage> with WidgetsBindingObserver {
     _userName = widget.userName;
     _userEmail = widget.userEmail;
     _profilePhotoUrl = FirebaseAuth.instance.currentUser?.photoURL;
-    _initializeVoiceNavigation();
     _loadNavigationEndpointMarkerIcon();
     _loadLostPetMarkerIcon();
     _loadListingMarkerIcons();
@@ -982,6 +995,26 @@ class _HomePageState extends State<HomePage> with WidgetsBindingObserver {
   void didChangeAppLifecycleState(AppLifecycleState state) {
     if (state == AppLifecycleState.resumed) {
       unawaited(_refreshVerifiedEmail());
+      unawaited(_updateScreenWakeLock());
+    }
+  }
+
+  void _finishMapLoading() {
+    _mapLoadingTimer?.cancel();
+    _mapLoadingTimer = null;
+    if (!mounted || _isMapLoaded) return;
+    setState(() => _isMapLoaded = true);
+  }
+
+  void _scheduleMapLoadingFallback(Duration duration) {
+    _mapLoadingTimer?.cancel();
+    _mapLoadingTimer = Timer(duration, _finishMapLoading);
+  }
+
+  void _selectMainTab(int index) {
+    setState(() => _selectedIndex = index);
+    if (index == 1 && !_isMapLoaded) {
+      _scheduleMapLoadingFallback(const Duration(seconds: 6));
     }
   }
 
@@ -1406,8 +1439,6 @@ class _HomePageState extends State<HomePage> with WidgetsBindingObserver {
       await preferences.remove('map.avoidTolls');
       if (!mounted) return;
       setState(() {
-        _isNavigationVoiceEnabled =
-            preferences.getBool('map.navigationVoice') ?? true;
         _isSearchHistoryEnabled =
             preferences.getBool('search.history.enabled') ?? true;
         for (final layer in _mapLayerVisibility.keys.toList()) {
@@ -1430,24 +1461,6 @@ class _HomePageState extends State<HomePage> with WidgetsBindingObserver {
       debugPrint('Harita katmanı tercihi kaydedilemedi: $error');
       if (mounted) {
         _showTrackingMessage('Harita katmanı tercihi kaydedilemedi.');
-      }
-    }
-  }
-
-  Future<void> _setNavigationVoiceEnabled(bool enabled) async {
-    setState(() => _isNavigationVoiceEnabled = enabled);
-    try {
-      final preferences = await SharedPreferences.getInstance();
-      await preferences.setBool('map.navigationVoice', enabled);
-      if (enabled) {
-        await _speakNavigation('Navigasyon sesi açıldı.');
-      } else {
-        await _tts.stop();
-      }
-    } catch (error) {
-      debugPrint('Navigasyon sesi tercihi kaydedilemedi: $error');
-      if (mounted) {
-        _showTrackingMessage('Navigasyon sesi tercihi kaydedilemedi.');
       }
     }
   }
@@ -2144,23 +2157,6 @@ class _HomePageState extends State<HomePage> with WidgetsBindingObserver {
       duration: const Duration(milliseconds: 250),
       curve: Curves.easeOutCubic,
     );
-  }
-
-  Future<void> _initializeVoiceNavigation() async {
-    await _tts.setLanguage('tr-TR');
-    await _tts.setSpeechRate(0.48);
-    await _tts.setVolume(1.0);
-    await _tts.setPitch(1.0);
-  }
-
-  Future<void> _speakNavigation(String message) async {
-    if (!_isNavigationVoiceEnabled) return;
-    try {
-      await _tts.stop();
-      await _tts.speak(message);
-    } catch (error) {
-      debugPrint('Navigasyon sesi başlatılamadı: $error');
-    }
   }
 
   void _listenToCommunityPlaces() {
@@ -3502,11 +3498,6 @@ class _HomePageState extends State<HomePage> with WidgetsBindingObserver {
     if (hasLiveRoute && isOffRoute != _isOffRoute) {
       _isOffRoute = isOffRoute;
       if (mounted) setState(() {});
-      if (isOffRoute) {
-        unawaited(
-          _speakNavigation('Rotadan saptınız. Rota yeniden hesaplanıyor.'),
-        );
-      }
     }
 
     if (!isOffRoute && hasLiveRoute) {
@@ -3665,7 +3656,6 @@ class _HomePageState extends State<HomePage> with WidgetsBindingObserver {
           )) {
         unawaited(_centerOnPosition(cameraPosition));
       }
-      unawaited(_speakNavigation('Yeni rota hazır. Yolunu takip et.'));
     } catch (error) {
       debugPrint('Canlı rota güncellenemedi: $error');
       if (mounted && !_hasShownRouteUpdateError) {
@@ -4416,6 +4406,7 @@ class _HomePageState extends State<HomePage> with WidgetsBindingObserver {
     _navigationDurationMinutes = null;
     _navigationDurationSeconds = null;
     _isNavigationActive = false;
+    unawaited(_updateScreenWakeLock());
     _isMapTilted = false;
     _isFollowingCurrentPosition = true;
     _hasMapBearing = false;
@@ -5116,9 +5107,6 @@ out center tags;
     var selectedRoute = routeOptions[selectedRouteIndex];
     var routeDistanceKm = selectedRoute['distanceKm'] as double;
     var durationMinutes = selectedRoute['durationMinutes'] as int;
-    var navigationSteps = List<Map<String, dynamic>>.from(
-      selectedRoute['steps'],
-    );
     var selectedTravelMode = routeVehicle;
     var isRecalculatingRoute = false;
 
@@ -5158,9 +5146,6 @@ out center tags;
               selectedRouteIndex = index;
               routeDistanceKm = selectedRoute['distanceKm'] as double;
               durationMinutes = selectedRoute['durationMinutes'] as int;
-              navigationSteps = List<Map<String, dynamic>>.from(
-                selectedRoute['steps'],
-              );
             });
             _applyRouteOptions(
               routeOptions,
@@ -5192,9 +5177,6 @@ out center tags;
               selectedRoute = routeOptions.first;
               routeDistanceKm = selectedRoute['distanceKm'] as double;
               durationMinutes = selectedRoute['durationMinutes'] as int;
-              navigationSteps = List<Map<String, dynamic>>.from(
-                selectedRoute['steps'],
-              );
               setSheetState(() {});
               setState(() {
                 _selectedVehicle = nextVehicle;
@@ -5513,9 +5495,7 @@ out center tags;
                                     FocusManager.instance.primaryFocus
                                         ?.unfocus();
                                   });
-                                  await _speakNavigation(
-                                    'Yola çıkıldı. ${navigationSteps.isEmpty ? 'Rotanızı takip edin.' : navigationSteps.first['voice']}',
-                                  );
+                                  await _updateScreenWakeLock();
                                   await _toggleDriveTracking();
                                 },
                           icon: const Icon(Icons.navigation_rounded),
@@ -5872,10 +5852,6 @@ out center tags;
         nextStepDistanceMeters != null && nextStepDistanceMeters <= 300;
     final isManeuverVeryClose =
         nextStepDistanceMeters != null && nextStepDistanceMeters <= 100;
-    final estimatedArrivalTime = navoraFormatArrivalTime(
-      DateTime.now(),
-      _navigationDurationMinutes,
-    );
     return Container(
       padding: const EdgeInsets.fromLTRB(14, 12, 10, 10),
       decoration: BoxDecoration(
@@ -6067,63 +6043,156 @@ out center tags;
                 'İnternet yavaş veya kullanılamıyor. Mevcut rota korunuyor.',
               ),
           ],
-          const SizedBox(height: 12),
-          Container(
-            padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 8),
-            decoration: BoxDecoration(
-              color: const Color(0xFF222321),
-              borderRadius: BorderRadius.circular(13),
-              border: Border.all(color: const Color(0xFF353633)),
+        ],
+      ),
+    );
+  }
+
+  Widget _buildNavigationMetrics() {
+    final estimatedArrivalTime = navoraFormatArrivalTime(
+      DateTime.now(),
+      _navigationDurationMinutes,
+    );
+    return Container(
+      padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 7),
+      decoration: BoxDecoration(
+        color: const Color(0xFF222321),
+        borderRadius: BorderRadius.circular(13),
+        border: Border.all(color: const Color(0xFF353633)),
+      ),
+      child: Row(
+        children: [
+          Expanded(
+            child: _buildNavigationMetric(
+              Icons.schedule_rounded,
+              'SÜRE',
+              navoraFormatNavigationDuration(
+                _navigationDurationMinutes,
+                isWalking: _selectedVehicle == 'Yürüyüş',
+              ),
             ),
-            child: Row(
-              children: [
-                Expanded(
-                  child: _buildNavigationMetric(
-                    Icons.schedule_rounded,
-                    'SÜRE',
-                    navoraFormatNavigationDuration(
-                      _navigationDurationMinutes,
-                      isWalking: _selectedVehicle == 'Yürüyüş',
-                    ),
-                  ),
-                ),
-                Container(width: 1, height: 38, color: const Color(0xFF41413E)),
-                Expanded(
-                  child: _buildNavigationMetric(
-                    Icons.route_rounded,
-                    'MESAFE',
-                    _navigationDistanceKm == null
-                        ? '-'
-                        : '${_navigationDistanceKm!.toStringAsFixed(1)} km',
-                  ),
-                ),
-                Container(width: 1, height: 38, color: const Color(0xFF41413E)),
-                Expanded(
-                  child: _buildNavigationMetric(
-                    Icons.flag_outlined,
-                    'VARIŞ',
-                    estimatedArrivalTime ?? '-',
-                  ),
-                ),
-                Container(width: 1, height: 38, color: const Color(0xFF41413E)),
-                Expanded(
-                  child: _buildNavigationMetric(
-                    Icons.speed_rounded,
-                    'HIZ',
-                    _currentPosition != null &&
-                            _currentPosition!.speed.isFinite &&
-                            _currentPosition!.speed >= 0
-                        ? '${navoraSpeedKmh(_currentPosition!.speed).round()} km/sa'
-                        : '-',
-                  ),
-                ),
-              ],
+          ),
+          Container(width: 1, height: 38, color: const Color(0xFF41413E)),
+          Expanded(
+            child: _buildNavigationMetric(
+              Icons.route_rounded,
+              'MESAFE',
+              _navigationDistanceKm == null
+                  ? '-'
+                  : '${_navigationDistanceKm!.toStringAsFixed(1)} km',
+            ),
+          ),
+          Container(width: 1, height: 38, color: const Color(0xFF41413E)),
+          Expanded(
+            child: _buildNavigationMetric(
+              Icons.flag_outlined,
+              'VARIŞ',
+              estimatedArrivalTime ?? '-',
+            ),
+          ),
+          Container(width: 1, height: 38, color: const Color(0xFF41413E)),
+          Expanded(
+            child: _buildNavigationMetric(
+              Icons.speed_rounded,
+              'HIZ',
+              _currentPosition != null &&
+                      _currentPosition!.speed.isFinite &&
+                      _currentPosition!.speed >= 0
+                  ? '${navoraSpeedKmh(_currentPosition!.speed).round()} km/sa'
+                  : '-',
             ),
           ),
         ],
       ),
     );
   }
+
+  Widget _buildNavigationDockAction({
+    required IconData icon,
+    required String label,
+    required int tabIndex,
+  }) {
+    final isSelected = _selectedIndex == tabIndex;
+    return Expanded(
+      child: Material(
+        color: Colors.transparent,
+        child: InkWell(
+          onTap: () => setState(() => _selectedIndex = tabIndex),
+          borderRadius: BorderRadius.circular(14),
+          child: Container(
+            height: 38,
+            decoration: BoxDecoration(
+              color: isSelected
+                  ? const Color(0x33FF7A00)
+                  : Colors.transparent,
+              borderRadius: BorderRadius.circular(14),
+            ),
+            child: Row(
+              mainAxisAlignment: MainAxisAlignment.center,
+              children: [
+                Icon(
+                  icon,
+                  size: 18,
+                  color: isSelected
+                      ? const Color(0xFFFF9A3D)
+                      : Colors.white70,
+                ),
+                const SizedBox(width: 7),
+                Text(
+                  label,
+                  style: TextStyle(
+                    color: isSelected
+                        ? const Color(0xFFFF9A3D)
+                        : Colors.white70,
+                    fontSize: 12,
+                    fontWeight: FontWeight.w700,
+                  ),
+                ),
+              ],
+            ),
+          ),
+        ),
+      ),
+    );
+  }
+
+  Widget _buildNavigationDock() => Container(
+    padding: const EdgeInsets.fromLTRB(9, 8, 9, 7),
+    decoration: BoxDecoration(
+      color: const Color(0xF21A1A1A),
+      borderRadius: BorderRadius.circular(22),
+      border: Border.all(color: const Color(0xFF4A3A2D)),
+      boxShadow: const [
+        BoxShadow(
+          color: Color(0x66000000),
+          blurRadius: 20,
+          offset: Offset(0, 7),
+        ),
+      ],
+    ),
+    child: Column(
+      mainAxisSize: MainAxisSize.min,
+      children: [
+        _buildNavigationMetrics(),
+        const SizedBox(height: 4),
+        Row(
+          children: [
+            _buildNavigationDockAction(
+              icon: Icons.forum_rounded,
+              label: 'Sohbet',
+              tabIndex: 3,
+            ),
+            Container(width: 1, height: 24, color: const Color(0xFF41413E)),
+            _buildNavigationDockAction(
+              icon: Icons.auto_awesome_rounded,
+              label: 'Navora AI',
+              tabIndex: 2,
+            ),
+          ],
+        ),
+      ],
+    ),
+  );
 
   Widget _buildNavigationStatusMessage(IconData icon, String message) {
     return Padding(
@@ -6442,6 +6511,8 @@ out center tags;
         final data = snapshot.data()!;
         setState(() {
           _isProUser = false;
+          final phone = data['phone'];
+          if (phone is String) _userPhone = phone.trim();
           final photoUrl = data['photo_url']?.toString().trim();
           if (photoUrl != null && photoUrl.isNotEmpty) {
             _profilePhotoUrl = photoUrl;
@@ -6491,6 +6562,19 @@ out center tags;
                       'start': route['start']?.toString() ?? '',
                       'destination': route['destination']?.toString() ?? '',
                       'distance_km': route['distance_km']?.toString() ?? '',
+                      'start_latitude':
+                          route['start_latitude']?.toString() ?? '',
+                      'start_longitude':
+                          route['start_longitude']?.toString() ?? '',
+                      'destination_latitude':
+                          route['destination_latitude']?.toString() ?? '',
+                      'destination_longitude':
+                          route['destination_longitude']?.toString() ?? '',
+                      'travel_mode':
+                          route['travel_mode']?.toString() ?? 'Araba',
+                      'is_public': route['is_public']?.toString() ?? 'false',
+                      'public_route_id':
+                          route['public_route_id']?.toString() ?? '',
                     };
                   }),
                 );
@@ -6574,8 +6658,12 @@ out center tags;
             setState(() {
               _drivingHistory
                 ..clear()
-                ..addAll(_liveDrivingHistory)
-                ..addAll(_liveRouteHistory);
+                ..addAll(
+                  navoraCombineDrivingHistory(
+                    _liveDrivingHistory,
+                    _liveRouteHistory,
+                  ),
+                );
             });
           },
           onError: (Object error) {
@@ -6615,50 +6703,17 @@ out center tags;
             setState(() {
               _drivingHistory
                 ..clear()
-                ..addAll(_liveDrivingHistory)
-                ..addAll(_liveRouteHistory);
+                ..addAll(
+                  navoraCombineDrivingHistory(
+                    _liveDrivingHistory,
+                    _liveRouteHistory,
+                  ),
+                );
             });
           },
           onError: (Object error) {
             debugPrint('Rota geçmişi dinlenemedi: $error');
             if (mounted) _showTrackingMessage('Rota geçmişi güncellenemedi.');
-          },
-        );
-
-    _sosContactsSubscription = userReference
-        .collection('sos_contacts')
-        .snapshots()
-        .listen(
-          (snapshot) {
-            if (!mounted || FirebaseAuth.instance.currentUser?.uid != userId) {
-              return;
-            }
-            final contacts = <Map<String, String>>[];
-            final seenPhoneNumbers = <String>{};
-            for (final document in snapshot.docs) {
-              final contact = document.data();
-              final phone = contact['phone']?.toString() ?? '';
-              final normalizedPhone = _normalizeSosPhone(phone);
-              if (normalizedPhone.isNotEmpty &&
-                  !seenPhoneNumbers.add(normalizedPhone)) {
-                continue;
-              }
-              contacts.add({
-                'id': document.id,
-                'name': contact['name']?.toString() ?? '',
-                'phone': phone,
-                'relation': contact['relation']?.toString() ?? '',
-              });
-            }
-            setState(() {
-              _sosContacts
-                ..clear()
-                ..addAll(contacts);
-            });
-          },
-          onError: (Object error) {
-            debugPrint('SOS kişileri dinlenemedi: $error');
-            if (mounted) _showTrackingMessage('SOS kişileri güncellenemedi.');
           },
         );
   }
@@ -6706,6 +6761,7 @@ out center tags;
       _showTrackingMessage('Oda oluşturmak için önce hesabına giriş yap.');
       return;
     }
+    _subscribeToUserProfile(user.uid);
 
     try {
       final profile = await FirebaseFirestore.instance
@@ -6732,11 +6788,6 @@ out center tags;
           .collection('users')
           .doc(user.uid)
           .collection('route_history')
-          .get();
-      final sosContactsSnapshot = await FirebaseFirestore.instance
-          .collection('users')
-          .doc(user.uid)
-          .collection('sos_contacts')
           .get();
       final today = _dailyQuotaKey(DateTime.now());
       final dailyQuotaSnapshot = await _dailyQuotaReference(
@@ -6820,23 +6871,9 @@ out center tags;
               };
             })
             .toList();
-        drivingHistory.addAll(routeHistory);
         _drivingHistory
           ..clear()
-          ..addAll(drivingHistory);
-        final sosContacts = sosContactsSnapshot.docs
-            .map(
-              (document) => {
-                'id': document.id,
-                'name': document.data()['name']?.toString() ?? '',
-                'phone': document.data()['phone']?.toString() ?? '',
-                'relation': document.data()['relation']?.toString() ?? '',
-              },
-            )
-            .toList();
-        _sosContacts
-          ..clear()
-          ..addAll(sosContacts);
+          ..addAll(navoraCombineDrivingHistory(drivingHistory, routeHistory));
         final visitedCities = data['visited_cities'];
         _visitedCities
           ..clear()
@@ -6876,7 +6913,6 @@ out center tags;
         }
         if (phone is String && phone.isNotEmpty) _userPhone = phone;
       });
-      _subscribeToUserProfile(user.uid);
       _subscribeToUserCollections(user.uid);
       await _subscribeToDailyQuota(user.uid, today);
     } catch (error) {
@@ -6935,9 +6971,14 @@ out center tags;
         : 0.0;
     final snackBarBottomInset =
         bottomSafeInset +
-        _bottomNavigationBarHeight +
+        (_isNavigationActive && _selectedIndex == 1
+            ? _navigationDockHeight
+            : _bottomNavigationBarHeight) +
         _bottomNavigationGap +
         12;
+    final mapBottomControlsInset = _isNavigationActive
+        ? _navigationDockHeight
+        : _bottomNavigationBarHeight;
 
     return Theme(
       data: Theme.of(context).copyWith(
@@ -7143,11 +7184,6 @@ out center tags;
                                   onTap: () =>
                                       unawaited(_createCommunityPlace()),
                                 ),
-                                _buildChip(
-                                  Icons.bookmark_rounded,
-                                  'Kayıtlı yerler',
-                                  onTap: _showSavedAddressesDialog,
-                                ),
                               ],
                             ),
                           ),
@@ -7166,7 +7202,7 @@ out center tags;
               if (_selectedIndex == 1 && !isMapSearchPanelVisible)
                 Positioned(
                   right: 16,
-                  bottom: bottomSafeInset + _bottomNavigationBarHeight + 8,
+                  bottom: bottomSafeInset + mapBottomControlsInset + 8,
                   child: Column(
                     mainAxisSize: MainAxisSize.min,
                     children: [
@@ -7189,28 +7225,6 @@ out center tags;
                         shape: const CircleBorder(),
                         child: const Icon(Icons.layers_rounded),
                       ),
-                      if (_isNavigationActive) ...[
-                        const SizedBox(height: 10),
-                        FloatingActionButton.small(
-                          heroTag: 'navigation-voice-toggle',
-                          onPressed: () => _setNavigationVoiceEnabled(
-                            !_isNavigationVoiceEnabled,
-                          ),
-                          tooltip: _isNavigationVoiceEnabled
-                              ? 'Sesli tarifi kapat'
-                              : 'Sesli tarifi aç',
-                          backgroundColor: const Color(0xFF191919),
-                          foregroundColor: _isNavigationVoiceEnabled
-                              ? const Color(0xFFFF9A3D)
-                              : const Color(0xFF98A2B3),
-                          shape: const CircleBorder(),
-                          child: Icon(
-                            _isNavigationVoiceEnabled
-                                ? Icons.volume_up_rounded
-                                : Icons.volume_off_rounded,
-                          ),
-                        ),
-                      ],
                       const SizedBox(height: 10),
                       if (_isNavigationActive) ...[
                         FloatingActionButton.small(
@@ -7262,7 +7276,7 @@ out center tags;
                   !isMapSearchPanelVisible)
                 Positioned(
                   left: 16,
-                  bottom: bottomSafeInset + _bottomNavigationBarHeight + 18,
+                  bottom: bottomSafeInset + mapBottomControlsInset + 18,
                   child: FloatingActionButton.small(
                     heroTag: 'recenter-map',
                     onPressed: _recenterMap,
@@ -7284,7 +7298,7 @@ out center tags;
                 Positioned(
                   left: 74,
                   right: 74,
-                  bottom: bottomSafeInset + _bottomNavigationBarHeight + 8,
+                  bottom: bottomSafeInset + mapBottomControlsInset + 8,
                   child: IgnorePointer(
                     child: Center(
                       child: Container(
@@ -7332,7 +7346,29 @@ out center tags;
                   top: mapTopInset + 10,
                   child: _buildLiveNavigationCard(),
                 ),
-              if (!isMapSearchPanelVisible)
+              if (_selectedIndex == 1 && !_isMapLoaded)
+                const Positioned.fill(
+                  child: NavoraLoadingScreen(
+                    title: 'Harita hazırlanıyor',
+                    subtitle: 'Yakınındaki yollar yükleniyor.',
+                  ),
+                ),
+              if (!isMapSearchPanelVisible &&
+                  _isNavigationActive &&
+                  _selectedIndex == 1)
+                Positioned(
+                  left: 12,
+                  right: 12,
+                  bottom: bottomSafeInset + 6,
+                  child: Center(
+                    child: ConstrainedBox(
+                      constraints: const BoxConstraints(maxWidth: 440),
+                      child: _buildNavigationDock(),
+                    ),
+                  ),
+                ),
+              if (!isMapSearchPanelVisible &&
+                  (!_isNavigationActive || _selectedIndex != 1))
                 Positioned(
                   left: 12,
                   right: 12,
@@ -7456,12 +7492,8 @@ out center tags;
       onSelectLostPet: () => unawaited(_openLostPetMap()),
       currentUserUid: FirebaseAuth.instance.currentUser?.uid,
       canManageHighlights: _canManageExploreHighlights,
-      savedAddresses: _savedAddresses,
-      communityPlaces: _visibleCommunityPlaces,
-      onAddCommunityPlace: () => unawaited(_createCommunityPlace()),
-      onSelectCommunityPlace: (place) =>
-          unawaited(_openCommunityPlaceFromExplore(place)),
       onShowCommunityPlaces: () => unawaited(_showCommunityPlacesOnMap()),
+      onShowPublicRoutes: _showPublicRoutesSheet,
       onSearchCategory: (label, query) {
         setState(() => _selectedIndex = 1);
         unawaited(_searchCategory(label, query));
@@ -7599,16 +7631,6 @@ out center tags;
     if (submitted == true && mounted) {
       _showTrackingMessage('Mekân haritaya ve Keşfet’e eklendi.');
     }
-  }
-
-  Future<void> _openCommunityPlaceFromExplore(
-    Map<String, dynamic> place,
-  ) async {
-    final latitude = place['latitude'] as double?;
-    final longitude = place['longitude'] as double?;
-    if (latitude == null || longitude == null) return;
-    setState(() => _selectedIndex = 1);
-    await _showCommunityPlaceOnMap(place);
   }
 
   Future<void> _showCommunityPlacesOnMap() async {
@@ -8608,6 +8630,9 @@ out center tags;
             },
             onMapCreated: (controller) {
               _mapController = controller;
+              if (!_isMapLoaded) {
+                _scheduleMapLoadingFallback(const Duration(seconds: 5));
+              }
               final currentPosition = _currentPosition;
               if (currentPosition != null) {
                 unawaited(_centerOnPosition(currentPosition));
@@ -8629,6 +8654,7 @@ out center tags;
               _mapCameraPosition = cameraPosition;
             },
             onCameraIdle: () {
+              _finishMapLoading();
               final zoom = _mapCameraPosition?.zoom ?? 11.5;
               if (_lastClusteredMapZoom != zoom && mounted) {
                 _lastClusteredMapZoom = zoom;
@@ -8754,12 +8780,13 @@ out center tags;
   @override
   void dispose() {
     WidgetsBinding.instance.removeObserver(this);
+    _mapLoadingTimer?.cancel();
+    unawaited(_updateScreenWakeLock(forceEnabled: false));
     _publicChatScrollController.dispose();
     _searchController.dispose();
     _roomSearchController.dispose();
     _searchFocusNode.dispose();
     _searchDebounce?.cancel();
-    _tts.stop();
     _speech.stop();
     _communityPlacesSubscription?.cancel();
     _roomsSubscription?.cancel();
@@ -8776,7 +8803,6 @@ out center tags;
     _savedAddressesSubscription?.cancel();
     _drivingHistorySubscription?.cancel();
     _routeHistorySubscription?.cancel();
-    _sosContactsSubscription?.cancel();
     _roomExpiryTimer?.cancel();
     _navigationConnectivityTimer?.cancel();
     _navigationCameraUpdateTimer?.cancel();
@@ -11157,7 +11183,9 @@ out center tags;
                               ),
                               const SizedBox(height: 4),
                               Text(
-                                _userPhone,
+                                _userPhone.isEmpty
+                                    ? 'Telefon eklenmemiş'
+                                    : _userPhone,
                                 style: const TextStyle(
                                   color: Colors.white70,
                                   fontSize: 12,
@@ -11292,12 +11320,6 @@ out center tags;
             title: 'Geçmiş Rotalar',
             subtitle: 'Önceki seyahatlerinizi görüntüleyin',
             onTap: _showDrivingHistoryDialog,
-          ),
-          _buildProfileMenuItem(
-            icon: Icons.sos_rounded,
-            title: 'Acil Durum (SOS) Kişileri',
-            subtitle: '${_sosContacts.length} güvenli kişi tanımlı',
-            onTap: _showSosContactsDialog,
           ),
           _buildProfileMenuItem(
             icon: Icons.support_agent_rounded,
@@ -13305,32 +13327,27 @@ out center tags;
   Future<Map<String, String>?> _calculateRouteEstimate({
     LatLng? startCoordinate,
     LatLng? destinationCoordinate,
+    required String vehicle,
   }) async {
     if (startCoordinate == null || destinationCoordinate == null) return null;
 
     try {
-      final straightDistance =
-          geo.Geolocator.distanceBetween(
-            startCoordinate.latitude,
-            startCoordinate.longitude,
-            destinationCoordinate.latitude,
-            destinationCoordinate.longitude,
-          ) /
-          1000;
-      final estimatedDistance = straightDistance * 1.2;
-      final estimatedMinutes = (estimatedDistance / 38 * 60).ceil().clamp(
-        1,
-        999,
+      final route = await _fetchRoadRoute(
+        startCoordinate,
+        destinationCoordinate,
+        vehicle: vehicle,
       );
-
-      _activeRouteStart = startCoordinate;
-      _activeRouteDestination = destinationCoordinate;
       return {
-        'distance_km': estimatedDistance.toStringAsFixed(1),
-        'duration_minutes': '$estimatedMinutes',
+        'distance_km': (route['distanceKm'] as double).toStringAsFixed(1),
+        'duration_minutes': '${route['durationMinutes']}',
       };
     } catch (error) {
       debugPrint('Rota hesaplanamadı: $error');
+      if (mounted) {
+        _showTrackingMessage(
+          'Yol rotası hesaplanamadı. İnternet bağlantınızı ve Google Routes API ayarlarını kontrol edin.',
+        );
+      }
       return null;
     }
   }
@@ -13348,16 +13365,30 @@ out center tags;
     }
   }
 
+  void _selectRoutePointOnMap(String target) {
+    FocusManager.instance.primaryFocus?.unfocus();
+    Navigator.of(context).pop();
+    setState(() {
+      _selectedIndex = 1;
+      _routeSelectionTarget = target;
+      _showSearchPanel = false;
+    });
+  }
+
   Future<void> _showRouteCreatorSheet() async {
     final initialStart = _routeDraftStart;
     final initialDestination = _routeDraftDestination;
-    _routeTitleController.clear();
+    if (initialStart == null && initialDestination == null) {
+      _routeTitleController.clear();
+    }
     if (initialStart == null) _routeStartController.clear();
     if (initialDestination == null) _routeDestinationController.clear();
     _routeDistanceController.clear();
 
     Map<String, String>? calculatedRoute;
     bool isCalculating = false;
+    bool publishToDiscover = false;
+    final routeVehicle = _selectedVehicle == 'Yürüyüş' ? 'Yürüyüş' : 'Araba';
     LatLng? selectedStart = initialStart;
     LatLng? selectedDestination = initialDestination;
     final route = await showModalBottomSheet<Map<String, String>>(
@@ -13375,245 +13406,325 @@ out center tags;
             20,
             MediaQuery.of(context).viewInsets.bottom + 20,
           ),
-          child: Column(
-            mainAxisSize: MainAxisSize.min,
-            crossAxisAlignment: CrossAxisAlignment.start,
-            children: [
-              Row(
-                mainAxisAlignment: MainAxisAlignment.spaceBetween,
-                children: [
-                  const Text(
-                    'Yeni Rota Oluştur',
-                    style: TextStyle(
-                      color: Colors.white,
-                      fontSize: 20,
-                      fontWeight: FontWeight.bold,
+          child: SingleChildScrollView(
+            child: Column(
+              mainAxisSize: MainAxisSize.min,
+              crossAxisAlignment: CrossAxisAlignment.start,
+              children: [
+                Row(
+                  mainAxisAlignment: MainAxisAlignment.spaceBetween,
+                  children: [
+                    const Text(
+                      'Yeni Rota Oluştur',
+                      style: TextStyle(
+                        color: Colors.white,
+                        fontSize: 20,
+                        fontWeight: FontWeight.bold,
+                      ),
                     ),
-                  ),
-                  IconButton(
-                    onPressed: () => Navigator.pop(context),
-                    icon: const Icon(Icons.close, color: Colors.white70),
-                  ),
-                ],
-              ),
-              const SizedBox(height: 12),
-              TextField(
-                controller: _routeTitleController,
-                textInputAction: TextInputAction.next,
-                style: const TextStyle(color: Colors.white),
-                decoration: InputDecoration(
-                  labelText: 'Rota adı',
-                  prefixIcon: Icon(Icons.bookmark_outline),
-                  labelStyle: const TextStyle(color: Color(0xFFBDBDBD)),
-                  prefixIconColor: const Color(0xFFFF7A00),
-                  enabledBorder: OutlineInputBorder(
-                    borderRadius: BorderRadius.circular(12),
-                    borderSide: const BorderSide(color: Color(0xFF333333)),
-                  ),
-                  focusedBorder: OutlineInputBorder(
-                    borderRadius: BorderRadius.circular(12),
-                    borderSide: const BorderSide(color: Color(0xFFFF7A00)),
-                  ),
-                  filled: true,
-                  fillColor: const Color(0xFF1F1F1F),
-                ),
-              ),
-              const SizedBox(height: 12),
-              ListTile(
-                contentPadding: const EdgeInsets.symmetric(horizontal: 12),
-                tileColor: const Color(0xFF1A1A1A),
-                shape: RoundedRectangleBorder(
-                  borderRadius: BorderRadius.circular(14),
-                ),
-                leading: const Icon(
-                  Icons.trip_origin,
-                  color: Color(0xFFFF6B00),
-                ),
-                title: Text(
-                  _routeStartController.text.isEmpty
-                      ? 'Başlangıç noktasını seç'
-                      : _routeStartController.text,
-                  maxLines: 2,
-                  overflow: TextOverflow.ellipsis,
-                  style: const TextStyle(
-                    color: Colors.white,
-                    fontWeight: FontWeight.w600,
-                  ),
-                ),
-              ),
-              const SizedBox(height: 12),
-              ListTile(
-                contentPadding: const EdgeInsets.symmetric(horizontal: 12),
-                tileColor: const Color(0xFF1A1A1A),
-                shape: RoundedRectangleBorder(
-                  borderRadius: BorderRadius.circular(14),
-                ),
-                leading: const Icon(
-                  Icons.location_on_outlined,
-                  color: Color(0xFFFF6B00),
-                ),
-                title: Text(
-                  _routeDestinationController.text.isEmpty
-                      ? 'Varış noktasını seç'
-                      : _routeDestinationController.text,
-                  maxLines: 2,
-                  overflow: TextOverflow.ellipsis,
-                  style: const TextStyle(
-                    color: Colors.white,
-                    fontWeight: FontWeight.w600,
-                  ),
-                ),
-              ),
-              const SizedBox(height: 12),
-              SizedBox(
-                width: double.infinity,
-                child: OutlinedButton.icon(
-                  onPressed: isCalculating
-                      ? null
-                      : () async {
-                          setSheetState(() => isCalculating = true);
-                          final estimate = await _calculateRouteEstimate(
-                            startCoordinate: selectedStart,
-                            destinationCoordinate: selectedDestination,
-                          );
-                          if (!mounted) return;
-                          setSheetState(() {
-                            calculatedRoute = estimate;
-                            isCalculating = false;
-                          });
-                        },
-                  icon: isCalculating
-                      ? const SizedBox(
-                          width: 18,
-                          height: 18,
-                          child: CircularProgressIndicator(
-                            strokeWidth: 2,
-                            color: Color(0xFFFF7A00),
-                          ),
-                        )
-                      : const Icon(
-                          Icons.route_rounded,
-                          color: Color(0xFFFF7A00),
-                        ),
-                  label: Text(
-                    isCalculating ? 'Hesaplanıyor...' : 'Rotayı hesapla',
-                  ),
-                  style: OutlinedButton.styleFrom(
-                    foregroundColor: const Color(0xFFFF7A00),
-                    side: const BorderSide(color: Color(0xFFFF7A00)),
-                    padding: const EdgeInsets.symmetric(vertical: 13),
-                    shape: RoundedRectangleBorder(
-                      borderRadius: BorderRadius.circular(12),
+                    IconButton(
+                      onPressed: () => Navigator.pop(context),
+                      icon: const Icon(Icons.close, color: Colors.white70),
                     ),
-                  ),
+                  ],
                 ),
-              ),
-              if (calculatedRoute != null) ...[
                 const SizedBox(height: 12),
-                Container(
-                  width: double.infinity,
-                  padding: const EdgeInsets.all(14),
-                  decoration: BoxDecoration(
-                    color: const Color(0xFF2A180D),
+                TextField(
+                  controller: _routeTitleController,
+                  textInputAction: TextInputAction.next,
+                  style: const TextStyle(color: Colors.white),
+                  decoration: InputDecoration(
+                    labelText: 'Rota adı',
+                    prefixIcon: Icon(Icons.bookmark_outline),
+                    labelStyle: const TextStyle(color: Color(0xFFBDBDBD)),
+                    prefixIconColor: const Color(0xFFFF7A00),
+                    enabledBorder: OutlineInputBorder(
+                      borderRadius: BorderRadius.circular(12),
+                      borderSide: const BorderSide(color: Color(0xFF333333)),
+                    ),
+                    focusedBorder: OutlineInputBorder(
+                      borderRadius: BorderRadius.circular(12),
+                      borderSide: const BorderSide(color: Color(0xFFFF7A00)),
+                    ),
+                    filled: true,
+                    fillColor: const Color(0xFF1F1F1F),
+                  ),
+                ),
+                const SizedBox(height: 12),
+                ListTile(
+                  onTap: () => _selectRoutePointOnMap('start'),
+                  contentPadding: const EdgeInsets.symmetric(horizontal: 12),
+                  tileColor: const Color(0xFF1A1A1A),
+                  shape: RoundedRectangleBorder(
                     borderRadius: BorderRadius.circular(14),
                   ),
-                  child: Row(
-                    mainAxisAlignment: MainAxisAlignment.spaceAround,
-                    children: [
-                      _buildRouteSummary(
-                        Icons.straighten_rounded,
-                        '${calculatedRoute!['distance_km']} km',
-                        'Yaklaşık mesafe',
-                        valueColor: Colors.white,
-                        labelColor: Colors.white70,
-                      ),
-                      _buildRouteSummary(
-                        Icons.schedule_rounded,
-                        '${calculatedRoute!['duration_minutes']} dk',
-                        'Tahmini süre',
-                        valueColor: Colors.white,
-                        labelColor: Colors.white70,
-                      ),
-                    ],
+                  leading: const Icon(
+                    Icons.trip_origin,
+                    color: Color(0xFFFF6B00),
                   ),
-                ),
-              ],
-              const SizedBox(height: 16),
-              SizedBox(
-                width: double.infinity,
-                child: ElevatedButton.icon(
-                  onPressed: () {
-                    final title = _routeTitleController.text.trim();
-                    final start = _routeStartController.text.trim();
-                    final destination = _routeDestinationController.text.trim();
-                    if (title.isEmpty ||
-                        start.isEmpty ||
-                        destination.isEmpty ||
-                        selectedStart == null ||
-                        selectedDestination == null ||
-                        calculatedRoute == null) {
-                      return;
-                    }
-                    Navigator.pop(context, {
-                      'title': title,
-                      'start': start,
-                      'destination': destination,
-                      'distance_km': calculatedRoute!['distance_km']!,
-                      'duration_minutes': calculatedRoute!['duration_minutes']!,
-                    });
-                  },
-                  icon: const Icon(Icons.save_outlined),
-                  label: const Text('Rotayı Kaydet'),
-                  style: ElevatedButton.styleFrom(
-                    backgroundColor: const Color(0xFFFF7A00),
-                    foregroundColor: Colors.white,
-                    shape: RoundedRectangleBorder(
-                      borderRadius: BorderRadius.circular(12),
+                  title: Text(
+                    _routeStartController.text.isEmpty
+                        ? 'Başlangıç noktasını seç'
+                        : _routeStartController.text,
+                    maxLines: 2,
+                    overflow: TextOverflow.ellipsis,
+                    style: const TextStyle(
+                      color: Colors.white,
+                      fontWeight: FontWeight.w600,
                     ),
                   ),
                 ),
-              ),
-              const SizedBox(height: 8),
-              Text(
-                'Mesafe ve süre yaklaşık olarak hesaplanır. Rota çizgisi haritada gösterilir.',
-                style: const TextStyle(fontSize: 11, color: Colors.white70),
-                textAlign: TextAlign.center,
-              ),
-            ],
+                const SizedBox(height: 12),
+                ListTile(
+                  onTap: () => _selectRoutePointOnMap('destination'),
+                  contentPadding: const EdgeInsets.symmetric(horizontal: 12),
+                  tileColor: const Color(0xFF1A1A1A),
+                  shape: RoundedRectangleBorder(
+                    borderRadius: BorderRadius.circular(14),
+                  ),
+                  leading: const Icon(
+                    Icons.location_on_outlined,
+                    color: Color(0xFFFF6B00),
+                  ),
+                  title: Text(
+                    _routeDestinationController.text.isEmpty
+                        ? 'Varış noktasını seç'
+                        : _routeDestinationController.text,
+                    maxLines: 2,
+                    overflow: TextOverflow.ellipsis,
+                    style: const TextStyle(
+                      color: Colors.white,
+                      fontWeight: FontWeight.w600,
+                    ),
+                  ),
+                ),
+                const SizedBox(height: 12),
+                SizedBox(
+                  width: double.infinity,
+                  child: OutlinedButton.icon(
+                    onPressed: isCalculating
+                        ? null
+                        : () async {
+                            setSheetState(() => isCalculating = true);
+                            final estimate = await _calculateRouteEstimate(
+                              startCoordinate: selectedStart,
+                              destinationCoordinate: selectedDestination,
+                              vehicle: routeVehicle,
+                            );
+                            if (!mounted) return;
+                            setSheetState(() {
+                              calculatedRoute = estimate;
+                              isCalculating = false;
+                            });
+                          },
+                    icon: isCalculating
+                        ? const SizedBox(
+                            width: 18,
+                            height: 18,
+                            child: CircularProgressIndicator(
+                              strokeWidth: 2,
+                              color: Color(0xFFFF7A00),
+                            ),
+                          )
+                        : const Icon(
+                            Icons.route_rounded,
+                            color: Color(0xFFFF7A00),
+                          ),
+                    label: Text(
+                      isCalculating ? 'Hesaplanıyor...' : 'Rotayı hesapla',
+                    ),
+                    style: OutlinedButton.styleFrom(
+                      foregroundColor: const Color(0xFFFF7A00),
+                      side: const BorderSide(color: Color(0xFFFF7A00)),
+                      padding: const EdgeInsets.symmetric(vertical: 13),
+                      shape: RoundedRectangleBorder(
+                        borderRadius: BorderRadius.circular(12),
+                      ),
+                    ),
+                  ),
+                ),
+                if (calculatedRoute != null) ...[
+                  const SizedBox(height: 12),
+                  Container(
+                    width: double.infinity,
+                    padding: const EdgeInsets.all(14),
+                    decoration: BoxDecoration(
+                      color: const Color(0xFF2A180D),
+                      borderRadius: BorderRadius.circular(14),
+                    ),
+                    child: Row(
+                      mainAxisAlignment: MainAxisAlignment.spaceAround,
+                      children: [
+                        _buildRouteSummary(
+                          Icons.straighten_rounded,
+                          '${calculatedRoute!['distance_km']} km',
+                          'Yaklaşık mesafe',
+                          valueColor: Colors.white,
+                          labelColor: Colors.white70,
+                        ),
+                        _buildRouteSummary(
+                          Icons.schedule_rounded,
+                          '${calculatedRoute!['duration_minutes']} dk',
+                          'Tahmini süre',
+                          valueColor: Colors.white,
+                          labelColor: Colors.white70,
+                        ),
+                      ],
+                    ),
+                  ),
+                ],
+                CheckboxListTile(
+                  value: publishToDiscover,
+                  onChanged: FirebaseAuth.instance.currentUser == null
+                      ? null
+                      : (value) => setSheetState(
+                          () => publishToDiscover = value ?? false,
+                        ),
+                  contentPadding: EdgeInsets.zero,
+                  controlAffinity: ListTileControlAffinity.leading,
+                  activeColor: const Color(0xFFFF7A00),
+                  title: const Text(
+                    'Herkese açık rota keşfinde yayımla',
+                    style: TextStyle(color: Colors.white, fontSize: 13),
+                  ),
+                  subtitle: Text(
+                    FirebaseAuth.instance.currentUser == null
+                        ? 'Yayımlamak için giriş yapmalısınız.'
+                        : 'Başlangıç ve varış noktaları diğer kullanıcılara görünür.',
+                    style: const TextStyle(color: Colors.white70, fontSize: 11),
+                  ),
+                ),
+                const SizedBox(height: 16),
+                SizedBox(
+                  width: double.infinity,
+                  child: ElevatedButton.icon(
+                    onPressed: () {
+                      final title = _routeTitleController.text.trim();
+                      final start = _routeStartController.text.trim();
+                      final destination = _routeDestinationController.text
+                          .trim();
+                      if (title.isEmpty ||
+                          start.isEmpty ||
+                          destination.isEmpty ||
+                          selectedStart == null ||
+                          selectedDestination == null ||
+                          calculatedRoute == null) {
+                        return;
+                      }
+                      Navigator.pop(context, {
+                        'title': title,
+                        'start': start,
+                        'destination': destination,
+                        'distance_km': calculatedRoute!['distance_km']!,
+                        'duration_minutes':
+                            calculatedRoute!['duration_minutes']!,
+                        'start_latitude': selectedStart.latitude.toString(),
+                        'start_longitude': selectedStart.longitude.toString(),
+                        'destination_latitude': selectedDestination.latitude
+                            .toString(),
+                        'destination_longitude': selectedDestination.longitude
+                            .toString(),
+                        'travel_mode': routeVehicle,
+                        'is_public': publishToDiscover.toString(),
+                      });
+                    },
+                    icon: const Icon(Icons.save_outlined),
+                    label: const Text('Rotayı Kaydet'),
+                    style: ElevatedButton.styleFrom(
+                      backgroundColor: const Color(0xFFFF7A00),
+                      foregroundColor: Colors.white,
+                      shape: RoundedRectangleBorder(
+                        borderRadius: BorderRadius.circular(12),
+                      ),
+                    ),
+                  ),
+                ),
+                const SizedBox(height: 8),
+                Text(
+                  'Mesafe ve süre yaklaşık hesaplanır. Kaydettikten sonra rotaya dokunarak haritada görüntüleyebilirsiniz.',
+                  style: const TextStyle(fontSize: 11, color: Colors.white70),
+                  textAlign: TextAlign.center,
+                ),
+              ],
+            ),
           ),
         ),
       ),
     );
 
     if (route == null || !mounted) return;
+    final user = FirebaseAuth.instance.currentUser;
+    final shouldPublish = route['is_public'] == 'true';
+    if (shouldPublish && user == null) {
+      _showTrackingMessage('Rota yayımlamak için hesabınıza giriş yapın.');
+      return;
+    }
+
+    if (user != null) {
+      final routesCollection = FirebaseFirestore.instance
+          .collection('users')
+          .doc(user.uid)
+          .collection('saved_routes');
+      final savedRouteReference = routesCollection.doc();
+      final batch = FirebaseFirestore.instance.batch();
+      final privateRoute = <String, dynamic>{
+        ...route,
+        'created_at': FieldValue.serverTimestamp(),
+      };
+      if (shouldPublish) {
+        final publicRouteReference = FirebaseFirestore.instance
+            .collection('public_routes')
+            .doc();
+        privateRoute['public_route_id'] = publicRouteReference.id;
+        batch.set(publicRouteReference, {
+          'owner_uid': user.uid,
+          'title': route['title'],
+          'start': route['start'],
+          'destination': route['destination'],
+          'start_latitude': double.parse(route['start_latitude']!),
+          'start_longitude': double.parse(route['start_longitude']!),
+          'destination_latitude': double.parse(route['destination_latitude']!),
+          'destination_longitude': double.parse(
+            route['destination_longitude']!,
+          ),
+          'distance_km': double.parse(route['distance_km']!),
+          'duration_minutes': int.parse(route['duration_minutes']!),
+          'travel_mode': route['travel_mode'],
+          'created_at': FieldValue.serverTimestamp(),
+        });
+      }
+      batch.set(savedRouteReference, privateRoute);
+      try {
+        await batch.commit();
+        route['id'] = savedRouteReference.id;
+        if (shouldPublish) {
+          route['public_route_id'] = privateRoute['public_route_id'] as String;
+        }
+      } catch (error) {
+        debugPrint('Kayıtlı rota yazılamadı: $error');
+        if (mounted) {
+          _showTrackingMessage('Rota kaydedilemedi. Lütfen tekrar deneyin.');
+        }
+        return;
+      }
+    }
+
     setState(() {
-      _savedRoutes.insert(0, route);
+      _savedRoutes.insert(0, Map<String, String>.from(route));
       _routeDraftStart = null;
       _routeDraftDestination = null;
       _routeSelectionTarget = null;
-      if (_activeRouteStart != null && _activeRouteDestination != null) {
-        _routePolylines = [
-          Polyline(
-            polylineId: const PolylineId('saved-route'),
-            points: [_activeRouteStart!, _activeRouteDestination!],
-            color: const Color(0xFF4285F4),
-            width: 6,
-          ),
-        ];
+      if (!_isNavigationActive) {
+        _routePolylines = const <Polyline>[];
+        _alternativeRoutePolylines = const <Polyline>[];
+        _navigationTrafficPolylines = const <Polyline>[];
       }
     });
-    final user = FirebaseAuth.instance.currentUser;
-    if (user != null) {
-      final document = await FirebaseFirestore.instance
-          .collection('users')
-          .doc(user.uid)
-          .collection('saved_routes')
-          .add({...route, 'created_at': FieldValue.serverTimestamp()});
-      route['id'] = document.id;
-    }
     if (!mounted) return;
     AppNotificationService.show(
-      'Rota kaydedildi: ${route['distance_km']} km • ${route['duration_minutes']} dk',
+      shouldPublish
+          ? 'Rota kaydedildi ve keşfe yayımlandı.'
+          : 'Rota kaydedildi: ${route['distance_km']} km • ${route['duration_minutes']} dk',
     );
   }
 
@@ -13666,29 +13777,245 @@ out center tags;
     );
   }
 
+  Future<void> _shareSavedRoute(Map<String, dynamic> route) async {
+    final title = route['title']?.toString().trim();
+    final confirmed = await showDialog<bool>(
+      context: context,
+      builder: (dialogContext) => AlertDialog(
+        title: const Text('Rotayı paylaş'),
+        content: const Text(
+          'Paylaşım bağlantısını alan herkes rotanın başlangıç ve varış '
+          'konumlarını görebilir. Yalnızca güvendiğiniz kişilerle paylaşın.',
+        ),
+        actions: [
+          TextButton(
+            onPressed: () => Navigator.pop(dialogContext, false),
+            child: const Text('Vazgeç'),
+          ),
+          FilledButton(
+            onPressed: () => Navigator.pop(dialogContext, true),
+            child: const Text('Paylaş'),
+          ),
+        ],
+      ),
+    );
+    if (confirmed != true || !mounted) return;
+
+    String? resolveLocation({
+      required String latitudeKey,
+      required String longitudeKey,
+      required String address,
+    }) {
+      final latitude = double.tryParse(route[latitudeKey]?.toString() ?? '');
+      final longitude = double.tryParse(route[longitudeKey]?.toString() ?? '');
+      if (latitude != null &&
+          longitude != null &&
+          latitude >= -90 &&
+          latitude <= 90 &&
+          longitude >= -180 &&
+          longitude <= 180) {
+        return '$latitude,$longitude';
+      }
+      return address.isEmpty ? null : address;
+    }
+
+    try {
+      final start = resolveLocation(
+        latitudeKey: 'start_latitude',
+        longitudeKey: 'start_longitude',
+        address: route['start']?.toString().trim() ?? '',
+      );
+      final destination = resolveLocation(
+        latitudeKey: 'destination_latitude',
+        longitudeKey: 'destination_longitude',
+        address: route['destination']?.toString().trim() ?? '',
+      );
+      if (!mounted) return;
+      if (start == null || destination == null) {
+        _showTrackingMessage(
+          'Rota bağlantısı oluşturulamadı. Başlangıç ve varış konumlarını kontrol edin.',
+        );
+        return;
+      }
+
+      final travelMode = route['travel_mode'] == 'Yürüyüş'
+          ? 'walking'
+          : 'driving';
+      final directionsUrl = Uri.https('www.google.com', '/maps/dir/', {
+        'api': '1',
+        'origin': start,
+        'destination': destination,
+        'travelmode': travelMode,
+      });
+      final shareText =
+          '${title == null || title.isEmpty ? 'Navora rotası' : title}\n'
+          '${route['start']} → ${route['destination']}\n'
+          '$directionsUrl';
+      try {
+        await SharePlus.instance.share(
+          ShareParams(
+            subject: title == null || title.isEmpty ? 'Navora rotası' : title,
+            text: shareText,
+          ),
+        );
+      } catch (error) {
+        debugPrint('Sistem paylaşım menüsü açılamadı: $error');
+        await Clipboard.setData(ClipboardData(text: shareText));
+        if (mounted) {
+          _showTrackingMessage(
+            'Paylaşım menüsü açılamadı; rota bağlantısı panoya kopyalandı.',
+          );
+        }
+      }
+    } catch (error) {
+      debugPrint('Kayıtlı rota paylaşılamadı: $error');
+      if (mounted) {
+        _showTrackingMessage(
+          'Rota paylaşılamadı. Bağlantıyı panoya kopyalamak için tekrar deneyin.',
+        );
+      }
+    }
+  }
+
+  Future<void> _showSavedRouteOnMap(Map<String, dynamic> route) async {
+    if (_isNavigationActive) {
+      _showTrackingMessage(
+        'Navigasyon devam ederken kayıtlı rota görüntülenemiyor.',
+      );
+      return;
+    }
+
+    LatLng? coordinateFromFields(String latitudeKey, String longitudeKey) {
+      final latitude = double.tryParse(route[latitudeKey]?.toString() ?? '');
+      final longitude = double.tryParse(route[longitudeKey]?.toString() ?? '');
+      if (latitude == null ||
+          longitude == null ||
+          latitude < -90 ||
+          latitude > 90 ||
+          longitude < -180 ||
+          longitude > 180) {
+        return null;
+      }
+      return LatLng(latitude, longitude);
+    }
+
+    Future<LatLng?> resolveCoordinate({
+      required String latitudeKey,
+      required String longitudeKey,
+      required String address,
+    }) async {
+      final storedCoordinate = coordinateFromFields(latitudeKey, longitudeKey);
+      if (storedCoordinate != null) return storedCoordinate;
+      if (address.isEmpty) return null;
+      final locations = await geo_coding.locationFromAddress(address);
+      if (locations.isEmpty) return null;
+      final location = locations.first;
+      return LatLng(location.latitude, location.longitude);
+    }
+
+    final startText = route['start']?.toString().trim() ?? '';
+    final destinationText = route['destination']?.toString().trim() ?? '';
+    final vehicle = route['travel_mode'] == 'Yürüyüş' ? 'Yürüyüş' : 'Araba';
+
+    try {
+      final start = await resolveCoordinate(
+        latitudeKey: 'start_latitude',
+        longitudeKey: 'start_longitude',
+        address: startText,
+      );
+      final destination = await resolveCoordinate(
+        latitudeKey: 'destination_latitude',
+        longitudeKey: 'destination_longitude',
+        address: destinationText,
+      );
+      if (start == null || destination == null) {
+        _showTrackingMessage(
+          'Kayıtlı rotanın başlangıç veya varış konumu bulunamadı.',
+        );
+        return;
+      }
+
+      setState(() {
+        _selectedIndex = 1;
+        _routePolylines = const <Polyline>[];
+        _alternativeRoutePolylines = const <Polyline>[];
+        _navigationTrafficPolylines = const <Polyline>[];
+        _selectedDestinationCoordinate = destination;
+        _selectedDestinationName = destinationText;
+        _searchController.text = destinationText;
+        _selectedVehicle = vehicle;
+      });
+
+      final roadRoute = await _fetchRoadRoute(
+        start,
+        destination,
+        vehicle: vehicle,
+      );
+      if (!mounted) return;
+      final points = roadRoute['points'] as List<LatLng>;
+      setState(() {
+        _routePolylines = [
+          Polyline(
+            polylineId: const PolylineId('saved-route-preview'),
+            points: points,
+            color: const Color(0xFF4285F4),
+            width: 6,
+          ),
+        ];
+      });
+      await _fitMapToPoints(points);
+      if (mounted) _showTrackingMessage('Rota haritada gösteriliyor.');
+    } catch (error) {
+      debugPrint('Kayıtlı rota haritada gösterilemedi: $error');
+      if (mounted) {
+        _showTrackingMessage(
+          'Rota haritada gösterilemedi. İnternet bağlantınızı ve Google Routes API ayarlarını kontrol edin.',
+        );
+      }
+    }
+  }
+
   Future<void> _startSavedRoute(Map<String, dynamic> route) async {
     final destinationText = route['destination']?.toString().trim();
     if (destinationText == null || destinationText.isEmpty) return;
 
     try {
-      final locations = await geo_coding.locationFromAddress(destinationText);
-      if (locations.isEmpty || !mounted) {
+      final savedLatitude = double.tryParse(
+        route['destination_latitude']?.toString() ?? '',
+      );
+      final savedLongitude = double.tryParse(
+        route['destination_longitude']?.toString() ?? '',
+      );
+      final savedDestination =
+          savedLatitude != null &&
+              savedLongitude != null &&
+              savedLatitude >= -90 &&
+              savedLatitude <= 90 &&
+              savedLongitude >= -180 &&
+              savedLongitude <= 180
+          ? LatLng(savedLatitude, savedLongitude)
+          : null;
+      final locations = savedDestination == null
+          ? await geo_coding.locationFromAddress(destinationText)
+          : const <geo_coding.Location>[];
+      if ((savedDestination == null && locations.isEmpty) || !mounted) {
         _showTrackingMessage('Kayıtlı rotanın varış konumu bulunamadı.');
         return;
       }
-      final location = locations.first;
       setState(() {
         _selectedIndex = 1;
+        _selectedVehicle = route['travel_mode'] == 'Yürüyüş'
+            ? 'Yürüyüş'
+            : 'Araba';
         _searchController.text = destinationText;
         _selectedDestinationName =
             route['title']?.toString().trim().isNotEmpty == true
             ? route['title'].toString()
             : destinationText;
         _selectedPlaceDetails = null;
-        _selectedDestinationCoordinate = LatLng(
-          location.latitude,
-          location.longitude,
-        );
+        _selectedDestinationCoordinate =
+            savedDestination ??
+            LatLng(locations.first.latitude, locations.first.longitude);
       });
       await _showDirectionsSheet();
     } catch (error) {
@@ -13697,16 +14024,253 @@ out center tags;
     }
   }
 
+  Future<void> _saveDiscoveredRoute(
+    Map<String, dynamic> publicRoute,
+    String publicRouteId,
+  ) async {
+    final user = FirebaseAuth.instance.currentUser;
+    if (user == null) {
+      _showTrackingMessage('Rotayı kaydetmek için hesabınıza giriş yapın.');
+      return;
+    }
+    if (_savedRoutes.any(
+      (route) => route['public_route_id'] == publicRouteId,
+    )) {
+      _showTrackingMessage('Bu rota kayıtlı rotalarınızda zaten var.');
+      return;
+    }
+
+    try {
+      final savedReference = await FirebaseFirestore.instance
+          .collection('users')
+          .doc(user.uid)
+          .collection('saved_routes')
+          .add({
+            'title': publicRoute['title']?.toString() ?? 'Topluluk rotası',
+            'start': publicRoute['start']?.toString() ?? '',
+            'destination': publicRoute['destination']?.toString() ?? '',
+            'start_latitude': publicRoute['start_latitude'].toString(),
+            'start_longitude': publicRoute['start_longitude'].toString(),
+            'destination_latitude': publicRoute['destination_latitude']
+                .toString(),
+            'destination_longitude': publicRoute['destination_longitude']
+                .toString(),
+            'distance_km': publicRoute['distance_km'].toString(),
+            'duration_minutes': publicRoute['duration_minutes'].toString(),
+            'travel_mode': publicRoute['travel_mode']?.toString() ?? 'Araba',
+            'is_public': 'false',
+            'public_route_id': publicRouteId,
+            'created_at': FieldValue.serverTimestamp(),
+          });
+      if (!mounted) return;
+      setState(() {
+        _savedRoutes.insert(0, {
+          'id': savedReference.id,
+          'title': publicRoute['title']?.toString() ?? 'Topluluk rotası',
+          'start': publicRoute['start']?.toString() ?? '',
+          'destination': publicRoute['destination']?.toString() ?? '',
+          'start_latitude': publicRoute['start_latitude'].toString(),
+          'start_longitude': publicRoute['start_longitude'].toString(),
+          'destination_latitude': publicRoute['destination_latitude']
+              .toString(),
+          'destination_longitude': publicRoute['destination_longitude']
+              .toString(),
+          'distance_km': publicRoute['distance_km'].toString(),
+          'travel_mode': publicRoute['travel_mode']?.toString() ?? 'Araba',
+          'is_public': 'false',
+          'public_route_id': publicRouteId,
+        });
+      });
+      _showTrackingMessage('Rota kayıtlı rotalarınıza eklendi.');
+    } catch (error) {
+      debugPrint('Keşfedilen rota kaydedilemedi: $error');
+      if (mounted) {
+        _showTrackingMessage('Rota kaydedilemedi. Lütfen tekrar deneyin.');
+      }
+    }
+  }
+
+  void _showPublicRoutesSheet() {
+    showModalBottomSheet<void>(
+      context: context,
+      backgroundColor: const Color(0xFF191919),
+      isScrollControlled: true,
+      shape: const RoundedRectangleBorder(
+        borderRadius: BorderRadius.vertical(top: Radius.circular(24)),
+      ),
+      builder: (sheetContext) => SizedBox(
+        height: MediaQuery.of(sheetContext).size.height * 0.72,
+        child: Padding(
+          padding: const EdgeInsets.all(20),
+          child: Column(
+            crossAxisAlignment: CrossAxisAlignment.start,
+            children: [
+              Row(
+                children: [
+                  const Expanded(
+                    child: Text(
+                      'Rota keşfet',
+                      style: TextStyle(
+                        fontSize: 20,
+                        fontWeight: FontWeight.bold,
+                      ),
+                    ),
+                  ),
+                  IconButton(
+                    onPressed: () => Navigator.pop(sheetContext),
+                    icon: const Icon(Icons.close),
+                  ),
+                ],
+              ),
+              const Text(
+                'Topluluğun paylaştığı rotaları görüntüle veya kaydet.',
+                style: TextStyle(color: Colors.white70, fontSize: 12),
+              ),
+              const SizedBox(height: 12),
+              Expanded(
+                child: FirebaseAuth.instance.currentUser == null
+                    ? const Center(
+                        child: Text(
+                          'Topluluk rotalarını keşfetmek için giriş yapın.',
+                          textAlign: TextAlign.center,
+                          style: TextStyle(color: Colors.white70),
+                        ),
+                      )
+                    : StreamBuilder<QuerySnapshot<Map<String, dynamic>>>(
+                        stream: FirebaseFirestore.instance
+                            .collection('public_routes')
+                            .orderBy('created_at', descending: true)
+                            .limit(50)
+                            .snapshots(),
+                        builder: (context, snapshot) {
+                          if (snapshot.hasError) {
+                            debugPrint(
+                              'Topluluk rotaları yüklenemedi: ${snapshot.error}',
+                            );
+                            return const Center(
+                              child: Text(
+                                'Topluluk rotaları yüklenemedi.',
+                                style: TextStyle(color: Colors.white70),
+                              ),
+                            );
+                          }
+                          if (snapshot.connectionState ==
+                              ConnectionState.waiting) {
+                            return const Center(
+                              child: CircularProgressIndicator(),
+                            );
+                          }
+                          final documents = snapshot.data?.docs ?? [];
+                          if (documents.isEmpty) {
+                            return const Center(
+                              child: Text(
+                                'Henüz herkese açık rota yok.',
+                                style: TextStyle(color: Colors.white70),
+                              ),
+                            );
+                          }
+                          return ListView.separated(
+                            itemCount: documents.length,
+                            separatorBuilder: (_, _) =>
+                                const SizedBox(height: 8),
+                            itemBuilder: (context, index) {
+                              final document = documents[index];
+                              final route = document.data();
+                              final routeMap = <String, dynamic>{
+                                ...route,
+                                'public_route_id': document.id,
+                              };
+                              final isSaved = _savedRoutes.any(
+                                (savedRoute) =>
+                                    savedRoute['public_route_id'] ==
+                                    document.id,
+                              );
+                              return ListTile(
+                                onTap: () {
+                                  Navigator.pop(sheetContext);
+                                  unawaited(_showSavedRouteOnMap(routeMap));
+                                },
+                                shape: RoundedRectangleBorder(
+                                  borderRadius: BorderRadius.circular(14),
+                                ),
+                                tileColor: const Color(0xFF242424),
+                                leading: const CircleAvatar(
+                                  backgroundColor: Color(0xFF2A180D),
+                                  child: Icon(
+                                    Icons.alt_route,
+                                    color: Color(0xFFFF6B00),
+                                  ),
+                                ),
+                                title: Text(
+                                  route['title']?.toString() ??
+                                      'Topluluk rotası',
+                                  style: const TextStyle(
+                                    fontWeight: FontWeight.bold,
+                                  ),
+                                ),
+                                subtitle: Text(
+                                  '${route['start']} → ${route['destination']} • ${route['distance_km']} km • ${route['travel_mode']}',
+                                ),
+                                trailing: IconButton(
+                                  tooltip: isSaved
+                                      ? 'Zaten kayıtlı'
+                                      : 'Rotayı kaydet',
+                                  onPressed: isSaved
+                                      ? null
+                                      : () => unawaited(
+                                          _saveDiscoveredRoute(
+                                            routeMap,
+                                            document.id,
+                                          ),
+                                        ),
+                                  icon: Icon(
+                                    isSaved
+                                        ? Icons.bookmark_rounded
+                                        : Icons.bookmark_add_outlined,
+                                    color: const Color(0xFFFF9A3D),
+                                  ),
+                                ),
+                              );
+                            },
+                          );
+                        },
+                      ),
+              ),
+            ],
+          ),
+        ),
+      ),
+    );
+  }
+
   Future<void> _deleteSavedRoute(Map<String, String> route) async {
     final user = FirebaseAuth.instance.currentUser;
     final routeId = route['id'];
     if (user != null && routeId != null && routeId.isNotEmpty) {
-      await FirebaseFirestore.instance
-          .collection('users')
-          .doc(user.uid)
-          .collection('saved_routes')
-          .doc(routeId)
-          .delete();
+      final firestore = FirebaseFirestore.instance;
+      final batch = firestore.batch();
+      batch.delete(
+        firestore
+            .collection('users')
+            .doc(user.uid)
+            .collection('saved_routes')
+            .doc(routeId),
+      );
+      final publicRouteId = route['public_route_id'];
+      if (route['is_public'] == 'true' &&
+          publicRouteId != null &&
+          publicRouteId.isNotEmpty) {
+        batch.delete(firestore.collection('public_routes').doc(publicRouteId));
+      }
+      try {
+        await batch.commit();
+      } catch (error) {
+        debugPrint('Kayıtlı rota silinemedi: $error');
+        if (mounted) {
+          _showTrackingMessage('Rota silinemedi. Lütfen tekrar deneyin.');
+        }
+        return;
+      }
     }
     if (!mounted) return;
     setState(() => _savedRoutes.remove(route));
@@ -13737,6 +14301,16 @@ out center tags;
                   ),
                   Row(
                     children: [
+                      IconButton(
+                        tooltip: 'Rota keşfet',
+                        onPressed: () {
+                          Navigator.pop(context);
+                          WidgetsBinding.instance.addPostFrameCallback((_) {
+                            if (mounted) _showPublicRoutesSheet();
+                          });
+                        },
+                        icon: const Icon(Icons.explore_outlined),
+                      ),
                       IconButton(
                         tooltip: 'Yeni rota kaydet',
                         onPressed: () async {
@@ -13770,7 +14344,7 @@ out center tags;
                           return ListTile(
                             onTap: () async {
                               Navigator.pop(context);
-                              await _startSavedRoute(route);
+                              await _showSavedRouteOnMap(route);
                             },
                             shape: RoundedRectangleBorder(
                               borderRadius: BorderRadius.circular(14),
@@ -13790,11 +14364,19 @@ out center tags;
                               ),
                             ),
                             subtitle: Text(
-                              '${route['start']}  →  ${route['destination']} • ${route['distance_km'] ?? '?'} km',
+                              '${route['start']}  →  ${route['destination']} • ${route['distance_km'] ?? '?'} km • ${route['travel_mode'] ?? 'Araba'}',
                             ),
                             trailing: Row(
                               mainAxisSize: MainAxisSize.min,
                               children: [
+                                IconButton(
+                                  tooltip: 'Rotayı paylaş',
+                                  icon: const Icon(
+                                    Icons.share_rounded,
+                                    color: Color(0xFFFF9A3D),
+                                  ),
+                                  onPressed: () => _shareSavedRoute(route),
+                                ),
                                 IconButton(
                                   tooltip: 'Rotayı başlat',
                                   icon: const Icon(
@@ -13942,6 +14524,7 @@ out center tags;
       setState(() {
         _isDriveTracking = true;
       });
+      await _updateScreenWakeLock();
       if (_isNavigationActive) {
         _startNavigationConnectivityMonitor();
       }
@@ -13967,6 +14550,7 @@ out center tags;
       _resetNavigationAfterFailedStart();
       if (mounted) {
         setState(() => _isDriveTracking = false);
+        unawaited(_updateScreenWakeLock());
         _showTrackingMessage(
           'Navigasyon başlatılamadı. GPS bağlantınızı kontrol edip tekrar deneyin.',
         );
@@ -13990,6 +14574,28 @@ out center tags;
     } else {
       reset();
     }
+    unawaited(_updateScreenWakeLock());
+  }
+
+  Future<void> _updateScreenWakeLock({bool? forceEnabled}) {
+    _screenWakeLockQueue = _screenWakeLockQueue.then((_) async {
+      final shouldKeepAwake =
+          forceEnabled ?? (_isNavigationActive || _isDriveTracking);
+      try {
+        await WakelockPlus.toggle(enable: shouldKeepAwake);
+      } on PlatformException catch (error) {
+        debugPrint('Ekran açık tutulamadı: $error');
+        if (shouldKeepAwake && mounted) {
+          _showTrackingMessage('Navigasyon sırasında ekran açık tutulamadı.');
+        }
+      } on MissingPluginException catch (error) {
+        debugPrint('Ekran açık tutma özelliği kullanılamıyor: $error');
+        if (shouldKeepAwake && mounted) {
+          _showTrackingMessage('Navigasyon sırasında ekran açık tutulamadı.');
+        }
+      }
+    });
+    return _screenWakeLockQueue;
   }
 
   void _startNavigationConnectivityMonitor() {
@@ -14231,7 +14837,6 @@ out center tags;
     if (_isFollowingCurrentPosition) {
       unawaited(_centerOnPosition(position));
     }
-    unawaited(_speakNavigation('Daha hızlı alternatif rotaya geçildi.'));
   }
 
   Future<bool> _checkNavigationArrival(geo.Position position) async {
@@ -14246,7 +14851,6 @@ out center tags;
 
     if (!_hasAnnouncedArrival && navoraIsWithinArrivalRadius(distanceMeters)) {
       _hasAnnouncedArrival = true;
-      unawaited(_speakNavigation('Varış noktanıza yaklaştınız.'));
       _showTrackingMessage('Varış noktanıza yaklaştınız.');
     }
 
@@ -14266,9 +14870,6 @@ out center tags;
       navigationCompleted: true,
       completionPosition: position,
       completionDistanceToDestinationMeters: distanceMeters,
-    );
-    await _speakNavigation(
-      'Varış noktanıza ulaştınız. Navigasyon sonlandırıldı.',
     );
     return true;
   }
@@ -14327,8 +14928,8 @@ out center tags;
       _driveStartedForNavigation = false;
       _clearRouteState();
     });
+    await _updateScreenWakeLock();
     await _resetNavigationCamera();
-    await _tts.stop();
   }
 
   void _announceUpcomingNavigationStep(geo.Position position) {
@@ -14351,11 +14952,6 @@ out center tags;
     if (distance > 45) return;
 
     _navigationStepIndex++;
-    if (_navigationStepIndex < _navigationSteps.length) {
-      final nextVoice =
-          _navigationSteps[_navigationStepIndex]['voice'] as String;
-      _speakNavigation(nextVoice);
-    }
     if (mounted) setState(() {});
   }
 
@@ -14364,20 +14960,6 @@ out center tags;
     _gravityY = _gravityY == null ? event.y : _gravityY! * 0.8 + event.y * 0.2;
     _gravityZ = _gravityZ == null ? event.z : _gravityZ! * 0.8 + event.z * 0.2;
     _updateDeviceHeading();
-
-    final recentlyAlerted =
-        _lastCrashAlertAt != null &&
-        DateTime.now().difference(_lastCrashAlertAt!) <
-            const Duration(seconds: 30);
-    if (!_isDriveTracking || recentlyAlerted) return;
-
-    final acceleration = math.sqrt(
-      event.x * event.x + event.y * event.y + event.z * event.z,
-    );
-    if (acceleration < 28) return;
-
-    _lastCrashAlertAt = DateTime.now();
-    _showCrashConfirmation();
   }
 
   void _handleMagnetometer(sensors.MagnetometerEvent event) {
@@ -14484,97 +15066,6 @@ out center tags;
     });
   }
 
-  Future<void> _showCrashConfirmation() async {
-    if (!mounted) return;
-    final shouldSend = await showDialog<bool>(
-      context: context,
-      barrierDismissible: false,
-      builder: (dialogContext) {
-        Future.delayed(const Duration(seconds: 10), () {
-          if (dialogContext.mounted) Navigator.pop(dialogContext, true);
-        });
-        return AlertDialog(
-          title: const Text('Kaza algılandı'),
-          content: const Text(
-            'Sert bir darbe algılandı. 10 saniye içinde iptal etmezseniz SOS uyarısı gönderilecek.',
-          ),
-          actions: [
-            TextButton(
-              onPressed: () => Navigator.pop(dialogContext, false),
-              child: const Text('Yanlış alarm'),
-            ),
-          ],
-        );
-      },
-    );
-    if (shouldSend == true) await _sendSosAlert();
-  }
-
-  Future<void> _sendSosAlert() async {
-    final user = FirebaseAuth.instance.currentUser;
-    if (user == null || _sosContacts.isEmpty) {
-      _showTrackingMessage('SOS kişisi bulunamadı. Önce bir kişi ekleyin.');
-      return;
-    }
-
-    try {
-      final position =
-          _currentPosition ?? await geo.Geolocator.getCurrentPosition();
-      final locationUrl =
-          'https://maps.google.com/?q=${position.latitude},${position.longitude}';
-      await FirebaseFirestore.instance
-          .collection('users')
-          .doc(user.uid)
-          .collection('sos_alerts')
-          .add({
-            'type': 'possible_accident',
-            'message':
-                'Olası kaza algılandı. Lütfen kullanıcıyla iletişime geçin.',
-            'latitude': position.latitude,
-            'longitude': position.longitude,
-            'location_url': locationUrl,
-            'contacts': _sosContacts
-                .map(
-                  (contact) => {
-                    'name': contact['name'],
-                    'phone': contact['phone'],
-                    'relation': contact['relation'],
-                  },
-                )
-                .toList(),
-            'created_at': FieldValue.serverTimestamp(),
-          });
-      _showTrackingMessage('SOS uyarısı konum bilgisiyle kaydedildi.');
-      await _messageSosContact(_sosContacts.first);
-    } catch (_) {
-      _showTrackingMessage('SOS uyarısı gönderilemedi. Konum alınamadı.');
-    }
-  }
-
-  Future<void> _callSosContact(Map<String, String> contact) async {
-    final phone = contact['phone']?.trim();
-    if (phone == null || phone.isEmpty) return;
-    final uri = Uri(scheme: 'tel', path: phone);
-    if (!await launchUrl(uri)) {
-      _showTrackingMessage('Arama ekranı açılamadı.');
-    }
-  }
-
-  Future<void> _messageSosContact(Map<String, String> contact) async {
-    final phone = contact['phone']?.trim();
-    if (phone == null || phone.isEmpty) return;
-    final position = _currentPosition;
-    final location = position == null
-        ? ''
-        : '\nKonum: https://maps.google.com/?q=${position.latitude},${position.longitude}';
-    final message =
-        'Navora acil durum bildirimi. Lütfen beni kontrol edin.$location';
-    final uri = Uri.parse('sms:$phone?body=${Uri.encodeComponent(message)}');
-    if (!await launchUrl(uri)) {
-      _showTrackingMessage('Mesaj ekranı açılamadı.');
-    }
-  }
-
   Future<void> _saveCompletedDrive({
     required double distance,
     required int durationMinutes,
@@ -14585,16 +15076,6 @@ out center tags;
         .collection('users')
         .doc(user.uid);
 
-    await userReference.collection('driving_history').add({
-      'route': 'GPS sürüşü',
-      'date': DateTime.now().toIso8601String(),
-      'duration_minutes': durationMinutes,
-      'distance_km': distance,
-      'completed_at': FieldValue.serverTimestamp(),
-      'expires_at': Timestamp.fromDate(
-        DateTime.now().add(const Duration(days: 30)),
-      ),
-    });
     if (navigationCompleted && _activeNavigationDestination != null) {
       await userReference.collection('route_history').add({
         'title': _activeNavigationTitle ?? 'Tamamlanan rota',
@@ -14606,7 +15087,19 @@ out center tags;
           DateTime.now().add(const Duration(days: 30)),
         ),
       });
+      return;
     }
+
+    await userReference.collection('driving_history').add({
+      'route': 'GPS sürüşü',
+      'date': DateTime.now().toIso8601String(),
+      'duration_minutes': durationMinutes,
+      'distance_km': distance,
+      'completed_at': FieldValue.serverTimestamp(),
+      'expires_at': Timestamp.fromDate(
+        DateTime.now().add(const Duration(days: 30)),
+      ),
+    });
   }
 
   Future<void> _centerOnPosition(geo.Position position) async {
@@ -14813,556 +15306,6 @@ out center tags;
       onAction: onAction,
     );
   }
-
-  String _normalizeSosPhone(String phone) {
-    var digits = phone.replaceAll(RegExp(r'\D'), '');
-    if (digits.startsWith('0090')) {
-      digits = digits.substring(2);
-    } else if (digits.length == 11 && digits.startsWith('0')) {
-      digits = '90${digits.substring(1)}';
-    } else if (digits.length == 10 && digits.startsWith('5')) {
-      digits = '90$digits';
-    }
-    return digits;
-  }
-
-  Future<void> _showSosContactsDialog() async {
-    var isAddingContact = false;
-    var isSavingContact = false;
-    String? contactSaveMessage;
-    final deletingContactKeys = <String>{};
-    final nameController = TextEditingController();
-    final phoneController = TextEditingController();
-    final relationController = TextEditingController();
-    final formKey = GlobalKey<FormState>();
-
-    await showModalBottomSheet<void>(
-      context: context,
-      isScrollControlled: true,
-      backgroundColor: const Color(0xFF191919),
-      shape: const RoundedRectangleBorder(
-        borderRadius: BorderRadius.vertical(top: Radius.circular(24)),
-      ),
-      builder: (context) => StatefulBuilder(
-        builder: (context, setModalState) {
-          final mediaQuery = MediaQuery.of(context);
-          final keyboardInset = mediaQuery.viewInsets.bottom;
-          final sheetHeight = math.min(
-            mediaQuery.size.height * 0.55,
-            mediaQuery.size.height -
-                keyboardInset -
-                mediaQuery.viewPadding.top -
-                24,
-          );
-
-          Future<void> saveContact() async {
-            if (!formKey.currentState!.validate() || isSavingContact) return;
-            final user = FirebaseAuth.instance.currentUser;
-            if (user == null) {
-              _showTrackingMessage(
-                'Acil durum kişilerini kaydetmek için giriş yapmalısınız.',
-              );
-              return;
-            }
-            final phone = phoneController.text.trim();
-            final normalizedPhone = _normalizeSosPhone(phone);
-            final contact = <String, String>{
-              'name': nameController.text.trim(),
-              'phone': phone,
-              'relation': relationController.text.trim().isEmpty
-                  ? 'Yakın kişi'
-                  : relationController.text.trim(),
-            };
-            setModalState(() {
-              isSavingContact = true;
-              contactSaveMessage = null;
-            });
-            try {
-              final contactsReference = FirebaseFirestore.instance
-                  .collection('users')
-                  .doc(user.uid)
-                  .collection('sos_contacts');
-              final existingContacts = await contactsReference.get();
-              if (existingContacts.docs.any(
-                (document) =>
-                    _normalizeSosPhone(
-                      document.data()['phone']?.toString() ?? '',
-                    ) ==
-                    normalizedPhone,
-              )) {
-                if (!context.mounted) return;
-                setModalState(() {
-                  isSavingContact = false;
-                  contactSaveMessage = 'Bu telefon numarası zaten acil durum kişilerine eklenmiş.';
-                });
-                return;
-              }
-              final contactId = sha256
-                  .convert(utf8.encode(normalizedPhone))
-                  .toString();
-              await contactsReference.doc(contactId).set(contact);
-              if (!context.mounted || !mounted) return;
-              nameController.clear();
-              phoneController.clear();
-              relationController.clear();
-              setModalState(() {
-                isSavingContact = false;
-                isAddingContact = false;
-              });
-            } catch (error) {
-              debugPrint('Acil durum kişisi kaydedilemedi: $error');
-              if (context.mounted && mounted) {
-                _showTrackingMessage('Acil durum kişisi kaydedilemedi.');
-                setModalState(() => isSavingContact = false);
-              }
-            }
-          }
-
-          return AnimatedPadding(
-            duration: const Duration(milliseconds: 180),
-            curve: Curves.easeOut,
-            padding: EdgeInsets.only(bottom: keyboardInset),
-            child: SafeArea(
-              top: false,
-              bottom: keyboardInset == 0,
-              child: SizedBox(
-                height: sheetHeight,
-                child: Container(
-                  padding: const EdgeInsets.all(20),
-                  child: Column(
-                    crossAxisAlignment: CrossAxisAlignment.start,
-                    children: [
-                      Row(
-                        mainAxisAlignment: MainAxisAlignment.spaceBetween,
-                        children: [
-                          Text(
-                            isAddingContact
-                                ? 'Acil durum kişisi ekle'
-                                : 'Acil Durum (SOS) Kişileri',
-                            style: const TextStyle(
-                              fontSize: 18,
-                              fontWeight: FontWeight.bold,
-                              color: Colors.white,
-                            ),
-                          ),
-                          if (!isAddingContact)
-                            Row(
-                              children: [
-                                IconButton(
-                                  tooltip: 'Kişi ekle',
-                                  icon: const Icon(
-                                    Icons.person_add_alt_1,
-                                    color: Color(0xFFFFB066),
-                                  ),
-                                  onPressed: () {
-                                    if (FirebaseAuth.instance.currentUser ==
-                                        null) {
-                                      _showTrackingMessage(
-                                        'Acil durum kişilerini kaydetmek için giriş yapmalısınız.',
-                                      );
-                                      return;
-                                    }
-                                    setModalState(() => isAddingContact = true);
-                                  },
-                                ),
-                                IconButton(
-                                  icon: const Icon(
-                                    Icons.close,
-                                    color: Colors.white70,
-                                  ),
-                                  onPressed: () => Navigator.pop(context),
-                                ),
-                              ],
-                            ),
-                        ],
-                      ),
-                      if (contactSaveMessage != null) ...[
-                        const SizedBox(height: 8),
-                        Text(
-                          contactSaveMessage!,
-                          style: const TextStyle(
-                            color: Color(0xFFFFB066),
-                            fontSize: 12,
-                          ),
-                        ),
-                      ],
-                      if (isAddingContact) ...[
-                        const SizedBox(height: 6),
-                        const Text(
-                          'Kaza durumunda ulaşılabilecek bir kişiyi ekleyin.',
-                          style: TextStyle(fontSize: 12, color: Colors.white70),
-                        ),
-                        const SizedBox(height: 14),
-                        Expanded(
-                          child: SingleChildScrollView(
-                            child: Form(
-                              key: formKey,
-                              child: Column(
-                                children: [
-                                  TextFormField(
-                                    controller: nameController,
-                                    textCapitalization:
-                                        TextCapitalization.words,
-                                    textInputAction: TextInputAction.next,
-                                    style: const TextStyle(color: Colors.white),
-                                    decoration: _sosContactInputDecoration(
-                                      label: 'Ad soyad',
-                                      icon: Icons.person_outline_rounded,
-                                    ),
-                                    onChanged: (_) {
-                                      if (contactSaveMessage != null) {
-                                        setModalState(
-                                          () => contactSaveMessage = null,
-                                        );
-                                      }
-                                    },
-                                    validator: (value) =>
-                                        value == null || value.trim().isEmpty
-                                        ? 'Ad soyad alanını doldurun.'
-                                        : null,
-                                  ),
-                                  const SizedBox(height: 12),
-                                  TextFormField(
-                                    controller: phoneController,
-                                    keyboardType: TextInputType.phone,
-                                    textInputAction: TextInputAction.next,
-                                    style: const TextStyle(color: Colors.white),
-                                    decoration: _sosContactInputDecoration(
-                                      label: 'Telefon numarası',
-                                      icon: Icons.phone_outlined,
-                                      hint: '+90 5XX XXX XX XX',
-                                    ),
-                                    onChanged: (_) {
-                                      if (contactSaveMessage != null) {
-                                        setModalState(
-                                          () => contactSaveMessage = null,
-                                        );
-                                      }
-                                    },
-                                    validator: (value) {
-                                      final digits =
-                                          value?.replaceAll(
-                                            RegExp(r'\D'),
-                                            '',
-                                          ) ??
-                                          '';
-                                      if (digits.isEmpty) {
-                                        return 'Telefon numarasını doldurun.';
-                                      }
-                                      if (digits.length < 7) {
-                                        return 'Geçerli bir telefon numarası girin.';
-                                      }
-                                      return null;
-                                    },
-                                  ),
-                                  const SizedBox(height: 12),
-                                  TextFormField(
-                                    controller: relationController,
-                                    textCapitalization:
-                                        TextCapitalization.sentences,
-                                    textInputAction: TextInputAction.done,
-                                    style: const TextStyle(color: Colors.white),
-                                    decoration: _sosContactInputDecoration(
-                                      label: 'Yakınlık (isteğe bağlı)',
-                                      icon: Icons.people_outline_rounded,
-                                      hint: 'Örn. Aile, arkadaş',
-                                    ),
-                                    onChanged: (_) {
-                                      if (contactSaveMessage != null) {
-                                        setModalState(
-                                          () => contactSaveMessage = null,
-                                        );
-                                      }
-                                    },
-                                    onFieldSubmitted: (_) => saveContact(),
-                                  ),
-                                ],
-                              ),
-                            ),
-                          ),
-                        ),
-                        const SizedBox(height: 12),
-                        Row(
-                          children: [
-                            Expanded(
-                              child: OutlinedButton(
-                                onPressed: isSavingContact
-                                    ? null
-                                    : () {
-                                        FocusScope.of(context).unfocus();
-                                        setModalState(() {
-                                          isAddingContact = false;
-                                          formKey.currentState?.reset();
-                                        });
-                                      },
-                                style: OutlinedButton.styleFrom(
-                                  foregroundColor: Colors.white70,
-                                  side: const BorderSide(color: Colors.white24),
-                                  padding: const EdgeInsets.symmetric(
-                                    vertical: 14,
-                                  ),
-                                ),
-                                child: const Text('Vazgeç'),
-                              ),
-                            ),
-                            const SizedBox(width: 12),
-                            Expanded(
-                              child: FilledButton.icon(
-                                onPressed: isSavingContact ? null : saveContact,
-                                icon: isSavingContact
-                                    ? const SizedBox(
-                                        width: 18,
-                                        height: 18,
-                                        child: CircularProgressIndicator(
-                                          strokeWidth: 2,
-                                        ),
-                                      )
-                                    : const Icon(
-                                        Icons.person_add_alt_1,
-                                        size: 18,
-                                      ),
-                                label: Text(
-                                  isSavingContact
-                                      ? 'Kaydediliyor'
-                                      : 'Kişiyi ekle',
-                                ),
-                                style: FilledButton.styleFrom(
-                                  backgroundColor: const Color(0xFFFF7A00),
-                                  foregroundColor: Colors.white,
-                                  padding: const EdgeInsets.symmetric(
-                                    vertical: 14,
-                                  ),
-                                ),
-                              ),
-                            ),
-                          ],
-                        ),
-                      ] else ...[
-                        const SizedBox(height: 6),
-                        const Text(
-                          'Kaza veya acil durumlarda otomatik bilgilendirilecek kişiler.',
-                          style: TextStyle(fontSize: 12, color: Colors.white70),
-                        ),
-                        const SizedBox(height: 14),
-                        Expanded(
-                          child: ListView.builder(
-                            itemCount: _sosContacts.length,
-                            itemBuilder: (context, index) {
-                              final sos = _sosContacts[index];
-                              return Card(
-                                margin: const EdgeInsets.only(bottom: 10),
-                                color: const Color(0xFF1A1A1A),
-                                shape: RoundedRectangleBorder(
-                                  borderRadius: BorderRadius.circular(14),
-                                  side: const BorderSide(
-                                    color: Color(0xFFFF8A3D),
-                                    width: 1,
-                                  ),
-                                ),
-                                child: ListTile(
-                                  leading: const CircleAvatar(
-                                    backgroundColor: Color(0xFFFF8A3D),
-                                    child: Icon(
-                                      Icons.phone_in_talk,
-                                      color: Colors.white,
-                                      size: 20,
-                                    ),
-                                  ),
-                                  title: Text(
-                                    sos['name']!,
-                                    style: const TextStyle(
-                                      fontWeight: FontWeight.bold,
-                                      fontSize: 13,
-                                      color: Colors.white,
-                                    ),
-                                  ),
-                                  subtitle: Text(
-                                    '${sos['phone']} • ${sos['relation']}',
-                                    style: const TextStyle(
-                                      fontSize: 11,
-                                      color: Colors.white70,
-                                    ),
-                                  ),
-                                  trailing: Row(
-                                    mainAxisSize: MainAxisSize.min,
-                                    children: [
-                                      IconButton(
-                                        tooltip: 'Ara',
-                                        icon: const Icon(
-                                          Icons.call,
-                                          color: Color(0xFFFFB066),
-                                        ),
-                                        onPressed: () => _callSosContact(sos),
-                                      ),
-                                      IconButton(
-                                        tooltip: 'Mesaj hazırla',
-                                        icon: const Icon(
-                                          Icons.sms_outlined,
-                                          color: Color(0xFFFF8A3D),
-                                        ),
-                                        onPressed: () =>
-                                            _messageSosContact(sos),
-                                      ),
-                                      IconButton(
-                                        tooltip: 'Kişiyi sil',
-                                        icon:
-                                            deletingContactKeys.contains(
-                                              _normalizeSosPhone(sos['phone']!)
-                                                      .isEmpty
-                                                  ? sos['id']!
-                                                  : _normalizeSosPhone(
-                                                      sos['phone']!,
-                                                    ),
-                                            )
-                                            ? const SizedBox(
-                                                width: 18,
-                                                height: 18,
-                                                child:
-                                                    CircularProgressIndicator(
-                                                      strokeWidth: 2,
-                                                    ),
-                                              )
-                                            : const Icon(
-                                                Icons.delete_outline,
-                                                color: Colors.redAccent,
-                                              ),
-                                        onPressed: () async {
-                                          final user =
-                                              FirebaseAuth.instance.currentUser;
-                                          final contactId = sos['id'];
-                                          if (user == null ||
-                                              contactId == null) {
-                                            _showTrackingMessage(
-                                              'Kaydedilmiş SOS kişisi bulunamadı.',
-                                            );
-                                            return;
-                                          }
-                                          final normalizedPhone =
-                                              _normalizeSosPhone(sos['phone']!);
-                                          final deleteKey =
-                                              normalizedPhone.isEmpty
-                                              ? contactId
-                                              : normalizedPhone;
-                                          if (!deletingContactKeys.add(
-                                            deleteKey,
-                                          )) {
-                                            return;
-                                          }
-                                          setModalState(() {});
-                                          try {
-                                            final contactsReference =
-                                                FirebaseFirestore.instance
-                                                    .collection('users')
-                                                    .doc(user.uid)
-                                                    .collection('sos_contacts');
-                                            final contactsSnapshot =
-                                                await contactsReference.get();
-                                            final documentsToDelete =
-                                                contactsSnapshot.docs.where((
-                                                  document,
-                                                ) {
-                                                  if (normalizedPhone.isEmpty) {
-                                                    return document.id ==
-                                                        contactId;
-                                                  }
-                                                  return _normalizeSosPhone(
-                                                        document
-                                                                .data()['phone']
-                                                                ?.toString() ??
-                                                            '',
-                                                      ) ==
-                                                      normalizedPhone;
-                                                }).toList();
-                                            for (
-                                              var offset = 0;
-                                              offset < documentsToDelete.length;
-                                              offset += 450
-                                            ) {
-                                              final batch = FirebaseFirestore
-                                                  .instance
-                                                  .batch();
-                                              for (final document
-                                                  in documentsToDelete
-                                                      .skip(offset)
-                                                      .take(450)) {
-                                                batch.delete(
-                                                  document.reference,
-                                                );
-                                              }
-                                              await batch.commit();
-                                            }
-                                          } catch (error) {
-                                            debugPrint(
-                                              'Acil durum kişisi silinemedi: $error',
-                                            );
-                                            if (context.mounted && mounted) {
-                                              _showTrackingMessage(
-                                                'Acil durum kişisi silinemedi.',
-                                              );
-                                            }
-                                          } finally {
-                                            if (context.mounted) {
-                                              deletingContactKeys.remove(
-                                                deleteKey,
-                                              );
-                                              setModalState(() {});
-                                            }
-                                          }
-                                        },
-                                      ),
-                                    ],
-                                  ),
-                                ),
-                              );
-                            },
-                          ),
-                        ),
-                      ],
-                    ],
-                  ),
-                ),
-              ),
-            ),
-          );
-        },
-      ),
-    );
-
-    nameController.dispose();
-    phoneController.dispose();
-    relationController.dispose();
-  }
-
-  InputDecoration _sosContactInputDecoration({
-    required String label,
-    required IconData icon,
-    String? hint,
-  }) => InputDecoration(
-    labelText: label,
-    hintText: hint,
-    labelStyle: const TextStyle(color: Color(0xFFFFB066)),
-    hintStyle: const TextStyle(color: Colors.white38, fontSize: 13),
-    prefixIcon: Icon(icon, color: const Color(0xFFFFB066)),
-    filled: true,
-    fillColor: const Color(0xFF222222),
-    errorStyle: const TextStyle(color: Color(0xFFFF8A80)),
-    enabledBorder: OutlineInputBorder(
-      borderRadius: BorderRadius.circular(14),
-      borderSide: const BorderSide(color: Color(0xFF393939)),
-    ),
-    focusedBorder: OutlineInputBorder(
-      borderRadius: BorderRadius.circular(14),
-      borderSide: const BorderSide(color: Color(0xFFFF8A3D)),
-    ),
-    errorBorder: OutlineInputBorder(
-      borderRadius: BorderRadius.circular(14),
-      borderSide: const BorderSide(color: Color(0xFFFF5252)),
-    ),
-    focusedErrorBorder: OutlineInputBorder(
-      borderRadius: BorderRadius.circular(14),
-      borderSide: const BorderSide(color: Color(0xFFFF5252)),
-    ),
-  );
 
   Future<void> _showPhotoUploadDialog() async {
     if (_isUploadingProfilePhoto) return;
@@ -15943,7 +15886,10 @@ out center tags;
   }
 
   Future<void> _loadChatRoomMarkerIcon() async {
-    final icon = await _createStandaloneMarkerIcon(Icons.forum_rounded);
+    final icon = await _createStandaloneMarkerIcon(
+      Icons.forum_rounded,
+      circular: true,
+    );
     if (!mounted) return;
     setState(() => _chatRoomMarkerIcon = icon);
   }
@@ -16019,6 +15965,7 @@ out center tags;
       final icon = await _createStandaloneMarkerIcon(
         Icons.forum_rounded,
         badgeText: count >= 99 ? '99+' : '$count',
+        circular: true,
       );
       if (!mounted) return;
       setState(() => _chatRoomMarkerIcons[count] = icon);
@@ -16739,7 +16686,7 @@ $text''';
       child: Material(
         color: Colors.transparent,
         child: InkWell(
-          onTap: () => setState(() => _selectedIndex = index),
+          onTap: () => _selectMainTab(index),
           borderRadius: BorderRadius.circular(30),
           child: AnimatedContainer(
             duration: const Duration(milliseconds: 200),

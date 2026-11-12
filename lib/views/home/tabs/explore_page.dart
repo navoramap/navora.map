@@ -9,24 +9,18 @@ import 'explore_highlight_manager_sheet.dart';
 class ExplorePage extends StatefulWidget {
   final ValueChanged<String> onSelectListingType;
   final VoidCallback? onSelectLostPet;
-  final List<Map<String, String>> savedAddresses;
-  final List<Map<String, dynamic>> communityPlaces;
   final void Function(String label, String query) onSearchCategory;
-  final VoidCallback onAddCommunityPlace;
-  final ValueChanged<Map<String, dynamic>> onSelectCommunityPlace;
   final VoidCallback onShowCommunityPlaces;
+  final VoidCallback onShowPublicRoutes;
   final String? currentUserUid;
   final bool canManageHighlights;
 
   const ExplorePage({
     super.key,
     required this.onSelectListingType,
-    required this.savedAddresses,
-    required this.communityPlaces,
     required this.onSearchCategory,
-    required this.onAddCommunityPlace,
-    required this.onSelectCommunityPlace,
     required this.onShowCommunityPlaces,
+    required this.onShowPublicRoutes,
     required this.currentUserUid,
     required this.canManageHighlights,
     this.onSelectLostPet,
@@ -82,6 +76,8 @@ class _ExplorePageState extends State<ExplorePage> {
       'https://images.unsplash.com/photo-1600607687939-ce8a6c25118c?auto=format&fit=crop&w=900&q=85';
   static const _lostPetImage =
       'https://images.unsplash.com/photo-1623387641168-d9803ddd3f35?auto=format&fit=crop&crop=faces&w=1200&h=380&q=90';
+  static const _routeImage =
+      'https://images.unsplash.com/photo-1469854523086-cc02fe5d8800?auto=format&fit=crop&w=1200&h=500&q=85';
   static const _nearbyImage =
       'https://images.unsplash.com/photo-1500530855697-b586d89ba3ee?auto=format&fit=crop&w=1200&h=500&q=85';
   static const _communityPlacesImage =
@@ -202,90 +198,37 @@ class _ExplorePageState extends State<ExplorePage> {
                   const SizedBox(height: 26),
                   const _SectionHeading(title: 'MEKÂN ÖNERİLERİ'),
                   const SizedBox(height: 12),
-                  SizedBox(
-                    height: 88,
-                    child: _ExploreImageCard(
-                      imageUrl: _communityPlacesImage,
-                      title: 'Keşfedilmemiş Yerler',
-                      subtitle: 'Topluluğun eklediği yerleri haritada keşfet',
-                      icon: Icons.place_rounded,
-                      onTap: widget.onShowCommunityPlaces,
-                    ),
-                  ),
-                  const SizedBox(height: 12),
                   _ExploreImageGrid(
                     items: _placeCategories,
                     onTap: (label, query) =>
                         widget.onSearchCategory('Mekânlar • $label', query),
                   ),
-                  if (widget.currentUserUid != null) ...[
-                    const SizedBox(height: 26),
-                    Row(
-                      children: [
-                        const Expanded(
-                          child: _SectionHeading(title: 'TOPLULUK MEKÂNLARI'),
-                        ),
-                        IconButton(
-                          tooltip: 'Yeni mekân ekle',
-                          onPressed: widget.onAddCommunityPlace,
-                          icon: const Icon(Icons.add_location_alt_outlined),
-                          color: const Color(0xFFFF9A3D),
-                        ),
-                      ],
-                    ),
-                    if (widget.communityPlaces.isEmpty)
-                      const Text(
-                        'İlk keşfettiğin yeri haritaya ekle.',
-                        style: TextStyle(
-                          color: Color(0xFFB8B8B8),
-                          fontSize: 13,
-                        ),
-                      )
-                    else
-                      ...widget.communityPlaces
-                          .take(8)
-                          .map(
-                            (place) => _ExploreListTile(
-                              icon: Icons.place_rounded,
-                              title:
-                                  place['name']?.toString() ??
-                                  'Topluluk mekânı',
-                              subtitle:
-                                  [
-                                        place['category']?.toString(),
-                                        place['address']?.toString(),
-                                      ]
-                                      .where(
-                                        (part) =>
-                                            part != null && part.isNotEmpty,
-                                      )
-                                      .join(' • '),
-                              onTap: () => widget.onSelectCommunityPlace(place),
-                            ),
-                          ),
-                  ],
-                  if (widget.savedAddresses.isNotEmpty) ...[
-                    const SizedBox(height: 26),
-                    const _SectionHeading(title: 'KAYDEDİLEN YERLER'),
-                    const SizedBox(height: 8),
-                    ...widget.savedAddresses
-                        .take(4)
-                        .map(
-                          (address) => _ExploreListTile(
-                            icon: Icons.bookmark_outline_rounded,
-                            title: address['title'] ?? 'Kayıtlı yer',
-                            subtitle: address['address'] ?? '',
-                            onTap: () => widget.onSearchCategory(
-                              'Kayıtlı yer',
-                              address['address'] ?? address['title'] ?? '',
-                            ),
-                          ),
-                        ),
-                  ],
                   const SizedBox(height: 26),
                   const _SectionHeading(title: 'TOPLULUK'),
                   const SizedBox(height: 12),
-                  _LostPetsCategory(onTap: widget.onSelectLostPet),
+                  _ExploreBannerCategory(
+                    imageUrl: _communityPlacesImage,
+                    title: 'Keşfedilmemiş Yerler',
+                    subtitle: 'Topluluğun eklediği yerleri haritada keşfet',
+                    icon: Icons.place_rounded,
+                    onTap: widget.onShowCommunityPlaces,
+                  ),
+                  const SizedBox(height: 12),
+                  _ExploreBannerCategory(
+                    imageUrl: _routeImage,
+                    title: 'Herkese Açık Rotalar',
+                    subtitle: 'Topluluğun paylaştığı rotaları keşfet',
+                    icon: Icons.route_rounded,
+                    onTap: widget.onShowPublicRoutes,
+                  ),
+                  const SizedBox(height: 12),
+                  _ExploreBannerCategory(
+                    imageUrl: _lostPetImage,
+                    title: 'Can dostlar',
+                    subtitle: 'Kayıp, bulunan ve yuva arayan hayvanları keşfet',
+                    icon: Icons.pets_rounded,
+                    onTap: widget.onSelectLostPet,
+                  ),
                 ],
               ),
             ),
@@ -312,28 +255,24 @@ class _ExplorePageState extends State<ExplorePage> {
               title: 'Öne çıkan kart ekle',
               subtitle: 'Yenilik, rota ve duyurularını burada yayınla',
               icon: Icons.add_rounded,
+              showArrow: false,
               onTap: () => _openHighlightManager(context),
             ),
           );
         }
         return SizedBox(
           height: 150,
-          child: ListView.separated(
-            scrollDirection: Axis.horizontal,
-            padding: const EdgeInsets.only(right: 20),
+          child: PageView.builder(
             itemCount: highlights.length,
-            separatorBuilder: (context, index) => const SizedBox(width: 12),
             itemBuilder: (context, index) {
               final highlight = highlights[index];
-              return SizedBox(
-                width: 280,
-                child: _ExploreImageCard(
-                  imageUrl: highlight.imageUrl,
-                  title: highlight.title,
-                  subtitle: highlight.subtitle,
-                  icon: _highlightIcon(highlight.iconName),
-                  onTap: () => _openHighlight(context, highlight),
-                ),
+              return _ExploreImageCard(
+                imageUrl: highlight.imageUrl,
+                title: highlight.title,
+                subtitle: highlight.subtitle,
+                icon: _highlightIcon(highlight.iconName),
+                showArrow: false,
+                onTap: () => _openHighlight(context, highlight),
               );
             },
           ),
@@ -350,6 +289,29 @@ class _ExplorePageState extends State<ExplorePage> {
     'travel_explore' => Icons.travel_explore_rounded,
     'local_offer' => Icons.local_offer_rounded,
     'campaign' => Icons.campaign_rounded,
+    'restaurant' => Icons.restaurant_rounded,
+    'local_cafe' => Icons.local_cafe_rounded,
+    'park' => Icons.park_rounded,
+    'museum' => Icons.museum_rounded,
+    'shopping_bag' => Icons.shopping_bag_rounded,
+    'beach_access' => Icons.beach_access_rounded,
+    'hiking' => Icons.hiking_rounded,
+    'directions_car' => Icons.directions_car_rounded,
+    'flight' => Icons.flight_rounded,
+    'hotel' => Icons.hotel_rounded,
+    'map' => Icons.map_rounded,
+    'groups' => Icons.groups_rounded,
+    'favorite' => Icons.favorite_rounded,
+    'star' => Icons.star_rounded,
+    'celebration' => Icons.celebration_rounded,
+    'music_note' => Icons.music_note_rounded,
+    'local_activity' => Icons.local_activity_rounded,
+    'train' => Icons.train_rounded,
+    'directions_walk' => Icons.directions_walk_rounded,
+    'local_hospital' => Icons.local_hospital_rounded,
+    'pets' => Icons.pets_rounded,
+    'home_work' => Icons.home_work_rounded,
+    'photo_camera' => Icons.photo_camera_rounded,
     _ => Icons.new_releases_rounded,
   };
 
@@ -500,6 +462,7 @@ class _ExploreImageGrid extends StatelessWidget {
           imageUrl: item.imageUrl,
           title: item.label,
           icon: item.icon,
+          showArrow: false,
           onTap: () => onTap(item.label, item.query),
         );
       },
@@ -513,12 +476,14 @@ class _ExploreImageCard extends StatelessWidget {
   final String? subtitle;
   final IconData icon;
   final VoidCallback onTap;
+  final bool showArrow;
 
   const _ExploreImageCard({
     required this.imageUrl,
     required this.title,
     required this.icon,
     required this.onTap,
+    this.showArrow = true,
     this.subtitle,
   });
 
@@ -569,15 +534,16 @@ class _ExploreImageCard extends StatelessWidget {
                 child: Icon(icon, color: Colors.white, size: 17),
               ),
             ),
-            Positioned(
-              right: 10,
-              top: 12,
-              child: Icon(
-                Icons.arrow_outward_rounded,
-                color: Colors.white.withValues(alpha: 0.9),
-                size: 17,
+            if (showArrow)
+              Positioned(
+                right: 10,
+                top: 12,
+                child: Icon(
+                  Icons.arrow_outward_rounded,
+                  color: Colors.white.withValues(alpha: 0.9),
+                  size: 17,
+                ),
               ),
-            ),
             Positioned(
               left: 12,
               right: 12,
@@ -613,52 +579,6 @@ class _ExploreImageCard extends StatelessWidget {
             ),
           ],
         ),
-      ),
-    );
-  }
-}
-
-class _ExploreListTile extends StatelessWidget {
-  final IconData icon;
-  final String title;
-  final String subtitle;
-  final VoidCallback onTap;
-
-  const _ExploreListTile({
-    required this.icon,
-    required this.title,
-    required this.subtitle,
-    required this.onTap,
-  });
-
-  @override
-  Widget build(BuildContext context) {
-    return Material(
-      color: Colors.transparent,
-      child: ListTile(
-        contentPadding: EdgeInsets.zero,
-        dense: true,
-        leading: Icon(icon, color: const Color(0xFFFF9A3D), size: 21),
-        title: Text(
-          title,
-          maxLines: 1,
-          overflow: TextOverflow.ellipsis,
-          style: const TextStyle(color: Colors.white, fontSize: 14),
-        ),
-        subtitle: subtitle.isEmpty
-            ? null
-            : Text(
-                subtitle,
-                maxLines: 1,
-                overflow: TextOverflow.ellipsis,
-                style: const TextStyle(color: Color(0xFFAAAAAA), fontSize: 12),
-              ),
-        trailing: const Icon(
-          Icons.north_west_rounded,
-          size: 16,
-          color: Colors.white54,
-        ),
-        onTap: onTap,
       ),
     );
   }
@@ -796,15 +716,6 @@ class _ListingCategoryCard extends StatelessWidget {
                   ],
                 ),
               ),
-              const Positioned(
-                right: 12,
-                top: 12,
-                child: Icon(
-                  Icons.arrow_outward_rounded,
-                  color: Color(0xE6FFFFFF),
-                  size: 19,
-                ),
-              ),
             ],
           ),
         ),
@@ -813,12 +724,22 @@ class _ListingCategoryCard extends StatelessWidget {
   }
 }
 
-class _LostPetsCategory extends StatelessWidget {
+class _ExploreBannerCategory extends StatelessWidget {
   static const _borderRadius = BorderRadius.all(Radius.circular(22));
 
+  final String imageUrl;
+  final String title;
+  final String subtitle;
+  final IconData icon;
   final VoidCallback? onTap;
 
-  const _LostPetsCategory({this.onTap});
+  const _ExploreBannerCategory({
+    required this.imageUrl,
+    required this.title,
+    required this.subtitle,
+    required this.icon,
+    this.onTap,
+  });
 
   @override
   Widget build(BuildContext context) {
@@ -835,16 +756,12 @@ class _LostPetsCategory extends StatelessWidget {
             fit: StackFit.expand,
             children: [
               Image.network(
-                _ExplorePageState._lostPetImage,
+                imageUrl,
                 fit: BoxFit.cover,
-                errorBuilder: (context, error, stackTrace) => const ColoredBox(
-                  color: Color(0xFF29302F),
+                errorBuilder: (context, error, stackTrace) => ColoredBox(
+                  color: const Color(0xFF29302F),
                   child: Center(
-                    child: Icon(
-                      Icons.pets_rounded,
-                      color: Color(0xFFA9C5B0),
-                      size: 25,
-                    ),
+                    child: Icon(icon, color: const Color(0xFFA9C5B0), size: 25),
                   ),
                 ),
               ),
@@ -868,19 +785,15 @@ class _LostPetsCategory extends StatelessWidget {
                 ),
                 child: Row(
                   children: [
-                    const Icon(
-                      Icons.pets_rounded,
-                      color: Colors.white,
-                      size: 25,
-                    ),
+                    Icon(icon, color: Colors.white, size: 25),
                     const SizedBox(width: 13),
-                    const Expanded(
+                    Expanded(
                       child: Column(
                         crossAxisAlignment: CrossAxisAlignment.start,
                         mainAxisAlignment: MainAxisAlignment.center,
                         children: [
                           Text(
-                            'Can dostlar',
+                            title,
                             style: TextStyle(
                               color: Colors.white,
                               fontWeight: FontWeight.w700,
@@ -889,7 +802,7 @@ class _LostPetsCategory extends StatelessWidget {
                           ),
                           SizedBox(height: 3),
                           Text(
-                            'Kayıp, bulunan ve yuva arayan hayvanları keşfet',
+                            subtitle,
                             style: TextStyle(
                               color: Color(0xFFF0F0F0),
                               fontSize: 12,
@@ -897,11 +810,6 @@ class _LostPetsCategory extends StatelessWidget {
                           ),
                         ],
                       ),
-                    ),
-                    const Icon(
-                      Icons.arrow_forward_rounded,
-                      color: Colors.white,
-                      size: 19,
                     ),
                   ],
                 ),

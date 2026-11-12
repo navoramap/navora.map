@@ -597,7 +597,12 @@ Son güncelleme: 10.11.2026
   @override
   Widget build(BuildContext context) {
     if (_isCheckingSession) {
-      return const Scaffold(body: Center(child: CircularProgressIndicator()));
+      return const Scaffold(
+        body: NavoraLoadingScreen(
+          title: 'Navora hazırlanıyor',
+          subtitle: 'Sana özel harita deneyimi yükleniyor.',
+        ),
+      );
     }
 
     if (!_isLoggedIn) {

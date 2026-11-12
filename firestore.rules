@@ -7,9 +7,10 @@ service cloud.firestore {
     // =============================================================
     // users/{uid}: profile and private account metadata.
     // users/{uid}/{subcollection}/{document}: saved routes, addresses,
-    // driving history, route history, SOS contacts, point ledger and AI chats.
+    // driving history, route history, point ledger and AI chats.
     // community_places/{placeId}: authenticated community-submitted places,
     // owned by owner_uid and visible to signed-in users.
+    // public_routes/{routeId}: explicitly published, owner-managed routes.
     // chat_rooms/{roomId}: shared rooms owned by owner_id and member_ids.
     // public_chat_messages/{messageId}: shared messages owned by senderId.
     // chat_message_reports/{reportId}: moderation reports owned by reported_by.
@@ -256,6 +257,10 @@ service cloud.firestore {
       ];
     }
 
+    function isRetiredUserSubcollection(subcollection) {
+      return subcollection in ['sos_contacts', 'sos_alerts'];
+    }
+
     function quotaReservationPath(uid, reservationId) {
       return /databases/$(database)/documents/users/$(uid)/quota_reservations/$(reservationId);
     }
@@ -478,22 +483,26 @@ service cloud.firestore {
 
       match /{subcollection}/{documentId} {
         allow read: if isUser(uid)
+            && !isRetiredUserSubcollection(subcollection)
             && subcollection != 'quota_reservations'
             && subcollection != 'point_ledger'
             && subcollection != 'room_join_attempts';
         allow create: if isUser(uid)
             && subcollection != 'blocked_users'
+            && !isRetiredUserSubcollection(subcollection)
             && !isServerManagedUserSubcollection(subcollection)
             && validOwnedDocument(request.resource.data)
             && (subcollection != 'driving_history'
                 || validDrivingHistory(request.resource.data));
         allow update: if isUser(uid)
             && subcollection != 'blocked_users'
+            && !isRetiredUserSubcollection(subcollection)
             && !isServerManagedUserSubcollection(subcollection)
             && subcollection != 'driving_history'
             && validOwnedDocument(request.resource.data);
         allow delete: if isUser(uid)
             && subcollection != 'blocked_users'
+            && !isRetiredUserSubcollection(subcollection)
             && !isServerManagedUserSubcollection(subcollection);
       }
     }
@@ -919,6 +928,61 @@ service cloud.firestore {
           && resource.data.owner_uid == request.auth.uid
           && validCommunityPlace(request.resource.data, request.auth.uid)
           && request.resource.data.created_at == resource.data.created_at;
+      allow delete: if signedIn()
+          && resource.data.owner_uid == request.auth.uid;
+    }
+
+    match /public_routes/{routeId} {
+      function validPublicRoute(data, ownerUid) {
+        return data.keys().hasOnly([
+              'owner_uid', 'title', 'start', 'destination',
+              'start_latitude', 'start_longitude',
+              'destination_latitude', 'destination_longitude',
+              'distance_km', 'duration_minutes', 'travel_mode', 'created_at'
+            ])
+            && data.keys().hasAll([
+              'owner_uid', 'title', 'start', 'destination',
+              'start_latitude', 'start_longitude',
+              'destination_latitude', 'destination_longitude',
+              'distance_km', 'duration_minutes', 'travel_mode', 'created_at'
+            ])
+            && data.owner_uid == ownerUid
+            && data.title is string
+            && data.title.size() > 0
+            && data.title.size() <= 120
+            && data.start is string
+            && data.start.size() > 0
+            && data.start.size() <= 200
+            && data.destination is string
+            && data.destination.size() > 0
+            && data.destination.size() <= 200
+            && data.start_latitude is number
+            && data.start_latitude >= -90
+            && data.start_latitude <= 90
+            && data.start_longitude is number
+            && data.start_longitude >= -180
+            && data.start_longitude <= 180
+            && data.destination_latitude is number
+            && data.destination_latitude >= -90
+            && data.destination_latitude <= 90
+            && data.destination_longitude is number
+            && data.destination_longitude >= -180
+            && data.destination_longitude <= 180
+            && data.distance_km is number
+            && data.distance_km > 0
+            && data.distance_km <= 100000
+            && data.duration_minutes is int
+            && data.duration_minutes > 0
+            && data.duration_minutes <= 1000000
+            && data.travel_mode in ['Araba', 'Yürüyüş']
+            && data.created_at is timestamp;
+      }
+
+      allow get, list: if signedIn();
+      allow create: if signedIn()
+          && validPublicRoute(request.resource.data, request.auth.uid)
+          && request.resource.data.created_at == request.time;
+      allow update: if false;
       allow delete: if signedIn()
           && resource.data.owner_uid == request.auth.uid;
     }

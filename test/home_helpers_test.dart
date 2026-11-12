@@ -272,6 +272,39 @@ void main() {
     );
   });
 
+  test('route history replaces its matching GPS drive entry', () {
+    final combined = navoraCombineDrivingHistory(
+      [
+        {
+          'route': 'GPS sürüşü',
+          'date': '12.11.2026 22:00',
+          'duration': '30 dk',
+          'km': '12.5 km',
+        },
+        {
+          'route': 'GPS sürüşü',
+          'date': '12.11.2026 21:00',
+          'duration': '20 dk',
+          'km': '8 km',
+        },
+      ],
+      [
+        {
+          'route': 'Evden İşe',
+          'date': '12.11.2026 22:00',
+          'duration': '30 dk',
+          'km': '12.5 km',
+        },
+      ],
+    );
+
+    expect(combined, hasLength(2));
+    expect(combined.map((entry) => entry['route']), [
+      'GPS sürüşü',
+      'Evden İşe',
+    ]);
+  });
+
   test(
     'search filters categories, keeps distant results, and prioritizes nearby',
     () {

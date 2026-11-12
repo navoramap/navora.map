@@ -819,6 +819,40 @@ test('users cannot write server-managed quotas, reservations, or retired point l
   );
 });
 
+test('retired emergency collections deny all client access', async () => {
+  await testEnvironment.withSecurityRulesDisabled(async (context) => {
+    const firestore = context.firestore();
+    await setDoc(doc(firestore, 'users/owner/sos_contacts/legacy-contact'), {
+      name: 'Legacy contact',
+      phone: '+905000000000',
+    });
+    await setDoc(doc(firestore, 'users/owner/sos_alerts/legacy-alert'), {
+      message: 'Legacy alert',
+    });
+  });
+
+  const firestore = testEnvironment.authenticatedContext('owner').firestore();
+  const legacyContact = doc(firestore, 'users/owner/sos_contacts/legacy-contact');
+  const legacyAlert = doc(firestore, 'users/owner/sos_alerts/legacy-alert');
+  await assertFails(getDoc(legacyContact));
+  await assertFails(getDoc(legacyAlert));
+  await assertFails(
+    setDoc(doc(firestore, 'users/owner/sos_contacts/new-contact'), {
+      name: 'New contact',
+      phone: '+905000000001',
+    }),
+  );
+  await assertFails(
+    setDoc(doc(firestore, 'users/owner/sos_alerts/new-alert'), {
+      message: 'New alert',
+    }),
+  );
+  await assertFails(updateDoc(legacyContact, { name: 'Updated contact' }));
+  await assertFails(updateDoc(legacyAlert, { message: 'Updated alert' }));
+  await assertFails(deleteDoc(legacyContact));
+  await assertFails(deleteDoc(legacyAlert));
+});
+
 test('users can manage only their own blocked-user list', async () => {
   const firestore = testEnvironment.authenticatedContext('owner').firestore();
   const blockedUser = doc(firestore, 'users/owner/blocked_users/blocked');
@@ -1617,5 +1651,80 @@ test('community places are authenticated, validated, and owner-managed', async (
       ...place,
       private_note: 'not in schema',
     }),
+  );
+});
+
+test('public routes are authenticated, validated, and owner-managed', async () => {
+  const owner = testEnvironment.authenticatedContext('owner').firestore();
+  const visitor = testEnvironment.authenticatedContext('visitor').firestore();
+  const route = {
+    owner_uid: 'owner',
+    title: 'Sahil yürüyüşü',
+    start: 'Konak',
+    destination: 'Kordon',
+    start_latitude: 38.42,
+    start_longitude: 27.13,
+    destination_latitude: 38.43,
+    destination_longitude: 27.14,
+    distance_km: 2.4,
+    duration_minutes: 32,
+    travel_mode: 'Yürüyüş',
+    created_at: serverTimestamp(),
+  };
+  const routeReference = doc(owner, 'public_routes/coast-walk');
+  await assertFails(
+    setDoc(
+      doc(
+        testEnvironment.unauthenticatedContext().firestore(),
+        'public_routes/anonymous',
+      ),
+      route,
+    ),
+  );
+  await assertSucceeds(setDoc(routeReference, route));
+  await assertSucceeds(
+    getDoc(doc(visitor, 'public_routes/coast-walk')),
+  );
+  const results = await assertSucceeds(
+    getDocs(
+      query(
+        collection(visitor, 'public_routes'),
+        orderBy('created_at', 'desc'),
+      ),
+    ),
+  );
+  assert.equal(results.size, 1);
+  await assertFails(
+    setDoc(doc(visitor, 'public_routes/spoofed'), {
+      ...route,
+      owner_uid: 'owner',
+    }),
+  );
+  await assertFails(
+    setDoc(doc(owner, 'public_routes/out-of-range'), {
+      ...route,
+      start_latitude: 95,
+    }),
+  );
+  await assertFails(
+    setDoc(doc(owner, 'public_routes/unsupported-mode'), {
+      ...route,
+      travel_mode: 'Bisiklet',
+    }),
+  );
+  await assertFails(
+    updateDoc(routeReference, { title: 'Başka rota' }),
+  );
+  await assertFails(
+    deleteDoc(doc(visitor, 'public_routes/coast-walk')),
+  );
+  await assertSucceeds(deleteDoc(routeReference));
+  await assertFails(
+    getDoc(
+      doc(
+        testEnvironment.unauthenticatedContext().firestore(),
+        'public_routes/coast-walk',
+      ),
+    ),
   );
 });

@@ -233,9 +233,7 @@ class _HighlightManagerTile extends StatelessWidget {
                   ),
                   const SizedBox(height: 3),
                   Text(
-                    highlight.isActive
-                        ? 'Yayında • Sıra ${highlight.order + 1}'
-                        : 'Taslak',
+                    'Sıra ${highlight.order + 1}',
                     style: const TextStyle(
                       color: Color(0xFFBDBDBD),
                       fontSize: 12,
@@ -244,10 +242,16 @@ class _HighlightManagerTile extends StatelessWidget {
                 ],
               ),
             ),
-            Switch.adaptive(
-              value: highlight.isActive,
-              activeThumbColor: const Color(0xFFFF7A00),
-              onChanged: onToggleActive,
+            Semantics(
+              label: 'Kart ${highlight.isActive ? 'yayında' : 'kapalı'}',
+              hint: highlight.isActive
+                  ? 'Kartı yayından kaldır'
+                  : 'Kartı yayına al',
+              child: Switch.adaptive(
+                value: highlight.isActive,
+                activeThumbColor: const Color(0xFFFF7A00),
+                onChanged: onToggleActive,
+              ),
             ),
             IconButton(
               tooltip: 'Düzenle',
@@ -297,6 +301,62 @@ class _ExploreHighlightEditorDialogState
     'travel_explore': Icons.travel_explore_rounded,
     'local_offer': Icons.local_offer_rounded,
     'campaign': Icons.campaign_rounded,
+    'restaurant': Icons.restaurant_rounded,
+    'local_cafe': Icons.local_cafe_rounded,
+    'park': Icons.park_rounded,
+    'museum': Icons.museum_rounded,
+    'shopping_bag': Icons.shopping_bag_rounded,
+    'beach_access': Icons.beach_access_rounded,
+    'hiking': Icons.hiking_rounded,
+    'directions_car': Icons.directions_car_rounded,
+    'flight': Icons.flight_rounded,
+    'hotel': Icons.hotel_rounded,
+    'map': Icons.map_rounded,
+    'groups': Icons.groups_rounded,
+    'favorite': Icons.favorite_rounded,
+    'star': Icons.star_rounded,
+    'celebration': Icons.celebration_rounded,
+    'music_note': Icons.music_note_rounded,
+    'local_activity': Icons.local_activity_rounded,
+    'train': Icons.train_rounded,
+    'directions_walk': Icons.directions_walk_rounded,
+    'local_hospital': Icons.local_hospital_rounded,
+    'pets': Icons.pets_rounded,
+    'home_work': Icons.home_work_rounded,
+    'photo_camera': Icons.photo_camera_rounded,
+  };
+  static const _iconLabels = <String, String>{
+    'new_releases': 'Yenilik',
+    'pedal_bike': 'Bisiklet',
+    'route': 'Rota',
+    'place': 'Konum',
+    'event': 'Etkinlik',
+    'travel_explore': 'Keşif',
+    'local_offer': 'Teklif',
+    'campaign': 'Duyuru',
+    'restaurant': 'Restoran',
+    'local_cafe': 'Kafe',
+    'park': 'Park',
+    'museum': 'Müze',
+    'shopping_bag': 'Alışveriş',
+    'beach_access': 'Plaj',
+    'hiking': 'Doğa yürüyüşü',
+    'directions_car': 'Araba',
+    'flight': 'Uçak',
+    'hotel': 'Otel',
+    'map': 'Harita',
+    'groups': 'Topluluk',
+    'favorite': 'Favori',
+    'star': 'Yıldız',
+    'celebration': 'Kutlama',
+    'music_note': 'Müzik',
+    'local_activity': 'Aktivite',
+    'train': 'Tren',
+    'directions_walk': 'Yürüyüş',
+    'local_hospital': 'Sağlık',
+    'pets': 'Can dostlar',
+    'home_work': 'Ev',
+    'photo_camera': 'Fotoğraf',
   };
 
   final _formKey = GlobalKey<FormState>();
@@ -478,7 +538,7 @@ class _ExploreHighlightEditorDialogState
                               ),
                               const SizedBox(width: 10),
                               Text(
-                                entry.key.replaceAll('_', ' '),
+                                _iconLabels[entry.key] ?? entry.key,
                                 style: const TextStyle(color: Colors.white),
                               ),
                             ],
