@@ -11212,110 +11212,293 @@ out center tags;
 
   Future<void> _showAboutSupportSheet() async {
     const supportEmail = 'navora.map@gmail.com';
+    const features = <({IconData icon, String title, String description})>[
+      (
+        icon: Icons.route_rounded,
+        title: 'Rota ve navigasyon',
+        description: 'Rotanı oluştur, seçenekleri incele ve yolunu takip et.',
+      ),
+      (
+        icon: Icons.home_work_outlined,
+        title: 'Emlak ilanları',
+        description: 'Satılık ve kiralık ilanları harita üzerinde keşfet.',
+      ),
+      (
+        icon: Icons.pets_rounded,
+        title: 'Kayıp hayvan ilanları',
+        description: 'Kayıp dostlar için ilan paylaş, çevrenden destek al.',
+      ),
+      (
+        icon: Icons.explore_rounded,
+        title: 'Yeni yerler keşfet',
+        description: 'Az bilinen mekanları ekle, başkalarının önerilerini gör.',
+      ),
+      (
+        icon: Icons.forum_rounded,
+        title: 'Sohbet ve odalar',
+        description: 'Genel sohbete katıl, topluluk odalarında buluş.',
+      ),
+      (
+        icon: Icons.auto_awesome_rounded,
+        title: 'Navora AI',
+        description: 'Rotan ve çevrendeki yerler hakkında yanıtlar al.',
+      ),
+      (
+        icon: Icons.bookmark_added_rounded,
+        title: 'Kayıtlı adresler',
+        description: 'Evini, işini ve favori adreslerini kolayca kaydet.',
+      ),
+    ];
+
+    Widget featureRow({
+      required IconData icon,
+      required String title,
+      required String description,
+    }) {
+      return Padding(
+        padding: const EdgeInsets.symmetric(vertical: 10),
+        child: Row(
+          crossAxisAlignment: CrossAxisAlignment.start,
+          children: [
+            Container(
+              width: 40,
+              height: 40,
+              decoration: BoxDecoration(
+                color: const Color(0xFFFF6B00).withValues(alpha: 0.12),
+                borderRadius: BorderRadius.circular(12),
+              ),
+              child: Icon(icon, color: const Color(0xFFFF8A3D), size: 21),
+            ),
+            const SizedBox(width: 12),
+            Expanded(
+              child: Column(
+                crossAxisAlignment: CrossAxisAlignment.start,
+                children: [
+                  Text(
+                    title,
+                    style: const TextStyle(
+                      color: Colors.white,
+                      fontSize: 14,
+                      fontWeight: FontWeight.w700,
+                    ),
+                  ),
+                  const SizedBox(height: 3),
+                  Text(
+                    description,
+                    style: const TextStyle(
+                      color: Colors.white70,
+                      fontSize: 12,
+                      height: 1.35,
+                    ),
+                  ),
+                ],
+              ),
+            ),
+          ],
+        ),
+      );
+    }
 
     await showModalBottomSheet<void>(
       context: context,
       backgroundColor: const Color(0xFF191919),
+      isScrollControlled: true,
       shape: const RoundedRectangleBorder(
         borderRadius: BorderRadius.vertical(top: Radius.circular(24)),
       ),
-      builder: (sheetContext) => Padding(
-        padding: const EdgeInsets.fromLTRB(20, 22, 20, 28),
-        child: Column(
-          mainAxisSize: MainAxisSize.min,
-          crossAxisAlignment: CrossAxisAlignment.start,
-          children: [
-            Row(
+      builder: (sheetContext) => SafeArea(
+        top: false,
+        child: ConstrainedBox(
+          constraints: BoxConstraints(
+            maxHeight: MediaQuery.sizeOf(sheetContext).height * 0.86,
+          ),
+          child: SingleChildScrollView(
+            padding: const EdgeInsets.fromLTRB(20, 22, 20, 24),
+            child: Column(
+              crossAxisAlignment: CrossAxisAlignment.start,
               children: [
                 Container(
-                  padding: const EdgeInsets.all(10),
+                  padding: const EdgeInsets.all(16),
                   decoration: BoxDecoration(
-                    color: const Color(0xFFFF6B00).withValues(alpha: 0.1),
-                    borderRadius: BorderRadius.circular(12),
-                  ),
-                  child: const Icon(
-                    Icons.support_agent_rounded,
-                    color: Color(0xFFFF6B00),
-                  ),
-                ),
-                const SizedBox(width: 12),
-                const Expanded(
-                  child: Text(
-                    'Hakkımızda & Destek',
-                    style: TextStyle(fontSize: 18, fontWeight: FontWeight.bold),
-                  ),
-                ),
-                IconButton(
-                  tooltip: 'Kapat',
-                  onPressed: () => Navigator.pop(sheetContext),
-                  icon: const Icon(Icons.close_rounded),
-                ),
-              ],
-            ),
-            const SizedBox(height: 16),
-            const Text(
-              'Navora, yolculuklarını daha güvenli ve keyifli hale getirmek için tasarlanmış bir keşif ve sürüş uygulamasıdır.',
-              style: TextStyle(
-                color: Colors.white70,
-                fontSize: 14,
-                height: 1.45,
-              ),
-            ),
-            const SizedBox(height: 10),
-            Material(
-              color: Colors.transparent,
-              child: InkWell(
-                borderRadius: BorderRadius.circular(10),
-                onTap: () async {
-                  final emailUri = Uri(scheme: 'mailto', path: supportEmail);
-                  final opened = await launchUrl(
-                    emailUri,
-                    mode: LaunchMode.externalApplication,
-                  );
-                  if (!opened && mounted) {
-                    _showTrackingMessage(
-                      'Bu cihazda e-posta uygulaması bulunamadı.',
-                    );
-                  }
-                },
-                child: Padding(
-                  padding: const EdgeInsets.symmetric(
-                    vertical: 8,
-                    horizontal: 4,
+                    gradient: const LinearGradient(
+                      colors: [
+                        Color(0xFFFF7A1A),
+                        Color(0xFFFF6B00),
+                        Color(0xFFCB4C00),
+                      ],
+                      begin: Alignment.topLeft,
+                      end: Alignment.bottomRight,
+                    ),
+                    borderRadius: BorderRadius.circular(20),
                   ),
                   child: Row(
                     children: [
-                      const Icon(
-                        Icons.email_outlined,
-                        color: Color(0xFFFF6B00),
-                        size: 19,
-                      ),
-                      const SizedBox(width: 10),
-                      const Expanded(
-                        child: Text(
-                          supportEmail,
-                          style: TextStyle(
-                            color: Color(0xFFFF6B00),
-                            fontSize: 13,
-                          ),
+                      Container(
+                        width: 48,
+                        height: 48,
+                        decoration: BoxDecoration(
+                          color: Colors.white.withValues(alpha: 0.16),
+                          borderRadius: BorderRadius.circular(15),
+                        ),
+                        child: const Icon(
+                          Icons.explore_rounded,
+                          color: Colors.white,
+                          size: 27,
                         ),
                       ),
-                      const Icon(
-                        Icons.open_in_new_rounded,
-                        color: Colors.white54,
-                        size: 17,
+                      const SizedBox(width: 13),
+                      const Expanded(
+                        child: Column(
+                          crossAxisAlignment: CrossAxisAlignment.start,
+                          children: [
+                            Text(
+                              'Navora Map',
+                              style: TextStyle(
+                                color: Colors.white,
+                                fontSize: 20,
+                                fontWeight: FontWeight.w800,
+                              ),
+                            ),
+                            SizedBox(height: 3),
+                            Text(
+                              'Yolculuk, keşif ve topluluk tek haritada.',
+                              style: TextStyle(
+                                color: Colors.white,
+                                fontSize: 12,
+                                height: 1.3,
+                              ),
+                            ),
+                          ],
+                        ),
+                      ),
+                      IconButton(
+                        tooltip: 'Kapat',
+                        onPressed: () => Navigator.pop(sheetContext),
+                        color: Colors.white,
+                        icon: const Icon(Icons.close_rounded),
                       ),
                     ],
                   ),
                 ),
-              ),
+                const SizedBox(height: 18),
+                const Text(
+                  'Yolculuğunu keşfe dönüştür',
+                  style: TextStyle(
+                    color: Colors.white,
+                    fontSize: 17,
+                    fontWeight: FontWeight.w800,
+                  ),
+                ),
+                const SizedBox(height: 6),
+                const Text(
+                  'Navora Map; rotanı planlamana, çevrendeki yeni yerleri '
+                  'keşfetmene ve yol boyunca toplulukla bağlantıda kalmana '
+                  'yardımcı olur.',
+                  style: TextStyle(
+                    color: Colors.white70,
+                    fontSize: 13,
+                    height: 1.5,
+                  ),
+                ),
+                const SizedBox(height: 12),
+                Container(
+                  padding: const EdgeInsets.symmetric(horizontal: 14),
+                  decoration: BoxDecoration(
+                    color: const Color(0xFF222222),
+                    borderRadius: BorderRadius.circular(18),
+                    border: Border.all(
+                      color: Colors.white.withValues(alpha: 0.06),
+                    ),
+                  ),
+                  child: Column(
+                    children: [
+                      for (var index = 0; index < features.length; index++) ...[
+                        featureRow(
+                          icon: features[index].icon,
+                          title: features[index].title,
+                          description: features[index].description,
+                        ),
+                        if (index < features.length - 1)
+                          Divider(
+                            height: 1,
+                            color: Colors.white.withValues(alpha: 0.08),
+                          ),
+                      ],
+                    ],
+                  ),
+                ),
+                const SizedBox(height: 16),
+                Material(
+                  color: const Color(0xFFFF6B00).withValues(alpha: 0.1),
+                  borderRadius: BorderRadius.circular(16),
+                  child: InkWell(
+                    borderRadius: BorderRadius.circular(16),
+                    onTap: () async {
+                      final emailUri = Uri(
+                        scheme: 'mailto',
+                        path: supportEmail,
+                      );
+                      final opened = await launchUrl(
+                        emailUri,
+                        mode: LaunchMode.externalApplication,
+                      );
+                      if (!opened && mounted) {
+                        _showTrackingMessage(
+                          'Bu cihazda e-posta uygulaması bulunamadı.',
+                        );
+                      }
+                    },
+                    child: Padding(
+                      padding: const EdgeInsets.all(14),
+                      child: Row(
+                        children: [
+                          const Icon(
+                            Icons.mail_outline_rounded,
+                            color: Color(0xFFFF8A3D),
+                          ),
+                          const SizedBox(width: 12),
+                          const Expanded(
+                            child: Column(
+                              crossAxisAlignment: CrossAxisAlignment.start,
+                              children: [
+                                Text(
+                                  'Bize ulaşın',
+                                  style: TextStyle(
+                                    color: Colors.white,
+                                    fontSize: 14,
+                                    fontWeight: FontWeight.w700,
+                                  ),
+                                ),
+                                SizedBox(height: 3),
+                                Text(
+                                  supportEmail,
+                                  style: TextStyle(
+                                    color: Color(0xFFFF8A3D),
+                                    fontSize: 12,
+                                  ),
+                                ),
+                              ],
+                            ),
+                          ),
+                          const Icon(
+                            Icons.arrow_outward_rounded,
+                            color: Colors.white54,
+                            size: 18,
+                          ),
+                        ],
+                      ),
+                    ),
+                  ),
+                ),
+                const SizedBox(height: 8),
+                Text(
+                  'Görüş, öneri ve hata bildirimlerin Navora’yı geliştirmemize '
+                  'yardımcı olur.',
+                  style: TextStyle(color: Colors.grey.shade500, fontSize: 11),
+                ),
+              ],
             ),
-            const SizedBox(height: 6),
-            Text(
-              'Geri bildirimlerinizi, hata bildirimlerinizi ve önerilerinizi bizimle paylaşabilirsiniz.',
-              style: TextStyle(color: Colors.grey.shade600, fontSize: 12),
-            ),
-          ],
+          ),
         ),
       ),
     );
