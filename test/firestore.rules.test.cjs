@@ -513,10 +513,28 @@ test('signed-in users can query active property listings by type', async () => {
   }
 });
 
-test('property listing access is authenticated and pending data is owner-only', async () => {
+test('signed-out users can query active property listings by type', async () => {
+  const firestore = testEnvironment.unauthenticatedContext().firestore();
+  const results = await assertSucceeds(
+    getDocs(
+      query(
+        collection(firestore, 'property_listings'),
+        where('status', '==', 'active'),
+        where('listing_type', '==', 'kiralik'),
+        orderBy('created_at', 'desc'),
+      ),
+    ),
+  );
+  if (results.size !== 1 || results.docs[0].id !== 'rent-1') {
+    throw new Error('The public active property query returned unexpected data');
+  }
+});
+
+test('active property listings are public and pending data is owner-only', async () => {
   const signedOut = testEnvironment.unauthenticatedContext().firestore();
   const visitor = testEnvironment.authenticatedContext('visitor').firestore();
-  await assertFails(getDoc(doc(signedOut, 'property_listings/rent-1')));
+  await assertSucceeds(getDoc(doc(signedOut, 'property_listings/rent-1')));
+  await assertFails(getDoc(doc(signedOut, 'property_listings/pending-1')));
   await assertSucceeds(getDoc(doc(visitor, 'property_listings/rent-1')));
   await assertFails(getDoc(doc(visitor, 'property_listings/pending-1')));
   await assertSucceeds(
@@ -1207,7 +1225,7 @@ test('general chat messages can be reported only with matching message data', as
   );
 });
 
-test('active listings, lost pets, and community places can be reported to admins', async () => {
+test('active listings, lost pets, community places, and reviews can be reported to admins', async () => {
   const reporter = testEnvironment.authenticatedContext('visitor').firestore();
   const communityPlace = {
     owner_uid: 'owner',
@@ -1219,10 +1237,23 @@ test('active listings, lost pets, and community places can be reported to admins
     longitude: 27.1,
     created_at: now,
   };
+  const communityPlaceReview = {
+    uid: 'reviewer',
+    display_name: 'Review author',
+    rating: 4,
+    comment: 'Bu mekân hakkındaki değerlendirme.',
+    created_at: now,
+    updated_at: now,
+  };
   await testEnvironment.withSecurityRulesDisabled(async (context) => {
+    const firestore = context.firestore();
     await setDoc(
-      doc(context.firestore(), 'community_places/place-1'),
+      doc(firestore, 'community_places/place-1'),
       communityPlace,
+    );
+    await setDoc(
+      doc(firestore, 'community_places/place-1/reviews/reviewer'),
+      communityPlaceReview,
     );
   });
 
@@ -1248,13 +1279,23 @@ test('active listings, lost pets, and community places can be reported to admins
       content_title: communityPlace.name,
       content_description: communityPlace.description,
     },
+    {
+      id: 'place-review-report',
+      content_type: 'community_place_review',
+      content_id: 'reviewer',
+      parent_content_id: 'place-1',
+      content_rating: communityPlaceReview.rating,
+      content_title: communityPlace.name,
+      content_description: communityPlaceReview.comment,
+      content_owner_uid: communityPlaceReview.uid,
+    },
   ];
   for (const report of reports) {
     const { id, ...reportData } = report;
     await assertSucceeds(
       setDoc(doc(reporter, `content_reports/${id}`), {
         ...reportData,
-        content_owner_uid: 'owner',
+        content_owner_uid: reportData.content_owner_uid ?? 'owner',
         reason: 'Uygunsuz içerik',
         reported_by: 'visitor',
         created_at: serverTimestamp(),
@@ -1262,6 +1303,22 @@ test('active listings, lost pets, and community places can be reported to admins
       }),
     );
   }
+
+  await assertFails(
+    setDoc(doc(reporter, 'content_reports/forged-review-report'), {
+      content_type: 'community_place_review',
+      content_id: 'reviewer',
+      parent_content_id: 'place-1',
+      content_rating: 1,
+      content_owner_uid: communityPlaceReview.uid,
+      content_title: communityPlace.name,
+      content_description: communityPlaceReview.comment,
+      reason: 'Uygunsuz içerik',
+      reported_by: 'visitor',
+      created_at: serverTimestamp(),
+      status: 'open',
+    }),
+  );
 
   await assertFails(
     setDoc(doc(reporter, 'content_reports/forged-report'), {
@@ -1304,7 +1361,7 @@ test('active listings, lost pets, and community places can be reported to admins
       ),
     ),
   );
-  if (adminReports.size !== 3) {
+  if (adminReports.size !== 4) {
     throw new Error('The admin content reports query returned unexpected data');
   }
 });
@@ -1650,6 +1707,80 @@ test('community places are authenticated, validated, and owner-managed', async (
     setDoc(doc(owner, 'community_places/extra-field'), {
       ...place,
       private_note: 'not in schema',
+    }),
+  );
+});
+
+test('community place reviews are readable and user-owned', async () => {
+  const owner = testEnvironment.authenticatedContext('owner').firestore();
+  const visitor = testEnvironment.authenticatedContext('visitor').firestore();
+  const otherUser = testEnvironment.authenticatedContext('other-user').firestore();
+  const placeReference = doc(owner, 'community_places/reviewable-place');
+  await assertSucceeds(
+    setDoc(placeReference, {
+      owner_uid: 'owner',
+      name: 'Seyir noktası',
+      category: 'Doğa',
+      description: '',
+      address: '',
+      latitude: 38.4,
+      longitude: 27.1,
+      created_at: serverTimestamp(),
+    }),
+  );
+
+  const reviewsReference = collection(
+    visitor,
+    'community_places/reviewable-place/reviews',
+  );
+  await assertSucceeds(getDocs(reviewsReference));
+  await assertFails(
+    getDocs(
+      collection(
+        testEnvironment.unauthenticatedContext().firestore(),
+        'community_places/reviewable-place/reviews',
+      ),
+    ),
+  );
+
+  const reviewReference = doc(reviewsReference, 'visitor');
+  await assertSucceeds(
+    setDoc(reviewReference, {
+      uid: 'visitor',
+      display_name: 'Ziyaretçi',
+      rating: 4,
+      comment: 'Manzarası çok güzel.',
+      created_at: serverTimestamp(),
+      updated_at: serverTimestamp(),
+    }),
+  );
+  await assertSucceeds(getDocs(reviewsReference));
+  await assertSucceeds(
+    updateDoc(reviewReference, {
+      rating: 5,
+      updated_at: serverTimestamp(),
+    }),
+  );
+  await assertFails(
+    updateDoc(doc(otherUser, 'community_places/reviewable-place/reviews/visitor'), {
+      rating: 1,
+      updated_at: serverTimestamp(),
+    }),
+  );
+  await assertFails(
+    deleteDoc(
+      doc(otherUser, 'community_places/reviewable-place/reviews/visitor'),
+    ),
+  );
+  await assertSucceeds(deleteDoc(reviewReference));
+  await assertFails(
+    setDoc(doc(reviewsReference, 'invalid-rating'), {
+      uid: 'invalid-rating',
+      display_name: 'Ziyaretçi',
+      rating: 6,
+      comment: 'Geçersiz puan.',
+      created_at: serverTimestamp(),
+      updated_at: serverTimestamp(),
     }),
   );
 });

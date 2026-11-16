@@ -10,6 +10,14 @@
       ]
     },
     {
+      "collectionGroup": "property_listings",
+      "queryScope": "COLLECTION",
+      "fields": [
+        { "fieldPath": "status", "order": "ASCENDING" },
+        { "fieldPath": "created_at", "order": "DESCENDING" }
+      ]
+    },
+    {
       "collectionGroup": "lost_pet_reports",
       "queryScope": "COLLECTION",
       "fields": [

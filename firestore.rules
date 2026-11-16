@@ -25,7 +25,7 @@ service cloud.firestore {
     }
 
     function isChatAdmin() {
-      return signedIn() && request.auth.token.admin == true;
+      return signedIn() && request.auth.token.get('admin', false) == true;
     }
 
     function isUser(uid) {
@@ -85,7 +85,14 @@ service cloud.firestore {
               && exists(/databases/$(database)/documents/community_places/$(data.content_id))
               && get(/databases/$(database)/documents/community_places/$(data.content_id)).data.owner_uid == data.content_owner_uid
               && get(/databases/$(database)/documents/community_places/$(data.content_id)).data.name == data.content_title
-              && get(/databases/$(database)/documents/community_places/$(data.content_id)).data.description == data.content_description);
+              && get(/databases/$(database)/documents/community_places/$(data.content_id)).data.description == data.content_description)
+          || (data.content_type == 'community_place_review'
+              && exists(/databases/$(database)/documents/community_places/$(data.parent_content_id))
+              && get(/databases/$(database)/documents/community_places/$(data.parent_content_id)).data.name == data.content_title
+              && exists(/databases/$(database)/documents/community_places/$(data.parent_content_id)/reviews/$(data.content_id))
+              && get(/databases/$(database)/documents/community_places/$(data.parent_content_id)/reviews/$(data.content_id)).data.uid == data.content_owner_uid
+              && get(/databases/$(database)/documents/community_places/$(data.parent_content_id)/reviews/$(data.content_id)).data.comment == data.content_description
+              && get(/databases/$(database)/documents/community_places/$(data.parent_content_id)/reviews/$(data.content_id)).data.rating == data.content_rating);
     }
 
     function serverManagedProfileFieldsUnchanged() {
@@ -509,7 +516,7 @@ service cloud.firestore {
 
     match /property_listings/{listingId} {
       function isPropertyAdmin() {
-        return signedIn() && request.auth.token.admin == true;
+        return signedIn() && request.auth.token.get('admin', false) == true;
       }
 
       function validPhotoUrl(url) {
@@ -588,11 +595,11 @@ service cloud.firestore {
             && data.updated_at == request.time;
       }
 
-      allow read: if signedIn()
-          && (resource.data.status == 'active'
-              || resource.data.owner_uid == request.auth.uid
-              || (isPropertyAdmin()
-                  && resource.data.status == 'pending_review'));
+      allow read: if resource.data.status == 'active'
+          || (signedIn()
+              && (resource.data.owner_uid == request.auth.uid
+                  || (isPropertyAdmin()
+                      && resource.data.status == 'pending_review')));
       allow create: if signedIn()
           && validPropertyListing(request.resource.data, request.auth.uid)
           && (!('view_count' in request.resource.data)
@@ -930,6 +937,48 @@ service cloud.firestore {
           && request.resource.data.created_at == resource.data.created_at;
       allow delete: if signedIn()
           && resource.data.owner_uid == request.auth.uid;
+
+      match /reviews/{reviewUid} {
+        function validCommunityPlaceReview(data) {
+          return data.keys().hasOnly([
+                'uid', 'display_name', 'rating', 'comment',
+                'created_at', 'updated_at'
+              ])
+              && data.keys().hasAll([
+                'uid', 'display_name', 'rating', 'comment',
+                'created_at', 'updated_at'
+              ])
+              && data.uid == reviewUid
+              && data.display_name is string
+              && data.display_name.size() > 0
+              && data.display_name.size() <= 120
+              && data.rating is int
+              && data.rating >= 1
+              && data.rating <= 5
+              && data.comment is string
+              && data.comment.size() <= 500
+              && data.created_at is timestamp
+              && data.updated_at is timestamp;
+        }
+
+        allow read: if signedIn()
+            && exists(/databases/$(database)/documents/community_places/$(placeId));
+        allow create: if signedIn()
+            && request.auth.uid == reviewUid
+            && exists(/databases/$(database)/documents/community_places/$(placeId))
+            && validCommunityPlaceReview(request.resource.data)
+            && request.resource.data.created_at == request.time
+            && request.resource.data.updated_at == request.time;
+        allow update: if signedIn()
+            && request.auth.uid == reviewUid
+            && exists(/databases/$(database)/documents/community_places/$(placeId))
+            && validCommunityPlaceReview(request.resource.data)
+            && request.resource.data.created_at == resource.data.created_at
+            && request.resource.data.updated_at == request.time;
+        allow delete: if signedIn()
+            && request.auth.uid == reviewUid
+            && exists(/databases/$(database)/documents/community_places/$(placeId));
+      }
     }
 
     match /public_routes/{routeId} {
@@ -1187,7 +1236,7 @@ service cloud.firestore {
           && request.resource.data.keys().hasOnly([
             'content_type', 'content_id', 'content_owner_uid', 'content_title',
             'content_description', 'reason', 'reported_by', 'created_at',
-            'status'
+            'status', 'parent_content_id', 'content_rating'
           ])
           && request.resource.data.keys().hasAll([
             'content_type', 'content_id', 'content_owner_uid', 'content_title',
@@ -1195,7 +1244,8 @@ service cloud.firestore {
             'status'
           ])
           && request.resource.data.content_type in [
-            'property_listing', 'lost_pet', 'community_place'
+            'property_listing', 'lost_pet', 'community_place',
+            'community_place_review'
           ]
           && request.resource.data.content_id is string
           && request.resource.data.content_id.matches('^[A-Za-z0-9_-]{1,128}$')
@@ -1208,9 +1258,21 @@ service cloud.firestore {
           && request.resource.data.content_title.size() <= 100
           && request.resource.data.content_description is string
           && request.resource.data.content_description.size() <= 1000
+          && (request.resource.data.content_type == 'community_place_review'
+              ? request.resource.data.keys().hasAll([
+                  'parent_content_id', 'content_rating'
+                ])
+                && request.resource.data.parent_content_id is string
+                && request.resource.data.parent_content_id.matches('^[A-Za-z0-9_-]{1,128}$')
+                && request.resource.data.content_rating is int
+                && request.resource.data.content_rating >= 1
+                && request.resource.data.content_rating <= 5
+              : !request.resource.data.keys().hasAny([
+                  'parent_content_id', 'content_rating'
+                ]))
           && request.resource.data.reason in [
             'Yanıltıcı veya yanlış bilgi', 'Uygunsuz içerik',
-            'Spam veya tekrar eden ilan', 'Başka bir sorun'
+            'Spam', 'Başka bir sorun'
           ]
           && request.resource.data.created_at is timestamp
           && request.resource.data.created_at == request.time
@@ -1230,7 +1292,7 @@ service cloud.firestore {
 
     match /explore_highlights/{highlightId} {
       function isExploreAdmin() {
-        return signedIn() && request.auth.token.admin == true;
+        return signedIn() && request.auth.token.get('admin', false) == true;
       }
 
       function validExploreHighlight(data, editorUid) {

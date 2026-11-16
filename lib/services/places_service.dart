@@ -1,15 +1,9 @@
-import 'dart:convert';
-
-import 'package:flutter/foundation.dart';
-import 'package:flutter/services.dart';
 import 'package:geolocator/geolocator.dart';
 import 'package:google_maps_flutter/google_maps_flutter.dart';
-import 'package:http/http.dart' as http;
+
+import 'google_maps_proxy_service.dart';
 
 class NavoraPlacesService {
-  static const _identityChannel = MethodChannel(
-    'navora/google_places_client_identity',
-  );
   static const _businessSearchTerms = [
     'kafe',
     'kahve',
@@ -41,52 +35,6 @@ class NavoraPlacesService {
     'metro',
   ];
 
-  static const String _defaultApiKey = String.fromEnvironment(
-    'GOOGLE_PLACES_API_KEY',
-    defaultValue: 'AIzaSyAgDEdDHf08ePqpkCJBTx0oaCzJetyhawg',
-  );
-  static const String _iosApiKey = String.fromEnvironment(
-    'GOOGLE_PLACES_IOS_API_KEY',
-    defaultValue: 'AIzaSyDvZADgjOCq0v3NvbG4X0iLv9WfSckbB_w',
-  );
-  static const String _iosBundleIdentifier = 'com.navora.app';
-  static String get apiKey =>
-      !kIsWeb &&
-          defaultTargetPlatform == TargetPlatform.iOS &&
-          _iosApiKey.isNotEmpty
-      ? _iosApiKey
-      : _defaultApiKey;
-
-  static final Future<Map<String, String>> _clientIdentityHeaders =
-      _loadClientIdentityHeaders();
-
-  static Future<Map<String, String>> get clientIdentityHeaders =>
-      _clientIdentityHeaders;
-
-  static Future<Map<String, String>> _loadClientIdentityHeaders() async {
-    if (kIsWeb) {
-      return const {};
-    }
-    if (defaultTargetPlatform == TargetPlatform.iOS) {
-      return const {'X-Ios-Bundle-Identifier': _iosBundleIdentifier};
-    }
-    if (defaultTargetPlatform != TargetPlatform.android) return const {};
-
-    final identity = await _identityChannel.invokeMapMethod<String, String>(
-      'getIdentity',
-    );
-    final packageName = identity?['packageName'];
-    final certificateSha1 = identity?['sha1'];
-    if (packageName == null || certificateSha1 == null) {
-      throw StateError('Android Places client identity is unavailable.');
-    }
-
-    return {
-      'X-Android-Package': packageName,
-      'X-Android-Cert': certificateSha1,
-    };
-  }
-
   static bool isBusinessQuery(String query) {
     final normalized = query.trim().toLowerCase();
     return _businessSearchTerms.any(normalized.contains);
@@ -97,56 +45,16 @@ class NavoraPlacesService {
     LatLng? location,
   }) async {
     final trimmedQuery = query.trim();
-    if (trimmedQuery.isEmpty || apiKey.isEmpty) return [];
+    if (trimmedQuery.isEmpty) return [];
 
-    final body = <String, dynamic>{
-      'textQuery': trimmedQuery,
-      'languageCode': 'tr',
-      'regionCode': 'TR',
-      'pageSize': 10,
-    };
-    if (location != null) {
-      body['locationBias'] = {
-        'circle': {
-          'center': {
-            'latitude': location.latitude,
-            'longitude': location.longitude,
-          },
-          'radius': 15000.0,
+    final data = await NavoraGoogleMapsProxyService.call('searchText', {
+      'query': trimmedQuery,
+      if (location != null)
+        'location': {
+          'latitude': location.latitude,
+          'longitude': location.longitude,
         },
-      };
-    }
-    final clientIdentityHeaders = await _clientIdentityHeaders;
-
-    final response = await http
-        .post(
-          Uri.parse('https://places.googleapis.com/v1/places:searchText'),
-          headers: {
-            ...clientIdentityHeaders,
-            'Content-Type': 'application/json',
-            'X-Goog-Api-Key': apiKey,
-            'X-Goog-FieldMask': [
-              'places.id',
-              'places.displayName',
-              'places.formattedAddress',
-              'places.location',
-              'places.types',
-              'places.primaryType',
-              'places.rating',
-              'places.userRatingCount',
-            ].join(','),
-          },
-          body: jsonEncode(body),
-        )
-        .timeout(const Duration(seconds: 8));
-
-    if (response.statusCode != 200) {
-      throw Exception(
-        'Places API HTTP ${response.statusCode}: ${response.body}',
-      );
-    }
-
-    final data = jsonDecode(response.body) as Map<String, dynamic>;
+    });
     final places = data['places'] as List<dynamic>? ?? const [];
     final results = places
         .map((rawPlace) {
@@ -237,72 +145,13 @@ class NavoraPlacesService {
     LatLng location, {
     double radiusMeters = 50,
   }) async {
-    if (apiKey.isEmpty) return null;
-
-    final clientIdentityHeaders = await _clientIdentityHeaders;
-    final response = await http
-        .post(
-          Uri.parse('https://places.googleapis.com/v1/places:searchNearby'),
-          headers: {
-            ...clientIdentityHeaders,
-            'Content-Type': 'application/json',
-            'X-Goog-Api-Key': apiKey,
-            'X-Goog-FieldMask': [
-              'places.id',
-              'places.displayName',
-              'places.formattedAddress',
-              'places.location',
-              'places.types',
-              'places.primaryType',
-              'places.rating',
-              'places.userRatingCount',
-            ].join(','),
-          },
-          body: jsonEncode({
-            'includedTypes': [
-              'store',
-              'restaurant',
-              'cafe',
-              'gas_station',
-              'hospital',
-              'pharmacy',
-              'park',
-              'tourist_attraction',
-              'shopping_mall',
-              'bank',
-              'school',
-              'lodging',
-              'museum',
-              'bakery',
-              'bar',
-              'bus_station',
-              'supermarket',
-              'convenience_store',
-            ],
-            'maxResultCount': 10,
-            'rankPreference': 'DISTANCE',
-            'languageCode': 'tr',
-            'regionCode': 'TR',
-            'locationRestriction': {
-              'circle': {
-                'center': {
-                  'latitude': location.latitude,
-                  'longitude': location.longitude,
-                },
-                'radius': radiusMeters,
-              },
-            },
-          }),
-        )
-        .timeout(const Duration(seconds: 8));
-
-    if (response.statusCode != 200) {
-      throw Exception(
-        'Places nearby search HTTP ${response.statusCode}: ${response.body}',
-      );
-    }
-
-    final data = jsonDecode(response.body) as Map<String, dynamic>;
+    final data = await NavoraGoogleMapsProxyService.call('searchNearby', {
+      'location': {
+        'latitude': location.latitude,
+        'longitude': location.longitude,
+      },
+      'radiusMeters': radiusMeters,
+    });
     final places = data['places'] as List<dynamic>? ?? const [];
     for (final rawPlace in places) {
       final place = rawPlace as Map<String, dynamic>;
@@ -342,53 +191,16 @@ class NavoraPlacesService {
     LatLng? location,
   }) async {
     final trimmedQuery = query.trim();
-    if (trimmedQuery.isEmpty || apiKey.isEmpty) return [];
+    if (trimmedQuery.isEmpty) return [];
 
-    final body = <String, dynamic>{
-      'input': trimmedQuery,
-      'languageCode': 'tr',
-      'includedRegionCodes': ['tr'],
-    };
-    if (location != null) {
-      body['locationBias'] = {
-        'circle': {
-          'center': {
-            'latitude': location.latitude,
-            'longitude': location.longitude,
-          },
-          'radius': 25000.0,
+    final data = await NavoraGoogleMapsProxyService.call('autocomplete', {
+      'query': trimmedQuery,
+      if (location != null)
+        'location': {
+          'latitude': location.latitude,
+          'longitude': location.longitude,
         },
-      };
-      body['origin'] = {
-        'latitude': location.latitude,
-        'longitude': location.longitude,
-      };
-    }
-    final clientIdentityHeaders = await _clientIdentityHeaders;
-
-    final response = await http
-        .post(
-          Uri.parse('https://places.googleapis.com/v1/places:autocomplete'),
-          headers: {
-            ...clientIdentityHeaders,
-            'Content-Type': 'application/json',
-            'X-Goog-Api-Key': apiKey,
-            'X-Goog-FieldMask': [
-              'suggestions.placePrediction.placeId',
-              'suggestions.placePrediction.text',
-              'suggestions.placePrediction.structuredFormat',
-              'suggestions.placePrediction.distanceMeters',
-            ].join(','),
-          },
-          body: jsonEncode(body),
-        )
-        .timeout(const Duration(seconds: 8));
-
-    if (response.statusCode != 200) {
-      throw Exception('Places autocomplete HTTP ${response.statusCode}');
-    }
-
-    final data = jsonDecode(response.body) as Map<String, dynamic>;
+    });
     final suggestions = data['suggestions'] as List<dynamic>? ?? const [];
     return suggestions
         .map((rawSuggestion) {
@@ -433,37 +245,11 @@ class NavoraPlacesService {
   }
 
   static Future<Map<String, dynamic>?> getPlaceDetails(String placeId) async {
-    if (placeId.isEmpty || apiKey.isEmpty) return null;
-    final clientIdentityHeaders = await _clientIdentityHeaders;
-    final response = await http
-        .get(
-          Uri.https('places.googleapis.com', '/v1/places/$placeId', {
-            'languageCode': 'tr',
-          }),
-          headers: {
-            ...clientIdentityHeaders,
-            'X-Goog-Api-Key': apiKey,
-            'X-Goog-FieldMask': [
-              'displayName',
-              'formattedAddress',
-              'location',
-              'types',
-              'primaryType',
-              'rating',
-              'userRatingCount',
-              'nationalPhoneNumber',
-              'websiteUri',
-              'regularOpeningHours.weekdayDescriptions',
-              'currentOpeningHours.openNow',
-            ].join(','),
-          },
-        )
-        .timeout(const Duration(seconds: 8));
-    if (response.statusCode != 200) {
-      throw Exception('Places details HTTP ${response.statusCode}');
-    }
+    if (placeId.isEmpty) return null;
 
-    final place = jsonDecode(response.body) as Map<String, dynamic>;
+    final place = await NavoraGoogleMapsProxyService.call('details', {
+      'placeId': placeId,
+    });
     final location = place['location'] as Map<String, dynamic>? ?? {};
     final latitude = (location['latitude'] as num?)?.toDouble();
     final longitude = (location['longitude'] as num?)?.toDouble();

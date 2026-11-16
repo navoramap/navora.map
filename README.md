@@ -13,7 +13,7 @@ flutter pub get
 flutter run
 ```
 
-The app uses the Firebase project configured in `lib/firebase_options.dart` and the Android/iOS platform configuration files. Restrict Google Maps, Places, and Routes API keys by app identity and API; do not treat mobile API keys as secrets. Supply optional service keys with Dart defines, for example `--dart-define=GOOGLE_PLACES_API_KEY=...` and `--dart-define=GOOGLE_ROUTES_API_KEY=...`. iOS Places requests can use a separate key restricted to the `com.navora.app` bundle ID via `--dart-define=GOOGLE_PLACES_IOS_API_KEY=...`; include that define when building the iOS app.
+The app uses the Firebase project configured in `lib/firebase_options.dart` and the Android/iOS platform configuration files. Native Maps SDK keys should be restricted to the app identity and the corresponding Maps SDK. Places and Routes REST calls use the App Check-enforced `proxyGoogleMaps` callable and a server-side key stored in Firebase Secret Manager. Before deploying the callable, set `GOOGLE_MAPS_SERVER_API_KEY` with `firebase functions:secrets:set GOOGLE_MAPS_SERVER_API_KEY`; restrict that key to Places API (New) and Routes API and configure suitable quotas and billing alerts. Do not pass this server key through Dart defines or commit it to source control.
 
 ## Tests
 
@@ -61,6 +61,10 @@ npm run migrate:rooms -- --project navoramapa --apply --backup-confirmed
 
 The apply mode uses one atomic batch per room, skips schema-v2 rooms and rooms with partial target data, and verifies migrated owner, salt, member IDs, message IDs, verifier, and document counts. It blocks expired rooms, short or malformed protected-room passwords, malformed fields/messages, invalid protection/member/location data, and rooms whose migration would exceed Firestore's 500-write batch limit. Blocked rooms need manual review/password reset. The script does not create backups or deploy security rules.
 
+## Property Listings
+
+Published property listings (`status: active`) are readable by signed-in and signed-out map visitors. Pending listings remain restricted to their owner and administrators. Only publish listing fields and photos intended for public viewing.
+
 Legacy `is_pro` and `plan` profile values are not trusted because older clients could write them. Treat existing accounts as Standard until a trusted billing backend verifies their subscription; remove or quarantine unverified legacy values before restoring Pro access.
 
 Room documents and listing documents expire after 24 hours. The scheduled `cleanupExpiredChatData` function runs hourly, recursively deleting expired rooms and their `messages`, `members`, and `private` subcollections, plus expired discovery listings. It also deletes general chat messages older than 30 days and user driving/route history after each record's `expires_at`. Deploy the function before relying on these retention periods.
@@ -92,7 +96,7 @@ firebase deploy --only functions:sendChatMessage,functions:reviewChatMessageRepo
 
 Android and iOS release builds send fatal Flutter/framework errors to Firebase Crashlytics. Debug builds do not collect reports. Verify Crashlytics is enabled in the Firebase console before release. iOS dSYM symbol upload and physical-device validation require macOS/Xcode.
 
-The production Firestore database `navoramapa/(default)` in `eur3` now has a managed backup schedule: weekly on Sunday (UTC), with 30-day retention. Managed backups can incur storage charges. The schedule is active, but no completed backup exists yet; do not migrate production room data or deploy Firestore rules until a backup has completed and its restorability has been verified. Firestore backups do not include Firebase Security Rules or TTL policies; keep rules and index definitions versioned separately.
+The production Firestore database `navoramapa/(default)` in `eur3` has a managed backup schedule: weekly on Sunday (UTC), with 30-day retention. Managed backups can incur storage charges. As of 2026-11-17, two backups were in `READY` state; restoreability has not yet been verified. Before any production migration or Firestore rules deployment, restore a backup to a separate database and verify the restored data. The room migration dry run on 2026-11-17 found no documents in `chat_rooms`, so no room migration writes were needed. Firestore backups do not include Firebase Security Rules or TTL policies; keep rules and index definitions versioned separately.
 
 ## Important Limitations
 

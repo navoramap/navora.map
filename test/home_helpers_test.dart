@@ -7,6 +7,17 @@ import 'package:navora_map/services/chat_room_service.dart';
 void main() {
   TestWidgetsFlutterBinding.ensureInitialized();
 
+  test('guest feature prompt asks the user to sign in or register', () {
+    expect(
+      navoraGuestActionPrompt(isSignedIn: false, action: 'Rota oluşturmak'),
+      'Rota oluşturmak için giriş yap veya kayıt ol.',
+    );
+    expect(
+      navoraGuestActionPrompt(isSignedIn: true, action: 'Rota oluşturmak'),
+      isNull,
+    );
+  });
+
   test('navigation duration switches to hours after 60 minutes', () {
     expect(navoraFormatNavigationDuration(59), '59 dk');
     expect(navoraFormatNavigationDuration(60), '1 sa');

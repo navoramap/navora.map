@@ -298,7 +298,7 @@ class _ChatMessageModerationPageState extends State<ChatMessageModerationPage> {
                 ),
                 const SizedBox(width: 8),
                 ChoiceChip(
-                  label: const Text('İlan ve mekân'),
+                  label: const Text('İlan, mekân ve yorum'),
                   selected: _selectedQueue == 1,
                   onSelected: (_) => _selectQueue(1),
                 ),
@@ -373,7 +373,7 @@ class _ChatMessageModerationPageState extends State<ChatMessageModerationPage> {
                         Text(
                           _selectedQueue == 0
                               ? 'Bekleyen sohbet şikayeti yok.'
-                              : 'Bekleyen ilan veya mekân şikayeti yok.',
+                              : 'Bekleyen ilan, mekân veya yorum şikayeti yok.',
                           style: const TextStyle(color: Colors.white70),
                         ),
                       ],
@@ -442,6 +442,7 @@ class _ChatMessageModerationPageState extends State<ChatMessageModerationPage> {
                                         'property_listing' => 'Emlak ilanı',
                                         'lost_pet' => 'Kayıp hayvan',
                                         'community_place' => 'Kayıtlı yer',
+                                        'community_place_review' => 'Mekân yorumu',
                                         _ => 'İçerik',
                                       }} • İçerik sahibi: ${data['content_owner_uid'] ?? '-'}'
                                     : '${data['message_type'] == 'public' ? 'Genel sohbet' : 'Oda: ${data['room_id'] ?? '-'}'}'
@@ -457,6 +458,19 @@ class _ChatMessageModerationPageState extends State<ChatMessageModerationPage> {
                                 const SizedBox(height: 4),
                                 Text(
                                   'Neden: ${data['reason']}',
+                                  style: const TextStyle(
+                                    color: Color(0xFFB8B8B8),
+                                    fontSize: 12,
+                                  ),
+                                ),
+                              ],
+                              if (isContentReport &&
+                                  data['content_type'] ==
+                                      'community_place_review' &&
+                                  data['content_rating'] is num) ...[
+                                const SizedBox(height: 4),
+                                Text(
+                                  'Puan: ${data['content_rating']}/5',
                                   style: const TextStyle(
                                     color: Color(0xFFB8B8B8),
                                     fontSize: 12,

@@ -36,22 +36,24 @@ import 'tabs/explore_page.dart';
 import 'my_property_listings_page.dart';
 import 'property_listing_moderation_page.dart';
 import 'chat_message_moderation_page.dart';
+import 'review_sheet_lifecycle.dart';
 import '../../services/places_service.dart';
 import '../../services/chat_room_service.dart';
 import '../../services/blocked_users_service.dart';
 import '../../services/property_listing_service.dart';
 import '../../services/app_notification_service.dart';
+import '../../services/google_maps_proxy_service.dart';
 import '../navora_loading_screen.dart';
 
+String? navoraGuestActionPrompt({
+  required bool isSignedIn,
+  required String action,
+}) {
+  if (isSignedIn) return null;
+  return '$action için giriş yap veya kayıt ol.';
+}
+
 class NavoraTrafficService {
-  static const String _googleRoutesApiKey = String.fromEnvironment(
-    'GOOGLE_ROUTES_API_KEY',
-  );
-
-  static String get googleRoutesApiKey => _googleRoutesApiKey.trim().isEmpty
-      ? NavoraPlacesService.apiKey
-      : _googleRoutesApiKey.trim();
-
   static Color? colorForSpeed(String speed) => switch (speed) {
     'SLOW' => const Color(0xFFFFC107),
     'TRAFFIC_JAM' => const Color(0xFFE53935),
@@ -100,6 +102,146 @@ class NavoraTrafficService {
     if (speeds.contains('TRAFFIC_JAM')) return 'Yoğun';
     if (speeds.contains('SLOW')) return 'Orta';
     return intervals.isEmpty ? 'Trafik bilgisi yok' : 'Açık';
+  }
+}
+
+class _CommunityPlaceReviewTile extends StatelessWidget {
+  final String displayName;
+  final int rating;
+  final String comment;
+  final bool isCurrentUserReview;
+  final VoidCallback? onEdit;
+  final VoidCallback? onDelete;
+  final VoidCallback? onReport;
+  final bool isBusy;
+
+  const _CommunityPlaceReviewTile({
+    required this.displayName,
+    required this.rating,
+    required this.comment,
+    this.isCurrentUserReview = false,
+    this.onEdit,
+    this.onDelete,
+    this.onReport,
+    this.isBusy = false,
+  });
+
+  @override
+  Widget build(BuildContext context) {
+    return Container(
+      width: double.infinity,
+      margin: const EdgeInsets.only(bottom: 10),
+      padding: const EdgeInsets.all(12),
+      decoration: BoxDecoration(
+        color: const Color(0xFF222321),
+        borderRadius: BorderRadius.circular(12),
+      ),
+      child: Stack(
+        children: [
+          Padding(
+            padding: EdgeInsets.only(
+              right: !isCurrentUserReview && onReport != null ? 40 : 0,
+            ),
+            child: Column(
+              crossAxisAlignment: CrossAxisAlignment.start,
+              children: [
+                Row(
+                  crossAxisAlignment: CrossAxisAlignment.center,
+                  children: [
+                    Expanded(
+                      child: Text(
+                        displayName,
+                        style: const TextStyle(
+                          color: Colors.white,
+                          fontWeight: FontWeight.w600,
+                        ),
+                      ),
+                    ),
+                    if (isCurrentUserReview && onEdit != null)
+                      TextButton.icon(
+                        onPressed: isBusy ? null : onEdit,
+                        style: TextButton.styleFrom(
+                          foregroundColor: const Color(0xFFFFC247),
+                          padding: const EdgeInsets.symmetric(
+                            horizontal: 8,
+                            vertical: 0,
+                          ),
+                          minimumSize: Size.zero,
+                          tapTargetSize: MaterialTapTargetSize.shrinkWrap,
+                        ),
+                        icon: const Icon(Icons.edit_rounded, size: 16),
+                        label: const Text('Düzenle'),
+                      ),
+                    if (isCurrentUserReview && onDelete != null)
+                      SizedBox(
+                        width: 36,
+                        height: 36,
+                        child: IconButton(
+                          onPressed: isBusy ? null : onDelete,
+                          tooltip: 'Yorumunu sil',
+                          padding: EdgeInsets.zero,
+                          constraints: const BoxConstraints.tightFor(
+                            width: 36,
+                            height: 36,
+                          ),
+                          color: Colors.redAccent,
+                          icon: const Icon(
+                            Icons.delete_outline_rounded,
+                            size: 19,
+                          ),
+                        ),
+                      ),
+                  ],
+                ),
+                const SizedBox(height: 4),
+                Row(
+                  children: List.generate(
+                    5,
+                    (index) => Icon(
+                      index < rating
+                          ? Icons.star_rounded
+                          : Icons.star_outline_rounded,
+                      color: const Color(0xFFFFC247),
+                      size: 17,
+                    ),
+                  ),
+                ),
+                if (comment.isNotEmpty) ...[
+                  const SizedBox(height: 6),
+                  Text(
+                    comment,
+                    style: const TextStyle(color: Colors.white70, height: 1.35),
+                  ),
+                ],
+              ],
+            ),
+          ),
+          if (!isCurrentUserReview && onReport != null)
+            Positioned(
+              top: 0,
+              right: 0,
+              child: SizedBox(
+                width: 36,
+                height: 36,
+                child: IconButton(
+                  onPressed: onReport,
+                  tooltip: 'Yorumu şikayet et',
+                  padding: EdgeInsets.zero,
+                  constraints: const BoxConstraints.tightFor(
+                    width: 36,
+                    height: 36,
+                  ),
+                  icon: const Icon(
+                    Icons.flag_outlined,
+                    color: Colors.white60,
+                    size: 17,
+                  ),
+                ),
+              ),
+            ),
+        ],
+      ),
+    );
   }
 }
 
@@ -973,6 +1115,7 @@ class _HomePageState extends State<HomePage> with WidgetsBindingObserver {
     _loadLocationPermissionState();
     _loadProfileData();
     _loadMapPreferences();
+    _subscribeToMapLayers();
     final currentUser = FirebaseAuth.instance.currentUser;
     if (currentUser != null) {
       _subscribeToAiChats(currentUser.uid);
@@ -1012,10 +1155,23 @@ class _HomePageState extends State<HomePage> with WidgetsBindingObserver {
   }
 
   void _selectMainTab(int index) {
+    if (index == 2 && !_requireSignInForAction('Navora AI kullanmak')) {
+      return;
+    }
     setState(() => _selectedIndex = index);
     if (index == 1 && !_isMapLoaded) {
       _scheduleMapLoadingFallback(const Duration(seconds: 6));
     }
+  }
+
+  bool _requireSignInForAction(String action) {
+    final prompt = navoraGuestActionPrompt(
+      isSignedIn: FirebaseAuth.instance.currentUser != null,
+      action: action,
+    );
+    if (prompt == null) return true;
+    _showTrackingMessage(prompt);
+    return false;
   }
 
   List<Map<String, dynamic>> get _visiblePublicFeedMessages =>
@@ -1302,23 +1458,17 @@ class _HomePageState extends State<HomePage> with WidgetsBindingObserver {
 
   void _subscribeToMapLayers() {
     final userId = FirebaseAuth.instance.currentUser?.uid;
-    if (userId == null) {
-      setState(() {
-        _propertyListingsError = 'İlanları görmek için giriş yapmalısın.';
-        _lostPetReportsError =
-            'Hayvan ilanlarını görmek için giriş yapmalısın.';
-      });
-      return;
-    }
-
     setState(() {
       _isPropertyListingsLoading = true;
       _propertyListingsError = null;
-      _isLoadingLostPetReports = true;
-      _lostPetReportsError = null;
+      _isLoadingLostPetReports = userId != null;
+      _lostPetReportsError = userId == null
+          ? 'Hayvan ilanlarını görmek için giriş yapmalısın.'
+          : null;
       _loadedPetLayerCollections.clear();
     });
 
+    _mapPropertyListingsSubscription?.cancel();
     _mapPropertyListingsSubscription = FirebaseFirestore.instance
         .collection('property_listings')
         .where('status', isEqualTo: 'active')
@@ -1367,6 +1517,7 @@ class _HomePageState extends State<HomePage> with WidgetsBindingObserver {
           },
         );
 
+    if (userId == null) return;
     _subscribeToPetMapLayer('lost_pet_reports');
     _subscribeToPetMapLayer('pet_adoption_listings');
   }
@@ -1989,9 +2140,11 @@ class _HomePageState extends State<HomePage> with WidgetsBindingObserver {
 
   void _showPropertyListing(Map<String, dynamic> listing) {
     final listingId = listing['id']?.toString();
+    final currentUser = FirebaseAuth.instance.currentUser;
     if (listingId != null &&
         listing['status'] == 'active' &&
-        listing['owner_uid'] != FirebaseAuth.instance.currentUser?.uid) {
+        currentUser != null &&
+        listing['owner_uid'] != currentUser.uid) {
       unawaited(_recordPropertyListingView(listingId));
     }
 
@@ -2379,7 +2532,10 @@ class _HomePageState extends State<HomePage> with WidgetsBindingObserver {
     if (text.isEmpty) return;
     final user = FirebaseAuth.instance.currentUser;
     if (user == null) {
-      _showTrackingMessage('Sohbete katılmak için giriş yapmalısınız.');
+      _showTrackingMessage(
+        'Sohbete katılmak için giriş yapmalısınız.',
+        keepAboveKeyboard: true,
+      );
       return;
     }
 
@@ -2486,6 +2642,8 @@ class _HomePageState extends State<HomePage> with WidgetsBindingObserver {
     required String ownerUid,
     required String title,
     required String description,
+    String? parentContentId,
+    int? contentRating,
   }) async {
     final user = FirebaseAuth.instance.currentUser;
     if (user == null) {
@@ -2494,7 +2652,12 @@ class _HomePageState extends State<HomePage> with WidgetsBindingObserver {
     }
     if (contentId.isEmpty ||
         ownerUid.isEmpty ||
-        (contentType != 'lost_pet' && title.trim().isEmpty)) {
+        (contentType != 'lost_pet' && title.trim().isEmpty) ||
+        (contentType == 'community_place_review' &&
+            ((parentContentId?.isNotEmpty ?? false) == false ||
+                contentRating == null ||
+                contentRating < 1 ||
+                contentRating > 5))) {
       _showTrackingMessage('İçerik şikayet edilemedi. Tekrar deneyin.');
       return;
     }
@@ -2513,7 +2676,7 @@ class _HomePageState extends State<HomePage> with WidgetsBindingObserver {
             for (final option in const [
               'Yanıltıcı veya yanlış bilgi',
               'Uygunsuz içerik',
-              'Spam veya tekrar eden ilan',
+              'Spam',
               'Başka bir sorun',
             ])
               ListTile(
@@ -2528,7 +2691,7 @@ class _HomePageState extends State<HomePage> with WidgetsBindingObserver {
     if (reason == null || !mounted) return;
 
     try {
-      await FirebaseFirestore.instance.collection('content_reports').add({
+      final reportData = <String, dynamic>{
         'content_type': contentType,
         'content_id': contentId,
         'content_owner_uid': ownerUid,
@@ -2538,7 +2701,14 @@ class _HomePageState extends State<HomePage> with WidgetsBindingObserver {
         'reported_by': user.uid,
         'created_at': FieldValue.serverTimestamp(),
         'status': 'open',
-      });
+      };
+      if (contentType == 'community_place_review') {
+        reportData['parent_content_id'] = parentContentId;
+        reportData['content_rating'] = contentRating;
+      }
+      await FirebaseFirestore.instance
+          .collection('content_reports')
+          .add(reportData);
       if (mounted) {
         _showTrackingMessage('Şikayetin yöneticilere iletildi.');
       }
@@ -2914,6 +3084,13 @@ class _HomePageState extends State<HomePage> with WidgetsBindingObserver {
 
     var didChoosePlaceAction = false;
     final placeDetails = _selectedPlaceDetails ?? const <String, dynamic>{};
+    final communityPlaceId = placeDetails['source'] == 'community_place'
+        ? placeDetails['id']?.toString()
+        : null;
+    final communityPlaceName =
+        placeDetails['name']?.toString() ??
+        _selectedDestinationName ??
+        'Kayıtlı yer';
     final communityPhotoUrls = placeDetails['source'] == 'community_place'
         ? ((placeDetails['photoUrls'] as List?)?.whereType<String>().toList() ??
               [
@@ -3134,6 +3311,84 @@ class _HomePageState extends State<HomePage> with WidgetsBindingObserver {
                   ],
                 ),
               ),
+              if (communityPlaceId != null) ...[
+                const SizedBox(height: 12),
+                StreamBuilder<QuerySnapshot<Map<String, dynamic>>>(
+                  stream: FirebaseFirestore.instance
+                      .collection('community_places')
+                      .doc(communityPlaceId)
+                      .collection('reviews')
+                      .snapshots(),
+                  builder: (context, snapshot) {
+                    if (snapshot.hasError) {
+                      debugPrint(
+                        'Mekân değerlendirmeleri alınamadı: ${snapshot.error}',
+                      );
+                    }
+                    final reviews = snapshot.data?.docs ?? const [];
+                    final ratings = reviews
+                        .map((review) => review.data()['rating'])
+                        .whereType<num>()
+                        .toList();
+                    final average = ratings.isEmpty
+                        ? null
+                        : ratings.reduce((sum, rating) => sum + rating) /
+                              ratings.length;
+                    return Container(
+                      width: double.infinity,
+                      padding: const EdgeInsets.fromLTRB(12, 10, 8, 10),
+                      decoration: BoxDecoration(
+                        color: const Color(0xFF101010),
+                        borderRadius: BorderRadius.circular(14),
+                      ),
+                      child: Row(
+                        children: [
+                          if (average != null) ...[
+                            const Icon(
+                              Icons.star_rounded,
+                              color: Color(0xFFFFC247),
+                              size: 20,
+                            ),
+                            const SizedBox(width: 4),
+                            Text(
+                              average.toStringAsFixed(1),
+                              style: const TextStyle(
+                                color: Colors.white,
+                                fontWeight: FontWeight.w700,
+                              ),
+                            ),
+                            const SizedBox(width: 5),
+                            Text(
+                              '(${ratings.length})',
+                              style: const TextStyle(
+                                color: Colors.white60,
+                                fontSize: 12,
+                              ),
+                            ),
+                          ] else
+                            const Expanded(
+                              child: Text(
+                                'Henüz değerlendirme yok',
+                                style: TextStyle(
+                                  color: Colors.white70,
+                                  fontSize: 13,
+                                ),
+                              ),
+                            ),
+                          const Spacer(),
+                          TextButton(
+                            onPressed: () => _showCommunityPlaceReviews(
+                              communityPlaceId,
+                              communityPlaceName,
+                            ),
+                            child: const Text('Yorumlar ve puan ver'),
+                          ),
+                        ],
+                      ),
+                    );
+                  },
+                ),
+              ],
               if (ratingText != null || isOpenNow != null) ...[
                 const SizedBox(height: 10),
                 Row(
@@ -3317,6 +3572,494 @@ class _HomePageState extends State<HomePage> with WidgetsBindingObserver {
         _searchSuggestions = [];
         _searchController.clear();
       });
+    }
+  }
+
+  Future<void> _showCommunityPlaceReviews(
+    String placeId,
+    String placeName,
+  ) async {
+    final user = FirebaseAuth.instance.currentUser;
+    if (user == null) {
+      AppNotificationService.show('Yorum yapmak için giriş yapmalısın.');
+      return;
+    }
+
+    final reviewReference = FirebaseFirestore.instance
+        .collection('community_places')
+        .doc(placeId)
+        .collection('reviews');
+    final reviewStream = reviewReference.snapshots();
+    final commentController = TextEditingController();
+    var selectedRating = 0;
+    var isSubmitting = false;
+    var didLoadUserReview = false;
+    var isSchedulingUserReviewLoad = false;
+    ModalRoute<void>? reviewRoute;
+
+    try {
+      await showModalBottomSheet<void>(
+        context: context,
+        useRootNavigator: true,
+        isScrollControlled: true,
+        backgroundColor: const Color(0xFF171717),
+        shape: const RoundedRectangleBorder(
+          borderRadius: BorderRadius.vertical(top: Radius.circular(24)),
+        ),
+        builder: (sheetContext) {
+          reviewRoute = ModalRoute.of<void>(sheetContext);
+          return StatefulBuilder(
+            builder: (context, setSheetState) =>
+                StreamBuilder<QuerySnapshot<Map<String, dynamic>>>(
+                  stream: reviewStream,
+                  builder: (context, snapshot) {
+                    if (snapshot.hasError) {
+                      debugPrint(
+                        'Mekân yorumları alınamadı: ${snapshot.error}',
+                      );
+                    }
+                    final error = snapshot.error;
+                    final loadErrorMessage =
+                        error is FirebaseException &&
+                            error.code == 'permission-denied'
+                        ? 'Yorumlara erişim izni yok. Firestore kurallarını deploy edin.'
+                        : 'Yorumlar şu anda yüklenemedi.';
+                    final reviews = snapshot.data?.docs.toList() ?? [];
+                    if (!didLoadUserReview &&
+                        !isSchedulingUserReviewLoad &&
+                        snapshot.hasData) {
+                      isSchedulingUserReviewLoad = true;
+                      WidgetsBinding.instance.addPostFrameCallback((_) {
+                        if (!sheetContext.mounted || didLoadUserReview) return;
+                        didLoadUserReview = true;
+                        for (final review in reviews) {
+                          if (review.id != user.uid) continue;
+                          final data = review.data();
+                          setSheetState(() {
+                            selectedRating =
+                                (data['rating'] as num?)?.toInt() ?? 0;
+                            commentController.text =
+                                data['comment']?.toString() ?? '';
+                          });
+                          break;
+                        }
+                      });
+                    }
+                    final ratings = reviews
+                        .map((review) => review.data()['rating'])
+                        .whereType<num>()
+                        .toList();
+                    final average = ratings.isEmpty
+                        ? null
+                        : ratings.reduce((sum, rating) => sum + rating) /
+                              ratings.length;
+                    reviews.sort((first, second) {
+                      final firstDate =
+                          first.data()['updated_at'] as Timestamp?;
+                      final secondDate =
+                          second.data()['updated_at'] as Timestamp?;
+                      return (secondDate?.millisecondsSinceEpoch ?? 0)
+                          .compareTo(firstDate?.millisecondsSinceEpoch ?? 0);
+                    });
+
+                    Future<void> deleteReview(
+                      QueryDocumentSnapshot<Map<String, dynamic>> review,
+                    ) async {
+                      final shouldDelete = await showDialog<bool>(
+                        context: context,
+                        builder: (dialogContext) => AlertDialog(
+                          title: const Text('Yorumun silinsin mi?'),
+                          content: const Text(
+                            'Puanın ve yorumun kalıcı olarak silinecek.',
+                          ),
+                          actions: [
+                            TextButton(
+                              onPressed: () =>
+                                  Navigator.pop(dialogContext, false),
+                              child: const Text('Vazgeç'),
+                            ),
+                            FilledButton(
+                              onPressed: () =>
+                                  Navigator.pop(dialogContext, true),
+                              style: FilledButton.styleFrom(
+                                backgroundColor: Colors.redAccent,
+                              ),
+                              child: const Text('Yorumu sil'),
+                            ),
+                          ],
+                        ),
+                      );
+                      if (shouldDelete != true || !sheetContext.mounted) return;
+
+                      setSheetState(() => isSubmitting = true);
+                      try {
+                        await review.reference.delete();
+                        if (!sheetContext.mounted) return;
+                        setSheetState(() {
+                          isSubmitting = false;
+                          selectedRating = 0;
+                          commentController.clear();
+                        });
+                        AppNotificationService.show('Yorumun silindi.');
+                      } catch (error, stackTrace) {
+                        debugPrint(
+                          'Mekân yorumu silinemedi: $error\n$stackTrace',
+                        );
+                        AppNotificationService.show(
+                          'Yorum silinemedi. Tekrar deneyin.',
+                        );
+                        if (sheetContext.mounted) {
+                          setSheetState(() => isSubmitting = false);
+                        }
+                      }
+                    }
+
+                    return SafeArea(
+                      child: SizedBox(
+                        height: MediaQuery.sizeOf(context).height * 0.84,
+                        child: Column(
+                          children: [
+                            Padding(
+                              padding: const EdgeInsets.fromLTRB(20, 16, 12, 8),
+                              child: Row(
+                                children: [
+                                  const Expanded(
+                                    child: Text(
+                                      'Mekân yorumları',
+                                      style: TextStyle(
+                                        color: Colors.white,
+                                        fontSize: 20,
+                                        fontWeight: FontWeight.w700,
+                                      ),
+                                    ),
+                                  ),
+                                  IconButton(
+                                    tooltip: 'Kapat',
+                                    onPressed: () =>
+                                        Navigator.pop(sheetContext),
+                                    icon: const Icon(
+                                      Icons.close_rounded,
+                                      color: Colors.white70,
+                                    ),
+                                  ),
+                                ],
+                              ),
+                            ),
+                            Expanded(
+                              child: ListView(
+                                padding: const EdgeInsets.fromLTRB(
+                                  20,
+                                  0,
+                                  20,
+                                  20,
+                                ),
+                                children: [
+                                  if (snapshot.hasError)
+                                    Text(
+                                      loadErrorMessage,
+                                      style: const TextStyle(
+                                        color: Colors.redAccent,
+                                      ),
+                                    )
+                                  else ...[
+                                    Row(
+                                      children: [
+                                        const Icon(
+                                          Icons.star_rounded,
+                                          color: Color(0xFFFFC247),
+                                          size: 24,
+                                        ),
+                                        const SizedBox(width: 6),
+                                        Text(
+                                          average?.toStringAsFixed(1) ?? '—',
+                                          style: const TextStyle(
+                                            color: Colors.white,
+                                            fontSize: 20,
+                                            fontWeight: FontWeight.w700,
+                                          ),
+                                        ),
+                                        const SizedBox(width: 8),
+                                        Text(
+                                          '${ratings.length} değerlendirme',
+                                          style: const TextStyle(
+                                            color: Colors.white60,
+                                          ),
+                                        ),
+                                      ],
+                                    ),
+                                    const SizedBox(height: 20),
+                                    const Text(
+                                      'Puanın',
+                                      style: TextStyle(
+                                        color: Colors.white,
+                                        fontWeight: FontWeight.w600,
+                                      ),
+                                    ),
+                                    const SizedBox(height: 6),
+                                    Row(
+                                      children: List.generate(
+                                        5,
+                                        (index) => IconButton(
+                                          tooltip: '${index + 1} yıldız',
+                                          visualDensity: VisualDensity.compact,
+                                          onPressed: isSubmitting
+                                              ? null
+                                              : () => setSheetState(
+                                                  () => selectedRating =
+                                                      index + 1,
+                                                ),
+                                          icon: Icon(
+                                            index < selectedRating
+                                                ? Icons.star_rounded
+                                                : Icons.star_outline_rounded,
+                                            color: const Color(0xFFFFC247),
+                                            size: 32,
+                                          ),
+                                        ),
+                                      ),
+                                    ),
+                                    const SizedBox(height: 8),
+                                    TextField(
+                                      controller: commentController,
+                                      minLines: 2,
+                                      maxLines: 4,
+                                      maxLength: 500,
+                                      enabled: !isSubmitting,
+                                      style: const TextStyle(
+                                        color: Colors.white,
+                                      ),
+                                      decoration: InputDecoration(
+                                        hintText: 'Bu yer hakkındaki yorumun',
+                                        hintStyle: const TextStyle(
+                                          color: Colors.white54,
+                                        ),
+                                        filled: true,
+                                        fillColor: const Color(0xFF222321),
+                                        border: OutlineInputBorder(
+                                          borderRadius: BorderRadius.circular(
+                                            12,
+                                          ),
+                                          borderSide: BorderSide.none,
+                                        ),
+                                      ),
+                                    ),
+                                    const SizedBox(height: 8),
+                                    SizedBox(
+                                      width: double.infinity,
+                                      child: FilledButton(
+                                        onPressed: isSubmitting
+                                            ? null
+                                            : () async {
+                                                final comment =
+                                                    commentController.text
+                                                        .trim();
+                                                if (selectedRating == 0) {
+                                                  AppNotificationService.show(
+                                                    'Lütfen 1 ile 5 yıldız arasında puan ver.',
+                                                  );
+                                                  return;
+                                                }
+                                                if (comment.length > 500) {
+                                                  AppNotificationService.show(
+                                                    'Yorum en fazla 500 karakter olabilir.',
+                                                  );
+                                                  return;
+                                                }
+                                                setSheetState(
+                                                  () => isSubmitting = true,
+                                                );
+                                                try {
+                                                  final rawDisplayName =
+                                                      _userName
+                                                          .trim()
+                                                          .isNotEmpty
+                                                      ? _userName.trim()
+                                                      : (user.displayName
+                                                                    ?.trim()
+                                                                    .isNotEmpty ==
+                                                                true
+                                                            ? user.displayName!
+                                                                  .trim()
+                                                            : 'Navora kullanıcısı');
+                                                  final displayName =
+                                                      rawDisplayName.length >
+                                                          120
+                                                      ? rawDisplayName
+                                                            .substring(0, 120)
+                                                      : rawDisplayName;
+                                                  final existingUserReview =
+                                                      reviews.any(
+                                                        (review) =>
+                                                            review.id ==
+                                                            user.uid,
+                                                      );
+
+                                                  if (existingUserReview) {
+                                                    await reviewReference
+                                                        .doc(user.uid)
+                                                        .update({
+                                                          'display_name':
+                                                              displayName,
+                                                          'rating':
+                                                              selectedRating,
+                                                          'comment': comment,
+                                                          'updated_at':
+                                                              FieldValue.serverTimestamp(),
+                                                        });
+                                                    if (sheetContext.mounted) {
+                                                      setSheetState(
+                                                        () => isSubmitting =
+                                                            false,
+                                                      );
+                                                    }
+                                                    AppNotificationService.show(
+                                                      'Yorumunuz güncellendi.',
+                                                    );
+                                                  } else {
+                                                    await reviewReference
+                                                        .doc(user.uid)
+                                                        .set({
+                                                          'uid': user.uid,
+                                                          'display_name':
+                                                              displayName,
+                                                          'rating':
+                                                              selectedRating,
+                                                          'comment': comment,
+                                                          'created_at':
+                                                              FieldValue.serverTimestamp(),
+                                                          'updated_at':
+                                                              FieldValue.serverTimestamp(),
+                                                        });
+                                                    if (sheetContext.mounted) {
+                                                      Navigator.pop(
+                                                        sheetContext,
+                                                      );
+                                                    }
+                                                    AppNotificationService.show(
+                                                      'Değerlendirmen kaydedildi.',
+                                                    );
+                                                  }
+                                                } catch (error, stackTrace) {
+                                                  debugPrint(
+                                                    'Mekân değerlendirmesi kaydedilemedi: '
+                                                    '$error\n$stackTrace',
+                                                  );
+                                                  AppNotificationService.show(
+                                                    'Değerlendirme kaydedilemedi. Tekrar dene.',
+                                                  );
+                                                  if (sheetContext.mounted) {
+                                                    setSheetState(
+                                                      () =>
+                                                          isSubmitting = false,
+                                                    );
+                                                  }
+                                                }
+                                              },
+                                        child: Text(
+                                          isSubmitting
+                                              ? 'Kaydediliyor...'
+                                              : reviews.any(
+                                                  (review) =>
+                                                      review.id == user.uid,
+                                                )
+                                              ? 'Yorumu güncelle'
+                                              : 'Puanı ve yorumu gönder',
+                                        ),
+                                      ),
+                                    ),
+                                    const SizedBox(height: 24),
+                                    Text(
+                                      'Yorumlar (${reviews.length})',
+                                      style: const TextStyle(
+                                        color: Colors.white,
+                                        fontSize: 16,
+                                        fontWeight: FontWeight.w700,
+                                      ),
+                                    ),
+                                    const SizedBox(height: 10),
+                                    if (reviews.isEmpty)
+                                      const Text(
+                                        'İlk yorumu sen yaz.',
+                                        style: TextStyle(color: Colors.white60),
+                                      ),
+                                    for (final review in reviews)
+                                      _CommunityPlaceReviewTile(
+                                        displayName:
+                                            review
+                                                .data()['display_name']
+                                                ?.toString() ??
+                                            'Navora kullanıcısı',
+                                        rating:
+                                            (review.data()['rating'] as num?)
+                                                ?.toInt() ??
+                                            0,
+                                        comment:
+                                            review
+                                                .data()['comment']
+                                                ?.toString() ??
+                                            '',
+                                        isCurrentUserReview:
+                                            review.id == user.uid,
+                                        isBusy: isSubmitting,
+                                        onReport: review.id == user.uid
+                                            ? null
+                                            : () {
+                                                final data = review.data();
+                                                _reportCommunityContent(
+                                                  contentType:
+                                                      'community_place_review',
+                                                  contentId: review.id,
+                                                  parentContentId: placeId,
+                                                  contentRating:
+                                                      (data['rating'] as num?)
+                                                          ?.toInt(),
+                                                  ownerUid:
+                                                      data['uid']?.toString() ??
+                                                      review.id,
+                                                  title: placeName,
+                                                  description:
+                                                      data['comment']
+                                                          ?.toString() ??
+                                                      '',
+                                                );
+                                              },
+                                        onDelete: review.id == user.uid
+                                            ? () => deleteReview(review)
+                                            : null,
+                                        onEdit: review.id == user.uid
+                                            ? () {
+                                                final data = review.data();
+                                                setSheetState(() {
+                                                  selectedRating =
+                                                      (data['rating'] as num?)
+                                                          ?.toInt() ??
+                                                      0;
+                                                  commentController.text =
+                                                      data['comment']
+                                                          ?.toString() ??
+                                                      '';
+                                                });
+                                              }
+                                            : null,
+                                      ),
+                                  ],
+                                ],
+                              ),
+                            ),
+                          ],
+                        ),
+                      ),
+                    );
+                  },
+                ),
+          );
+        },
+      );
+    } finally {
+      await disposeControllerAfterRouteCompletes(
+        controller: commentController,
+        route: reviewRoute,
+      );
     }
   }
 
@@ -5090,9 +5833,11 @@ out center tags;
       );
     } catch (error) {
       debugPrint('Yol rotası alınamadı: $error');
-      _showTrackingMessage(
-        'Google Routes kullanılamadı. API anahtarını, Routes API erişimini ve faturalandırmayı kontrol edin.',
-      );
+      final message =
+          error is FirebaseFunctionsException && error.code == 'unauthenticated'
+          ? 'Uygulama doğrulanamadı. Firebase App Check ayarlarını ve bu cihazın debug tokenını kontrol edin.'
+          : 'Google Routes kullanılamadı. API anahtarını, Routes API erişimini ve faturalandırmayı kontrol edin.';
+      _showTrackingMessage(message);
       _isOpeningDirections = false;
       return;
     }
@@ -5587,9 +6332,6 @@ out center tags;
     String vehicle = 'Araba',
     bool includeAlternativeRoutes = false,
   }) async {
-    if (NavoraTrafficService.googleRoutesApiKey.isEmpty) {
-      throw StateError('Google Routes API anahtarı tanımlanmamış.');
-    }
     return _fetchGoogleRoadRoute(
       start,
       destination,
@@ -5610,61 +6352,15 @@ out center tags;
       _ => 'DRIVE',
     };
     final includeTraffic = travelMode == 'DRIVE';
-    final fieldMask = <String>[
-      'routes.distanceMeters',
-      'routes.duration',
-      'routes.polyline.geoJsonLinestring',
-      'routes.legs.steps.distanceMeters',
-      'routes.legs.steps.navigationInstruction',
-      'routes.legs.steps.startLocation',
-      if (includeTraffic) 'routes.travelAdvisory.speedReadingIntervals',
-    ].join(',');
-    final identityHeaders = await NavoraPlacesService.clientIdentityHeaders;
-    final response = await http
-        .post(
-          Uri.parse(
-            'https://routes.googleapis.com/directions/v2:computeRoutes',
-          ),
-          headers: {
-            ...identityHeaders,
-            'Content-Type': 'application/json',
-            'X-Goog-Api-Key': NavoraTrafficService.googleRoutesApiKey,
-            'X-Goog-FieldMask': fieldMask,
-          },
-          body: jsonEncode({
-            'origin': {
-              'location': {
-                'latLng': {
-                  'latitude': start.latitude,
-                  'longitude': start.longitude,
-                },
-              },
-            },
-            'destination': {
-              'location': {
-                'latLng': {
-                  'latitude': destination.latitude,
-                  'longitude': destination.longitude,
-                },
-              },
-            },
-            'travelMode': travelMode,
-            if (includeTraffic && includeAlternativeRoutes)
-              'computeAlternativeRoutes': true,
-            'polylineEncoding': 'GEO_JSON_LINESTRING',
-            'polylineQuality': 'HIGH_QUALITY',
-            if (includeTraffic) ...{
-              'routingPreference': 'TRAFFIC_AWARE_OPTIMAL',
-              'extraComputations': ['TRAFFIC_ON_POLYLINE'],
-            },
-          }),
-        )
-        .timeout(const Duration(seconds: 20));
-    if (response.statusCode != 200) {
-      throw Exception('Google Routes API HTTP ${response.statusCode}');
-    }
-
-    final data = jsonDecode(response.body) as Map<String, dynamic>;
+    final data = await NavoraGoogleMapsProxyService.call('computeRoutes', {
+      'origin': {'latitude': start.latitude, 'longitude': start.longitude},
+      'destination': {
+        'latitude': destination.latitude,
+        'longitude': destination.longitude,
+      },
+      'travelMode': travelMode,
+      'includeAlternativeRoutes': includeTraffic && includeAlternativeRoutes,
+    });
     final routes = data['routes'] as List<dynamic>?;
     if (routes == null || routes.isEmpty) {
       throw Exception('Google Routes rota döndürmedi');
@@ -6122,9 +6818,7 @@ out center tags;
           child: Container(
             height: 38,
             decoration: BoxDecoration(
-              color: isSelected
-                  ? const Color(0x33FF7A00)
-                  : Colors.transparent,
+              color: isSelected ? const Color(0x33FF7A00) : Colors.transparent,
               borderRadius: BorderRadius.circular(14),
             ),
             child: Row(
@@ -6133,9 +6827,7 @@ out center tags;
                 Icon(
                   icon,
                   size: 18,
-                  color: isSelected
-                      ? const Color(0xFFFF9A3D)
-                      : Colors.white70,
+                  color: isSelected ? const Color(0xFFFF9A3D) : Colors.white70,
                 ),
                 const SizedBox(width: 7),
                 Text(
@@ -6625,8 +7317,6 @@ out center tags;
           },
         );
 
-    _subscribeToMapLayers();
-
     _drivingHistorySubscription = userReference
         .collection('driving_history')
         .snapshots()
@@ -6969,443 +7659,427 @@ out center tags;
     final mapTopInset = _selectedIndex == 1
         ? MediaQuery.viewPaddingOf(context).top
         : 0.0;
-    final snackBarBottomInset =
-        bottomSafeInset +
-        (_isNavigationActive && _selectedIndex == 1
-            ? _navigationDockHeight
-            : _bottomNavigationBarHeight) +
-        _bottomNavigationGap +
-        12;
     final mapBottomControlsInset = _isNavigationActive
         ? _navigationDockHeight
         : _bottomNavigationBarHeight;
 
-    return Theme(
-      data: Theme.of(context).copyWith(
-        scaffoldBackgroundColor: const Color(0xFF111111),
-        snackBarTheme: Theme.of(context).snackBarTheme.copyWith(
-          behavior: SnackBarBehavior.floating,
-          insetPadding: EdgeInsets.fromLTRB(16, 0, 16, snackBarBottomInset),
-        ),
-      ),
-      child: Scaffold(
-        resizeToAvoidBottomInset: false,
-        body: SafeArea(
-          top: _selectedIndex != 1,
-          bottom: false,
-          child: Stack(
-            fit: StackFit.expand,
-            children: [
-              IndexedStack(
-                index: _selectedIndex,
-                children: [
-                  _buildExplorePage(),
-                  _buildMapPage(),
-                  _buildAiPage(),
-                  _buildChatPage(),
-                  _buildProfilePage(),
-                ],
+    return Scaffold(
+      backgroundColor: const Color(0xFF111111),
+      resizeToAvoidBottomInset: false,
+      body: SafeArea(
+        top: _selectedIndex != 1,
+        bottom: false,
+        child: Stack(
+          fit: StackFit.expand,
+          children: [
+            IndexedStack(
+              index: _selectedIndex,
+              children: [
+                _buildExplorePage(),
+                _buildMapPage(),
+                _buildAiPage(),
+                _buildChatPage(),
+                _buildProfilePage(),
+              ],
+            ),
+            if (_selectedIndex == 1 &&
+                !_isNavigationActive &&
+                _isLostPetMapActive)
+              Positioned(
+                top: mapTopInset + 10,
+                left: 16,
+                right: 16,
+                child: _buildLostPetMapToolbar(),
               ),
-              if (_selectedIndex == 1 &&
-                  !_isNavigationActive &&
-                  _isLostPetMapActive)
-                Positioned(
-                  top: mapTopInset + 10,
-                  left: 16,
-                  right: 16,
-                  child: _buildLostPetMapToolbar(),
-                ),
-              if (_selectedIndex == 1 &&
-                  !_isNavigationActive &&
-                  !_isLostPetMapActive &&
-                  _activePropertyListingType != null)
-                Positioned(
-                  top: mapTopInset + 10,
-                  left: 16,
-                  right: 16,
-                  child: _buildPropertyMapToolbar(),
-                ),
-              if (_selectedIndex == 1 &&
-                  !_isNavigationActive &&
-                  !_isLostPetMapActive &&
-                  _activePropertyListingType == null)
-                Positioned(
-                  top: mapTopInset + 10,
-                  left: 16,
-                  right: 16,
-                  child: Column(
-                    mainAxisSize: MainAxisSize.min,
-                    children: [
-                      Container(
-                        padding: const EdgeInsets.all(4),
+            if (_selectedIndex == 1 &&
+                !_isNavigationActive &&
+                !_isLostPetMapActive &&
+                _activePropertyListingType != null)
+              Positioned(
+                top: mapTopInset + 10,
+                left: 16,
+                right: 16,
+                child: _buildPropertyMapToolbar(),
+              ),
+            if (_selectedIndex == 1 &&
+                !_isNavigationActive &&
+                !_isLostPetMapActive &&
+                _activePropertyListingType == null)
+              Positioned(
+                top: mapTopInset + 10,
+                left: 16,
+                right: 16,
+                child: Column(
+                  mainAxisSize: MainAxisSize.min,
+                  children: [
+                    Container(
+                      padding: const EdgeInsets.all(4),
+                      decoration: BoxDecoration(
+                        color: const Color(0xFF1F1F1F),
+                        borderRadius: BorderRadius.circular(28),
+                        border: Border.all(color: const Color(0xFFFF7A00)),
+                      ),
+                      child: Container(
+                        padding: const EdgeInsets.symmetric(horizontal: 10),
                         decoration: BoxDecoration(
                           color: const Color(0xFF1F1F1F),
-                          borderRadius: BorderRadius.circular(28),
-                          border: Border.all(color: const Color(0xFFFF7A00)),
+                          borderRadius: BorderRadius.circular(22),
                         ),
-                        child: Container(
-                          padding: const EdgeInsets.symmetric(horizontal: 10),
-                          decoration: BoxDecoration(
-                            color: const Color(0xFF1F1F1F),
-                            borderRadius: BorderRadius.circular(22),
-                          ),
-                          child: Row(
-                            children: [
-                              if (_isSearchMode ||
-                                  _searchController.text.isNotEmpty ||
-                                  _showSearchPanel)
-                                IconButton(
-                                  tooltip: 'Aramayı iptal et',
-                                  splashRadius: 18,
-                                  icon: const Icon(
-                                    Icons.arrow_back_rounded,
-                                    color: Colors.white70,
-                                  ),
-                                  onPressed: _cancelSearch,
-                                )
-                              else
-                                const Padding(
-                                  padding: EdgeInsets.all(9),
-                                  child: Icon(
-                                    Icons.search_rounded,
-                                    color: Color(0xFFFF7A00),
-                                  ),
+                        child: Row(
+                          children: [
+                            if (_isSearchMode ||
+                                _searchController.text.isNotEmpty ||
+                                _showSearchPanel)
+                              IconButton(
+                                tooltip: 'Aramayı iptal et',
+                                splashRadius: 18,
+                                icon: const Icon(
+                                  Icons.arrow_back_rounded,
+                                  color: Colors.white70,
                                 ),
-                              Expanded(
-                                child: TextField(
-                                  controller: _searchController,
-                                  focusNode: _searchFocusNode,
-                                  onTap: _openSearchPage,
-                                  textInputAction: TextInputAction.search,
-                                  onChanged: _handleSearchChanged,
-                                  onSubmitted: (_) =>
-                                      _searchPlace(showPanel: true),
-                                  style: const TextStyle(
+                                onPressed: _cancelSearch,
+                              )
+                            else
+                              const Padding(
+                                padding: EdgeInsets.all(9),
+                                child: Icon(
+                                  Icons.search_rounded,
+                                  color: Color(0xFFFF7A00),
+                                ),
+                              ),
+                            Expanded(
+                              child: TextField(
+                                controller: _searchController,
+                                focusNode: _searchFocusNode,
+                                onTap: _openSearchPage,
+                                textInputAction: TextInputAction.search,
+                                onChanged: _handleSearchChanged,
+                                onSubmitted: (_) =>
+                                    _searchPlace(showPanel: true),
+                                style: const TextStyle(
+                                  fontSize: 15,
+                                  color: Colors.white,
+                                  fontWeight: FontWeight.w600,
+                                ),
+                                decoration: InputDecoration(
+                                  hintText: 'Nereye gitmek istersin?',
+                                  filled: true,
+                                  fillColor: const Color(0xFF1F1F1F),
+                                  hintStyle: const TextStyle(
+                                    color: Color(0xFFBDBDBD),
                                     fontSize: 15,
-                                    color: Colors.white,
-                                    fontWeight: FontWeight.w600,
+                                    fontWeight: FontWeight.w500,
                                   ),
-                                  decoration: InputDecoration(
-                                    hintText: 'Nereye gitmek istersin?',
-                                    filled: true,
-                                    fillColor: const Color(0xFF1F1F1F),
-                                    hintStyle: const TextStyle(
-                                      color: Color(0xFFBDBDBD),
-                                      fontSize: 15,
-                                      fontWeight: FontWeight.w500,
-                                    ),
-                                    border: InputBorder.none,
-                                    enabledBorder: InputBorder.none,
-                                    focusedBorder: InputBorder.none,
-                                    contentPadding: const EdgeInsets.symmetric(
-                                      vertical: 14,
-                                    ),
+                                  border: InputBorder.none,
+                                  enabledBorder: InputBorder.none,
+                                  focusedBorder: InputBorder.none,
+                                  contentPadding: const EdgeInsets.symmetric(
+                                    vertical: 14,
                                   ),
                                 ),
                               ),
-                              if (_searchController.text.trim().isNotEmpty ||
-                                  _showSearchPanel ||
-                                  _isSearchMode)
-                                IconButton(
-                                  tooltip: 'Temizle',
-                                  splashRadius: 18,
-                                  icon: const Icon(
-                                    Icons.close_rounded,
-                                    color: Colors.white70,
-                                  ),
-                                  onPressed: _cancelSearch,
-                                )
-                              else
-                                Padding(
-                                  padding: const EdgeInsets.only(right: 4),
-                                  child: IconButton(
-                                    tooltip: _isListening
-                                        ? 'Sesli aramayı durdur'
-                                        : 'Sesli ara',
-                                    splashRadius: 18,
-                                    icon: Icon(
-                                      _isListening
-                                          ? Icons.mic_rounded
-                                          : Icons.mic_none_rounded,
-                                      color: _isListening
-                                          ? Colors.red
-                                          : const Color(0xFFFF7A00),
-                                    ),
-                                    onPressed: _toggleVoiceSearch,
-                                  ),
+                            ),
+                            if (_searchController.text.trim().isNotEmpty ||
+                                _showSearchPanel ||
+                                _isSearchMode)
+                              IconButton(
+                                tooltip: 'Temizle',
+                                splashRadius: 18,
+                                icon: const Icon(
+                                  Icons.close_rounded,
+                                  color: Colors.white70,
                                 ),
-                              if (_searchController.text.trim().isNotEmpty &&
-                                  !_isSearching)
-                                IconButton(
-                                  tooltip: 'Ara',
+                                onPressed: _cancelSearch,
+                              )
+                            else
+                              Padding(
+                                padding: const EdgeInsets.only(right: 4),
+                                child: IconButton(
+                                  tooltip: _isListening
+                                      ? 'Sesli aramayı durdur'
+                                      : 'Sesli ara',
                                   splashRadius: 18,
-                                  icon: const Icon(
-                                    Icons.search_rounded,
+                                  icon: Icon(
+                                    _isListening
+                                        ? Icons.mic_rounded
+                                        : Icons.mic_none_rounded,
+                                    color: _isListening
+                                        ? Colors.red
+                                        : const Color(0xFFFF7A00),
+                                  ),
+                                  onPressed: _toggleVoiceSearch,
+                                ),
+                              ),
+                            if (_searchController.text.trim().isNotEmpty &&
+                                !_isSearching)
+                              IconButton(
+                                tooltip: 'Ara',
+                                splashRadius: 18,
+                                icon: const Icon(
+                                  Icons.search_rounded,
+                                  color: Color(0xFFFF7A00),
+                                ),
+                                onPressed: _searchPlace,
+                              )
+                            else if (_isSearching)
+                              const Padding(
+                                padding: EdgeInsets.all(10),
+                                child: SizedBox(
+                                  width: 18,
+                                  height: 18,
+                                  child: CircularProgressIndicator(
+                                    strokeWidth: 2,
                                     color: Color(0xFFFF7A00),
                                   ),
-                                  onPressed: _searchPlace,
-                                )
-                              else if (_isSearching)
-                                const Padding(
-                                  padding: EdgeInsets.all(10),
-                                  child: SizedBox(
-                                    width: 18,
-                                    height: 18,
-                                    child: CircularProgressIndicator(
-                                      strokeWidth: 2,
-                                      color: Color(0xFFFF7A00),
-                                    ),
-                                  ),
-                                )
-                              else
-                                const SizedBox(width: 8),
+                                ),
+                              )
+                            else
+                              const SizedBox(width: 8),
+                          ],
+                        ),
+                      ),
+                    ),
+                    if (!_showSearchPanel && !_isSearchMode) ...[
+                      if (_routeSelectionTarget != null)
+                        _buildRouteSelectionPanel()
+                      else ...[
+                        const SizedBox(height: 10),
+                        SizedBox(
+                          height: 32,
+                          child: ListView(
+                            scrollDirection: Axis.horizontal,
+                            children: [
+                              _buildChip(
+                                Icons.alt_route_rounded,
+                                'Rota Oluştur',
+                                onTap: _startRoutePlanning,
+                              ),
+                              _buildChip(
+                                Icons.add_location_alt_rounded,
+                                'Mekân Ekle',
+                                onTap: () => unawaited(_createCommunityPlace()),
+                              ),
                             ],
                           ),
                         ),
+                      ],
+                    ],
+                  ],
+                ),
+              ),
+            if (isMapSearchPanelVisible)
+              Positioned(
+                left: 16,
+                right: 16,
+                bottom: bottomSafeInset + 14,
+                child: _buildSearchResultsPanel(),
+              ),
+            if (_selectedIndex == 1 && !isMapSearchPanelVisible)
+              Positioned(
+                right: 16,
+                bottom: bottomSafeInset + mapBottomControlsInset + 8,
+                child: Column(
+                  mainAxisSize: MainAxisSize.min,
+                  children: [
+                    FloatingActionButton.small(
+                      heroTag: 'map-north-reset',
+                      onPressed: _resetMapNorth,
+                      tooltip: 'Haritayı kuzeye döndür',
+                      backgroundColor: const Color(0xFF191919),
+                      foregroundColor: const Color(0xFFFF6B00),
+                      shape: const CircleBorder(),
+                      child: const Icon(Icons.explore_rounded),
+                    ),
+                    const SizedBox(height: 10),
+                    FloatingActionButton.small(
+                      heroTag: 'map-layers',
+                      onPressed: _showMapLayersSheet,
+                      tooltip: 'Harita katmanları',
+                      backgroundColor: const Color(0xFF191919),
+                      foregroundColor: const Color(0xFFFF6B00),
+                      shape: const CircleBorder(),
+                      child: const Icon(Icons.layers_rounded),
+                    ),
+                    const SizedBox(height: 10),
+                    if (_isNavigationActive) ...[
+                      FloatingActionButton.small(
+                        heroTag: 'navigation-compass',
+                        onPressed: () async {
+                          final position = _currentPosition;
+                          if (position == null) return;
+                          final nextTilted = !_isMapTilted;
+                          setState(() {
+                            _isMapTilted = nextTilted;
+                            _isFollowingCurrentPosition = true;
+                          });
+                          await _centerOnPosition(position);
+                        },
+                        tooltip: _isMapTilted
+                            ? 'Düz harita görünümü'
+                            : 'Eğimli harita görünümü',
+                        backgroundColor: const Color(0xFF191919),
+                        foregroundColor: const Color(0xFFFF6B00),
+                        shape: const CircleBorder(),
+                        child: Icon(
+                          _isMapTilted
+                              ? Icons.terrain_rounded
+                              : Icons.explore_rounded,
+                        ),
                       ),
-                      if (!_showSearchPanel && !_isSearchMode) ...[
-                        if (_routeSelectionTarget != null)
-                          _buildRouteSelectionPanel()
-                        else ...[
-                          const SizedBox(height: 10),
-                          SizedBox(
-                            height: 32,
-                            child: ListView(
-                              scrollDirection: Axis.horizontal,
-                              children: [
-                                _buildChip(
-                                  Icons.alt_route_rounded,
-                                  'Rota Oluştur',
-                                  onTap: _startRoutePlanning,
-                                ),
-                                _buildChip(
-                                  Icons.add_location_alt_rounded,
-                                  'Mekân Ekle',
-                                  onTap: () =>
-                                      unawaited(_createCommunityPlace()),
-                                ),
-                              ],
+                      const SizedBox(height: 10),
+                    ],
+                    if (!_isNavigationActive) ...[
+                      FloatingActionButton.small(
+                        heroTag: 'recenter-map',
+                        onPressed: _recenterMap,
+                        tooltip: 'Haritayı konumuma ortala',
+                        backgroundColor: const Color(0xFF191919),
+                        foregroundColor: const Color(0xFFFF6B00),
+                        shape: const CircleBorder(),
+                        child: Icon(
+                          _isFollowingCurrentPosition
+                              ? Icons.my_location_rounded
+                              : Icons.near_me_rounded,
+                        ),
+                      ),
+                    ],
+                  ],
+                ),
+              ),
+            if (_selectedIndex == 1 &&
+                _isNavigationActive &&
+                !isMapSearchPanelVisible)
+              Positioned(
+                left: 16,
+                bottom: bottomSafeInset + mapBottomControlsInset + 18,
+                child: FloatingActionButton.small(
+                  heroTag: 'recenter-map',
+                  onPressed: _recenterMap,
+                  tooltip: 'Haritayı konumuma ortala',
+                  backgroundColor: const Color(0xFF191919),
+                  foregroundColor: const Color(0xFFFF6B00),
+                  shape: const CircleBorder(),
+                  child: Icon(
+                    _isFollowingCurrentPosition
+                        ? Icons.my_location_rounded
+                        : Icons.near_me_rounded,
+                  ),
+                ),
+              ),
+            if (_selectedIndex == 1 &&
+                _isNavigationActive &&
+                !isMapSearchPanelVisible &&
+                _currentRoadName?.isNotEmpty == true)
+              Positioned(
+                left: 74,
+                right: 74,
+                bottom: bottomSafeInset + mapBottomControlsInset + 8,
+                child: IgnorePointer(
+                  child: Center(
+                    child: Container(
+                      constraints: const BoxConstraints(maxWidth: 240),
+                      padding: const EdgeInsets.symmetric(
+                        horizontal: 11,
+                        vertical: 8,
+                      ),
+                      decoration: BoxDecoration(
+                        color: const Color(0xE6191919),
+                        borderRadius: BorderRadius.circular(20),
+                        border: Border.all(color: const Color(0xFF3A3A3A)),
+                      ),
+                      child: Row(
+                        mainAxisSize: MainAxisSize.min,
+                        children: [
+                          const Icon(
+                            Icons.signpost_rounded,
+                            color: Color(0xFFFF9A3D),
+                            size: 16,
+                          ),
+                          const SizedBox(width: 6),
+                          Flexible(
+                            child: Text(
+                              _currentRoadName!,
+                              maxLines: 1,
+                              overflow: TextOverflow.ellipsis,
+                              style: const TextStyle(
+                                color: Colors.white,
+                                fontSize: 12,
+                                fontWeight: FontWeight.w600,
+                              ),
                             ),
                           ),
                         ],
-                      ],
-                    ],
+                      ),
+                    ),
                   ),
                 ),
-              if (isMapSearchPanelVisible)
-                Positioned(
-                  left: 16,
-                  right: 16,
-                  bottom: bottomSafeInset + 14,
-                  child: _buildSearchResultsPanel(),
+              ),
+            if (_selectedIndex == 1 && _isNavigationActive)
+              Positioned(
+                left: 16,
+                right: 16,
+                top: mapTopInset + 10,
+                child: _buildLiveNavigationCard(),
+              ),
+            if (_selectedIndex == 1 && !_isMapLoaded)
+              const Positioned.fill(
+                child: NavoraLoadingScreen(
+                  title: 'Harita hazırlanıyor',
+                  subtitle: 'Yakınındaki yollar yükleniyor.',
                 ),
-              if (_selectedIndex == 1 && !isMapSearchPanelVisible)
-                Positioned(
-                  right: 16,
-                  bottom: bottomSafeInset + mapBottomControlsInset + 8,
-                  child: Column(
-                    mainAxisSize: MainAxisSize.min,
-                    children: [
-                      FloatingActionButton.small(
-                        heroTag: 'map-north-reset',
-                        onPressed: _resetMapNorth,
-                        tooltip: 'Haritayı kuzeye döndür',
-                        backgroundColor: const Color(0xFF191919),
-                        foregroundColor: const Color(0xFFFF6B00),
-                        shape: const CircleBorder(),
-                        child: const Icon(Icons.explore_rounded),
-                      ),
-                      const SizedBox(height: 10),
-                      FloatingActionButton.small(
-                        heroTag: 'map-layers',
-                        onPressed: _showMapLayersSheet,
-                        tooltip: 'Harita katmanları',
-                        backgroundColor: const Color(0xFF191919),
-                        foregroundColor: const Color(0xFFFF6B00),
-                        shape: const CircleBorder(),
-                        child: const Icon(Icons.layers_rounded),
-                      ),
-                      const SizedBox(height: 10),
-                      if (_isNavigationActive) ...[
-                        FloatingActionButton.small(
-                          heroTag: 'navigation-compass',
-                          onPressed: () async {
-                            final position = _currentPosition;
-                            if (position == null) return;
-                            final nextTilted = !_isMapTilted;
-                            setState(() {
-                              _isMapTilted = nextTilted;
-                              _isFollowingCurrentPosition = true;
-                            });
-                            await _centerOnPosition(position);
-                          },
-                          tooltip: _isMapTilted
-                              ? 'Düz harita görünümü'
-                              : 'Eğimli harita görünümü',
-                          backgroundColor: const Color(0xFF191919),
-                          foregroundColor: const Color(0xFFFF6B00),
-                          shape: const CircleBorder(),
-                          child: Icon(
-                            _isMapTilted
-                                ? Icons.terrain_rounded
-                                : Icons.explore_rounded,
+              ),
+            if (!isMapSearchPanelVisible &&
+                _isNavigationActive &&
+                _selectedIndex == 1)
+              Positioned(
+                left: 12,
+                right: 12,
+                bottom: bottomSafeInset + 6,
+                child: Center(
+                  child: ConstrainedBox(
+                    constraints: const BoxConstraints(maxWidth: 440),
+                    child: _buildNavigationDock(),
+                  ),
+                ),
+              ),
+            if (!isMapSearchPanelVisible &&
+                (!_isNavigationActive || _selectedIndex != 1))
+              Positioned(
+                left: 12,
+                right: 12,
+                bottom: bottomSafeInset,
+                child: Center(
+                  child: ConstrainedBox(
+                    constraints: const BoxConstraints(maxWidth: 440),
+                    child: Container(
+                      height: _bottomNavigationBarHeight,
+                      padding: const EdgeInsets.all(5),
+                      decoration: BoxDecoration(
+                        color: const Color(0xF21A1A1A),
+                        borderRadius: BorderRadius.circular(36),
+                        border: Border.all(color: const Color(0xFF3A3A3A)),
+                        boxShadow: const [
+                          BoxShadow(
+                            color: Color(0x66000000),
+                            blurRadius: 20,
+                            offset: Offset(0, 7),
                           ),
-                        ),
-                        const SizedBox(height: 10),
-                      ],
-                      if (!_isNavigationActive) ...[
-                        FloatingActionButton.small(
-                          heroTag: 'recenter-map',
-                          onPressed: _recenterMap,
-                          tooltip: 'Haritayı konumuma ortala',
-                          backgroundColor: const Color(0xFF191919),
-                          foregroundColor: const Color(0xFFFF6B00),
-                          shape: const CircleBorder(),
-                          child: Icon(
-                            _isFollowingCurrentPosition
-                                ? Icons.my_location_rounded
-                                : Icons.near_me_rounded,
-                          ),
-                        ),
-                      ],
-                    ],
-                  ),
-                ),
-              if (_selectedIndex == 1 &&
-                  _isNavigationActive &&
-                  !isMapSearchPanelVisible)
-                Positioned(
-                  left: 16,
-                  bottom: bottomSafeInset + mapBottomControlsInset + 18,
-                  child: FloatingActionButton.small(
-                    heroTag: 'recenter-map',
-                    onPressed: _recenterMap,
-                    tooltip: 'Haritayı konumuma ortala',
-                    backgroundColor: const Color(0xFF191919),
-                    foregroundColor: const Color(0xFFFF6B00),
-                    shape: const CircleBorder(),
-                    child: Icon(
-                      _isFollowingCurrentPosition
-                          ? Icons.my_location_rounded
-                          : Icons.near_me_rounded,
-                    ),
-                  ),
-                ),
-              if (_selectedIndex == 1 &&
-                  _isNavigationActive &&
-                  !isMapSearchPanelVisible &&
-                  _currentRoadName?.isNotEmpty == true)
-                Positioned(
-                  left: 74,
-                  right: 74,
-                  bottom: bottomSafeInset + mapBottomControlsInset + 8,
-                  child: IgnorePointer(
-                    child: Center(
-                      child: Container(
-                        constraints: const BoxConstraints(maxWidth: 240),
-                        padding: const EdgeInsets.symmetric(
-                          horizontal: 11,
-                          vertical: 8,
-                        ),
-                        decoration: BoxDecoration(
-                          color: const Color(0xE6191919),
-                          borderRadius: BorderRadius.circular(20),
-                          border: Border.all(color: const Color(0xFF3A3A3A)),
-                        ),
-                        child: Row(
-                          mainAxisSize: MainAxisSize.min,
-                          children: [
-                            const Icon(
-                              Icons.signpost_rounded,
-                              color: Color(0xFFFF9A3D),
-                              size: 16,
-                            ),
-                            const SizedBox(width: 6),
-                            Flexible(
-                              child: Text(
-                                _currentRoadName!,
-                                maxLines: 1,
-                                overflow: TextOverflow.ellipsis,
-                                style: const TextStyle(
-                                  color: Colors.white,
-                                  fontSize: 12,
-                                  fontWeight: FontWeight.w600,
-                                ),
-                              ),
-                            ),
-                          ],
-                        ),
+                        ],
+                      ),
+                      child: Row(
+                        children: [
+                          _buildNavItem(Icons.explore, 'Keşfet', 0),
+                          _buildNavItem(Icons.map_rounded, 'Harita', 1),
+                          _buildNavItem(Icons.auto_awesome, 'Navora AI', 2),
+                          _buildNavItem(Icons.forum, 'Sohbet', 3),
+                          _buildNavItem(Icons.person, 'Profil', 4),
+                        ],
                       ),
                     ),
                   ),
                 ),
-              if (_selectedIndex == 1 && _isNavigationActive)
-                Positioned(
-                  left: 16,
-                  right: 16,
-                  top: mapTopInset + 10,
-                  child: _buildLiveNavigationCard(),
-                ),
-              if (_selectedIndex == 1 && !_isMapLoaded)
-                const Positioned.fill(
-                  child: NavoraLoadingScreen(
-                    title: 'Harita hazırlanıyor',
-                    subtitle: 'Yakınındaki yollar yükleniyor.',
-                  ),
-                ),
-              if (!isMapSearchPanelVisible &&
-                  _isNavigationActive &&
-                  _selectedIndex == 1)
-                Positioned(
-                  left: 12,
-                  right: 12,
-                  bottom: bottomSafeInset + 6,
-                  child: Center(
-                    child: ConstrainedBox(
-                      constraints: const BoxConstraints(maxWidth: 440),
-                      child: _buildNavigationDock(),
-                    ),
-                  ),
-                ),
-              if (!isMapSearchPanelVisible &&
-                  (!_isNavigationActive || _selectedIndex != 1))
-                Positioned(
-                  left: 12,
-                  right: 12,
-                  bottom: bottomSafeInset,
-                  child: Center(
-                    child: ConstrainedBox(
-                      constraints: const BoxConstraints(maxWidth: 440),
-                      child: Container(
-                        height: _bottomNavigationBarHeight,
-                        padding: const EdgeInsets.all(5),
-                        decoration: BoxDecoration(
-                          color: const Color(0xF21A1A1A),
-                          borderRadius: BorderRadius.circular(36),
-                          border: Border.all(color: const Color(0xFF3A3A3A)),
-                          boxShadow: const [
-                            BoxShadow(
-                              color: Color(0x66000000),
-                              blurRadius: 20,
-                              offset: Offset(0, 7),
-                            ),
-                          ],
-                        ),
-                        child: Row(
-                          children: [
-                            _buildNavItem(Icons.explore, 'Keşfet', 0),
-                            _buildNavItem(Icons.map_rounded, 'Harita', 1),
-                            _buildNavItem(Icons.auto_awesome, 'Navora AI', 2),
-                            _buildNavItem(Icons.forum, 'Sohbet', 3),
-                            _buildNavItem(Icons.person, 'Profil', 4),
-                          ],
-                        ),
-                      ),
-                    ),
-                  ),
-                ),
-            ],
-          ),
+              ),
+          ],
         ),
       ),
     );
@@ -7634,6 +8308,9 @@ out center tags;
   }
 
   Future<void> _showCommunityPlacesOnMap() async {
+    if (!_requireSignInForAction('Keşfedilmemiş mekânları görüntülemek')) {
+      return;
+    }
     final places = _visibleCommunityPlaces.where((place) {
       return place['latitude'] is num && place['longitude'] is num;
     }).toList();
@@ -12224,6 +12901,7 @@ out center tags;
   // --- MODAL PENCERELERİ ---
 
   void _showSavedAddressesDialog() {
+    if (!_requireSignInForAction('Kayıtlı adresleri görüntülemek')) return;
     var isSavingAddress = false;
     showModalBottomSheet(
       context: context,
@@ -13145,6 +13823,7 @@ out center tags;
   }
 
   void _startRoutePlanning() {
+    if (!_requireSignInForAction('Rota oluşturmak')) return;
     FocusManager.instance.primaryFocus?.unfocus();
     setState(() {
       _routeSelectionTarget = 'start';
@@ -13376,6 +14055,7 @@ out center tags;
   }
 
   Future<void> _showRouteCreatorSheet() async {
+    if (!_requireSignInForAction('Rota oluşturmak')) return;
     final initialStart = _routeDraftStart;
     final initialDestination = _routeDraftDestination;
     if (initialStart == null && initialDestination == null) {
@@ -14267,14 +14947,17 @@ out center tags;
       } catch (error) {
         debugPrint('Kayıtlı rota silinemedi: $error');
         if (mounted) {
-          _showTrackingMessage('Rota silinemedi. Lütfen tekrar deneyin.');
+          _showTrackingMessage(
+            'Rota silinemedi. Lütfen tekrar deneyin.',
+            keepAboveKeyboard: true,
+          );
         }
         return;
       }
     }
     if (!mounted) return;
     setState(() => _savedRoutes.remove(route));
-    _showTrackingMessage('Kayıtlı rota silindi.');
+    _showTrackingMessage('Kayıtlı rota silindi.', keepAboveKeyboard: true);
   }
 
   void _showSavedRoutesSheet() {
@@ -14285,127 +14968,135 @@ out center tags;
       shape: const RoundedRectangleBorder(
         borderRadius: BorderRadius.vertical(top: Radius.circular(24)),
       ),
-      builder: (context) => SizedBox(
-        height: MediaQuery.of(context).size.height * 0.6,
-        child: Padding(
-          padding: const EdgeInsets.all(20),
-          child: Column(
-            crossAxisAlignment: CrossAxisAlignment.start,
-            children: [
-              Row(
-                mainAxisAlignment: MainAxisAlignment.spaceBetween,
-                children: [
-                  const Text(
-                    'Kayıtlı Rotalar',
-                    style: TextStyle(fontSize: 20, fontWeight: FontWeight.bold),
-                  ),
-                  Row(
-                    children: [
-                      IconButton(
-                        tooltip: 'Rota keşfet',
-                        onPressed: () {
-                          Navigator.pop(context);
-                          WidgetsBinding.instance.addPostFrameCallback((_) {
-                            if (mounted) _showPublicRoutesSheet();
-                          });
-                        },
-                        icon: const Icon(Icons.explore_outlined),
+      builder: (context) => StatefulBuilder(
+        builder: (context, setSheetState) => SizedBox(
+          height: MediaQuery.of(context).size.height * 0.6,
+          child: Padding(
+            padding: const EdgeInsets.all(20),
+            child: Column(
+              crossAxisAlignment: CrossAxisAlignment.start,
+              children: [
+                Row(
+                  mainAxisAlignment: MainAxisAlignment.spaceBetween,
+                  children: [
+                    const Text(
+                      'Kayıtlı Rotalar',
+                      style: TextStyle(
+                        fontSize: 20,
+                        fontWeight: FontWeight.bold,
                       ),
-                      IconButton(
-                        tooltip: 'Yeni rota kaydet',
-                        onPressed: () async {
-                          Navigator.pop(context);
-                          await _showRouteCreatorSheet();
-                        },
-                        icon: const Icon(Icons.add_road),
-                      ),
-                      IconButton(
-                        onPressed: () => Navigator.pop(context),
-                        icon: const Icon(Icons.close),
-                      ),
-                    ],
-                  ),
-                ],
-              ),
-              const SizedBox(height: 8),
-              Expanded(
-                child: _savedRoutes.isEmpty
-                    ? Center(
-                        child: Text(
-                          'Henüz kayıtlı rota yok.',
-                          style: TextStyle(color: Colors.grey.shade600),
+                    ),
+                    Row(
+                      children: [
+                        IconButton(
+                          tooltip: 'Rota keşfet',
+                          onPressed: () {
+                            Navigator.pop(context);
+                            WidgetsBinding.instance.addPostFrameCallback((_) {
+                              if (mounted) _showPublicRoutesSheet();
+                            });
+                          },
+                          icon: const Icon(Icons.explore_outlined),
                         ),
-                      )
-                    : ListView.separated(
-                        itemCount: _savedRoutes.length,
-                        separatorBuilder: (_, _) => const SizedBox(height: 8),
-                        itemBuilder: (context, index) {
-                          final route = _savedRoutes[index];
-                          return ListTile(
-                            onTap: () async {
+                        if (FirebaseAuth.instance.currentUser != null)
+                          IconButton(
+                            tooltip: 'Yeni rota kaydet',
+                            onPressed: () async {
                               Navigator.pop(context);
-                              await _showSavedRouteOnMap(route);
+                              await _showRouteCreatorSheet();
                             },
-                            shape: RoundedRectangleBorder(
-                              borderRadius: BorderRadius.circular(14),
-                            ),
-                            tileColor: const Color(0xFF1B1B1B),
-                            leading: const CircleAvatar(
-                              backgroundColor: Color(0xFF2A180D),
-                              child: Icon(
-                                Icons.alt_route,
-                                color: Color(0xFFFF6B00),
+                            icon: const Icon(Icons.add_road),
+                          ),
+                        IconButton(
+                          onPressed: () => Navigator.pop(context),
+                          icon: const Icon(Icons.close),
+                        ),
+                      ],
+                    ),
+                  ],
+                ),
+                const SizedBox(height: 8),
+                Expanded(
+                  child: _savedRoutes.isEmpty
+                      ? Center(
+                          child: Text(
+                            'Henüz kayıtlı rota yok.',
+                            style: TextStyle(color: Colors.grey.shade600),
+                          ),
+                        )
+                      : ListView.separated(
+                          itemCount: _savedRoutes.length,
+                          separatorBuilder: (_, _) => const SizedBox(height: 8),
+                          itemBuilder: (context, index) {
+                            final route = _savedRoutes[index];
+                            return ListTile(
+                              onTap: () async {
+                                Navigator.pop(context);
+                                await _showSavedRouteOnMap(route);
+                              },
+                              shape: RoundedRectangleBorder(
+                                borderRadius: BorderRadius.circular(14),
                               ),
-                            ),
-                            title: Text(
-                              route['title']!,
-                              style: const TextStyle(
-                                fontWeight: FontWeight.bold,
+                              tileColor: const Color(0xFF1B1B1B),
+                              leading: const CircleAvatar(
+                                backgroundColor: Color(0xFF2A180D),
+                                child: Icon(
+                                  Icons.alt_route,
+                                  color: Color(0xFFFF6B00),
+                                ),
                               ),
-                            ),
-                            subtitle: Text(
-                              '${route['start']}  →  ${route['destination']} • ${route['distance_km'] ?? '?'} km • ${route['travel_mode'] ?? 'Araba'}',
-                            ),
-                            trailing: Row(
-                              mainAxisSize: MainAxisSize.min,
-                              children: [
-                                IconButton(
-                                  tooltip: 'Rotayı paylaş',
-                                  icon: const Icon(
-                                    Icons.share_rounded,
-                                    color: Color(0xFFFF9A3D),
-                                  ),
-                                  onPressed: () => _shareSavedRoute(route),
+                              title: Text(
+                                route['title']!,
+                                style: const TextStyle(
+                                  fontWeight: FontWeight.bold,
                                 ),
-                                IconButton(
-                                  tooltip: 'Rotayı başlat',
-                                  icon: const Icon(
-                                    Icons.navigation_rounded,
-                                    color: Color(0xFFFF6B00),
+                              ),
+                              subtitle: Text(
+                                '${route['start']}  →  ${route['destination']} • ${route['distance_km'] ?? '?'} km • ${route['travel_mode'] ?? 'Araba'}',
+                              ),
+                              trailing: Row(
+                                mainAxisSize: MainAxisSize.min,
+                                children: [
+                                  IconButton(
+                                    tooltip: 'Rotayı paylaş',
+                                    icon: const Icon(
+                                      Icons.share_rounded,
+                                      color: Color(0xFFFF9A3D),
+                                    ),
+                                    onPressed: () => _shareSavedRoute(route),
                                   ),
-                                  onPressed: () async {
-                                    Navigator.pop(context);
-                                    await _startSavedRoute(route);
-                                  },
-                                ),
-                                IconButton(
-                                  tooltip: 'Rotayı sil',
-                                  icon: const Icon(
-                                    Icons.delete_outline,
-                                    color: Colors.red,
+                                  IconButton(
+                                    tooltip: 'Rotayı başlat',
+                                    icon: const Icon(
+                                      Icons.navigation_rounded,
+                                      color: Color(0xFFFF6B00),
+                                    ),
+                                    onPressed: () async {
+                                      Navigator.pop(context);
+                                      await _startSavedRoute(route);
+                                    },
                                   ),
-                                  onPressed: () async {
-                                    await _deleteSavedRoute(route);
-                                    if (mounted) setState(() {});
-                                  },
-                                ),
-                              ],
-                            ),
-                          );
-                        },
-                      ),
-              ),
-            ],
+                                  IconButton(
+                                    tooltip: 'Rotayı sil',
+                                    icon: const Icon(
+                                      Icons.delete_outline,
+                                      color: Colors.red,
+                                    ),
+                                    onPressed: () async {
+                                      await _deleteSavedRoute(route);
+                                      if (context.mounted) {
+                                        setSheetState(() {});
+                                      }
+                                    },
+                                  ),
+                                ],
+                              ),
+                            );
+                          },
+                        ),
+                ),
+              ],
+            ),
           ),
         ),
       ),
@@ -15298,12 +15989,16 @@ out center tags;
     String message, {
     String? actionLabel,
     VoidCallback? onAction,
+    bool keepAboveKeyboard = false,
   }) {
     if (!mounted) return;
     AppNotificationService.show(
       message,
       actionLabel: actionLabel,
       onAction: onAction,
+      keyboardInset: keepAboveKeyboard
+          ? MediaQuery.viewInsetsOf(context).bottom
+          : 0,
     );
   }
 
@@ -16252,6 +16947,7 @@ out center tags;
   }
 
   Future<void> _sendAiMessage() async {
+    if (!_requireSignInForAction('Navora AI kullanmak')) return;
     if (_isAiResponding || _isClearingAiChats) return;
     final text = _aiController.text.trim();
     if (text.isEmpty) return;

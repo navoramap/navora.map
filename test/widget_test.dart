@@ -10,13 +10,23 @@ import 'package:firebase_core_platform_interface/test.dart'
     show CoreFirebaseOptions, CoreInitializeResponse, TestFirebaseCoreHostApi;
 import 'package:firebase_auth_platform_interface/firebase_auth_platform_interface.dart';
 import 'package:flutter/material.dart'
-    show MaterialApp, SnackBar, TargetPlatform, TextField;
+    show
+        EdgeInsets,
+        MaterialApp,
+        MediaQuery,
+        Scaffold,
+        SizedBox,
+        SnackBar,
+        TargetPlatform,
+        TextDirection,
+        TextField;
 import 'package:flutter/foundation.dart' show defaultTargetPlatform;
 import 'package:flutter_test/flutter_test.dart';
 import 'package:google_maps_flutter/google_maps_flutter.dart';
 
 import 'package:navora_map/firebase_options.dart';
 import 'package:navora_map/main.dart';
+import 'package:navora_map/services/app_notification_service.dart';
 import 'package:navora_map/views/home/home_page.dart';
 import 'package:navora_map/views/home/tabs/profile_page.dart';
 
@@ -43,6 +53,31 @@ void main() {
           ? findsOneWidget
           : findsNothing,
     );
+  });
+
+  testWidgets('keeps chat sign-in notification above the keyboard', (
+    WidgetTester tester,
+  ) async {
+    await tester.pumpWidget(
+      MaterialApp(
+        scaffoldMessengerKey: AppNotificationService.scaffoldMessengerKey,
+        builder: (context, child) => MediaQuery(
+          data: MediaQuery.of(context)
+              .copyWith(viewInsets: const EdgeInsets.only(bottom: 280)),
+          child: child!,
+        ),
+        home: const Scaffold(body: SizedBox()),
+      ),
+    );
+
+    AppNotificationService.show(
+      'Sohbete katılmak için giriş yapmalısınız.',
+      keyboardInset: 280,
+    );
+    await tester.pump();
+
+    final snackBar = tester.widget<SnackBar>(find.byType(SnackBar));
+    expect(snackBar.margin?.resolve(TextDirection.ltr).bottom, 392);
   });
 
   testWidgets('validates empty authentication fields', (

@@ -7,6 +7,8 @@ const {
   getFirestore,
 } = require('firebase-admin/firestore');
 const { getStorage } = require('firebase-admin/storage');
+const { logger } = require('firebase-functions');
+const { defineSecret } = require('firebase-functions/params');
 const { HttpsError, onCall } = require('firebase-functions/v2/https');
 const { onDocumentCreated } = require('firebase-functions/v2/firestore');
 const { onSchedule } = require('firebase-functions/v2/scheduler');
@@ -30,9 +32,11 @@ const {
   CHAT_USER_MUTE_MS,
   checkChatMessagePolicy,
 } = require('./chat_moderation_policy');
+const { buildGoogleMapsRequest } = require('./google_maps_proxy');
 
 const storageBucket = process.env.FIREBASE_STORAGE_BUCKET
   || 'navoramapa.firebasestorage.app';
+const googleMapsServerApiKey = defineSecret('GOOGLE_MAPS_SERVER_API_KEY');
 
 initializeApp({ storageBucket });
 setGlobalOptions({
@@ -378,14 +382,22 @@ exports.reviewContentReport = onCall(
           property_listing: 'property_listings',
           lost_pet: 'lost_pet_reports',
           community_place: 'community_places',
+          community_place_review: 'community_places',
         };
         const collectionName = collectionByType[report.content_type];
+        const isReviewReport = report.content_type === 'community_place_review';
         if (
           !collectionName ||
           typeof report.content_id !== 'string' ||
           !/^[A-Za-z0-9_-]{1,128}$/.test(report.content_id) ||
           typeof report.content_owner_uid !== 'string' ||
-          report.content_owner_uid.length === 0
+          report.content_owner_uid.length === 0 ||
+          (isReviewReport &&
+            (typeof report.parent_content_id !== 'string' ||
+              !/^[A-Za-z0-9_-]{1,128}$/.test(report.parent_content_id) ||
+              !Number.isInteger(report.content_rating) ||
+              report.content_rating < 1 ||
+              report.content_rating > 5))
         ) {
           throw new HttpsError(
               'failed-precondition',
@@ -393,11 +405,27 @@ exports.reviewContentReport = onCall(
           );
         }
 
-        targetReference = db.collection(collectionName).doc(report.content_id);
+        const parentReference = isReviewReport
+          ? db.collection('community_places').doc(report.parent_content_id)
+          : null;
+        targetReference = isReviewReport
+          ? parentReference.collection('reviews').doc(report.content_id)
+          : db.collection(collectionName).doc(report.content_id);
         const targetSnapshot = await transaction.get(targetReference);
+        const parentSnapshot = parentReference
+          ? await transaction.get(parentReference)
+          : null;
+        const targetData = targetSnapshot.data();
         if (
           !targetSnapshot.exists ||
-          targetSnapshot.data().owner_uid !== report.content_owner_uid
+          (isReviewReport
+            ? !parentSnapshot.exists ||
+              targetData.uid !== report.content_owner_uid ||
+              (action === 'delete' &&
+                (parentSnapshot.data().name !== report.content_title ||
+                  targetData.rating !== report.content_rating ||
+                  targetData.comment !== report.content_description))
+            : targetData.owner_uid !== report.content_owner_uid)
         ) {
           throw new HttpsError(
               'not-found',
@@ -405,8 +433,9 @@ exports.reviewContentReport = onCall(
           );
         }
 
-        storagePrefix =
-          `${collectionName}/${report.content_owner_uid}/${report.content_id}/`;
+        storagePrefix = isReviewReport
+          ? null
+          : `${collectionName}/${report.content_owner_uid}/${report.content_id}/`;
         if (action === 'delete') transaction.delete(targetReference);
         transaction.update(reportReference, {
           status: action === 'dismiss' ? 'dismissed' : 'resolved',
@@ -429,13 +458,15 @@ exports.reviewContentReport = onCall(
 
       if (action === 'delete' && targetReference) {
         await db.recursiveDelete(targetReference);
-        try {
-          await getStorage().bucket().deleteFiles({
-            prefix: storagePrefix,
-          });
-        } catch (error) {
-          console.error('Reported content storage cleanup failed:', error);
-          return { completed: true, storageCleanupFailed: true };
+        if (storagePrefix) {
+          try {
+            await getStorage().bucket().deleteFiles({
+              prefix: storagePrefix,
+            });
+          } catch (error) {
+            console.error('Reported content storage cleanup failed:', error);
+            return { completed: true, storageCleanupFailed: true };
+          }
         }
       }
 
@@ -511,7 +542,7 @@ function quotaResult(usage, date) {
 }
 
 exports.joinChatRoom = onCall(
-    PUBLIC_CALLABLE_OPTIONS,
+    { ...PUBLIC_CALLABLE_OPTIONS, enforceAppCheck: true },
     async (request) => {
       const uid = requireUser(request);
       const { roomId, passwordHash = '' } = request.data ?? {};
@@ -663,6 +694,83 @@ exports.joinChatRoom = onCall(
           'permission-denied',
           'Şifre hatalı veya bu odaya giriş yapılamıyor.',
       );
+    },
+);
+
+exports.proxyGoogleMaps = onCall(
+    {
+      ...PUBLIC_CALLABLE_OPTIONS,
+      enforceAppCheck: true,
+      maxInstances: 5,
+      secrets: [googleMapsServerApiKey],
+      timeoutSeconds: 30,
+    },
+    async (request) => {
+      const mapsRequest = buildGoogleMapsRequest(request.data);
+      const apiKey = googleMapsServerApiKey.value();
+      if (!apiKey) {
+        throw new HttpsError(
+            'failed-precondition',
+            'Harita servisi henüz yapılandırılmamış.',
+        );
+      }
+
+      let response;
+      try {
+        response = await fetch(mapsRequest.url, {
+          method: mapsRequest.method,
+          headers: {
+            'X-Goog-Api-Key': apiKey,
+            'X-Goog-FieldMask': mapsRequest.fieldMask,
+            ...(mapsRequest.body ? { 'Content-Type': 'application/json' } : {}),
+          },
+          ...(mapsRequest.body
+            ? { body: JSON.stringify(mapsRequest.body) }
+            : {}),
+          signal: AbortSignal.timeout(20000),
+        });
+      } catch (error) {
+        logger.error('Google Maps proxy request failed.', {
+          operation: mapsRequest.operation,
+          error: error instanceof Error ? error.message : String(error),
+        });
+        throw new HttpsError(
+            'unavailable',
+            'Harita servisine şu anda ulaşılamıyor.',
+        );
+      }
+
+      if (!response.ok) {
+        logger.error('Google Maps proxy returned a non-success status.', {
+          operation: mapsRequest.operation,
+          status: response.status,
+        });
+        throw new HttpsError(
+            'unavailable',
+            'Harita servisi isteği tamamlayamadı.',
+        );
+      }
+
+      let result;
+      try {
+        result = await response.json();
+      } catch (error) {
+        logger.error('Google Maps proxy returned invalid JSON.', {
+          operation: mapsRequest.operation,
+          error: error instanceof Error ? error.message : String(error),
+        });
+        throw new HttpsError(
+            'internal',
+            'Harita servisinden geçersiz yanıt alındı.',
+        );
+      }
+      if (!result || typeof result !== 'object' || Array.isArray(result)) {
+        throw new HttpsError(
+            'internal',
+            'Harita servisinden geçersiz yanıt alındı.',
+        );
+      }
+      return result;
     },
 );
 

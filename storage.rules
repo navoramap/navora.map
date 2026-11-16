@@ -41,7 +41,7 @@ service firebase.storage {
       allow read: if request.auth != null
           && photoIndex.matches('^[0-4]$')
           && ((request.auth.uid == uid && ownsPendingListing())
-              || (request.auth.token.admin == true
+              || (request.auth.token.get('admin', false) == true
                   && firestore.exists(listingPath())
                   && firestore.get(listingPath()).data.status == 'pending_review')
               || activeListingExists());

@@ -116,7 +116,7 @@ class NavoraMapApp extends StatelessWidget {
         );
 
     return MaterialApp(
-      navigatorKey: AppNotificationService.navigatorKey,
+      scaffoldMessengerKey: AppNotificationService.scaffoldMessengerKey,
       debugShowCheckedModeBanner: false,
       title: 'Navora Map',
       locale: const Locale('tr', 'TR'),
@@ -428,17 +428,6 @@ class NavoraMapApp extends StatelessWidget {
             borderRadius: BorderRadius.circular(16),
             side: const BorderSide(color: outline),
           ),
-        ),
-      ),
-      builder: (context, child) => GestureDetector(
-        behavior: HitTestBehavior.translucent,
-        onTap: () => FocusManager.instance.primaryFocus?.unfocus(),
-        child: Stack(
-          fit: StackFit.expand,
-          children: [
-            ?child,
-            const Positioned.fill(child: AppNotificationLayer()),
-          ],
         ),
       ),
       home: const MainWrapper(),
