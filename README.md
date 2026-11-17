@@ -15,6 +15,18 @@ flutter run
 
 The app uses the Firebase project configured in `lib/firebase_options.dart` and the Android/iOS platform configuration files. Native Maps SDK keys should be restricted to the app identity and the corresponding Maps SDK. Places and Routes REST calls use the App Check-enforced `proxyGoogleMaps` callable and a server-side key stored in Firebase Secret Manager. Before deploying the callable, set `GOOGLE_MAPS_SERVER_API_KEY` with `firebase functions:secrets:set GOOGLE_MAPS_SERVER_API_KEY`; restrict that key to Places API (New) and Routes API and configure suitable quotas and billing alerts. Do not pass this server key through Dart defines or commit it to source control.
 
+### Maps SDK keys
+
+Keep the Android and iOS Maps SDK keys out of Git. For local builds, set
+`googleMapsAndroidApiKey` in the ignored `android/local.properties` file and
+`GOOGLE_MAPS_IOS_API_KEY` in the ignored `ios/Flutter/Local.xcconfig` file.
+Restrict each key to its platform app identity and Maps SDK.
+
+For Codemagic iOS builds, add `GOOGLE_MAPS_IOS_API_KEY` as a secure environment
+variable and use a post-clone script to write it to
+`ios/Flutter/Local.xcconfig` before building. Do not add the Places/Routes
+server key to Codemagic or the mobile app; keep it in Firebase Secret Manager.
+
 ## Tests
 
 ```powershell

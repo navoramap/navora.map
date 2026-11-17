@@ -22,6 +22,16 @@ if (flutterRoot == null) {
     throw GradleException("Flutter SDK not found. Define location with flutter.sdk in the local.properties file.")
 }
 
+val googleMapsAndroidApiKey =
+    (
+        localProperties.getProperty("googleMapsAndroidApiKey")
+            ?: providers.gradleProperty("googleMapsAndroidApiKey").orNull
+    )?.trim()
+        ?.takeIf { it.isNotEmpty() }
+        ?: throw GradleException(
+            "Google Maps Android API key not found. Add googleMapsAndroidApiKey to android/local.properties."
+        )
+
 val keystorePropertiesFile = rootProject.file("key.properties")
 val keystoreProperties = Properties()
 if (keystorePropertiesFile.exists()) {
@@ -55,6 +65,7 @@ android {
         targetSdk = flutter.targetSdkVersion
         versionCode = flutter.versionCode
         versionName = flutter.versionName
+        manifestPlaceholders["googleMapsAndroidApiKey"] = googleMapsAndroidApiKey
     }
 
     buildTypes {

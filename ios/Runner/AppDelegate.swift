@@ -8,7 +8,16 @@ import UIKit
     _ application: UIApplication,
     didFinishLaunchingWithOptions launchOptions: [UIApplication.LaunchOptionsKey: Any]?
   ) -> Bool {
-    GMSServices.provideAPIKey("AIzaSyDvZADgjOCq0v3NvbG4X0iLv9WfSckbB_w")
+    guard
+      let mapsApiKey = Bundle.main.object(forInfoDictionaryKey: "GMSApiKey") as? String,
+      !mapsApiKey.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty,
+      !mapsApiKey.contains("$(")
+    else {
+      fatalError(
+        "Set GOOGLE_MAPS_IOS_API_KEY in ios/Flutter/Local.xcconfig."
+      )
+    }
+    GMSServices.provideAPIKey(mapsApiKey)
     return super.application(application, didFinishLaunchingWithOptions: launchOptions)
   }
 
